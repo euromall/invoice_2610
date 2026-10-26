@@ -1,0 +1,185 @@
+"""Program folder, settings file and the 작업시작 job, shared by the window and the command line."""
+import configparser
+import datetime as dt
+import glob
+import os
+import shutil
+from dataclasses import dataclass
+from typing import Callable, List, Optional
+
+from . import db
+from .engine import Settings, build_run, MODE_PROFORMA, MODE_BILL, CARRIER_POST, CARRIER_CJ
+from .generate import Paths, generate, run_folder, offline_english_address
+from .refdata import RefData
+from .shipping import read_shipping
+
+INI_NAME = 'InvoiceAuto.ini'
+ADDRESS_OFFLINE = 'offline'
+ADDRESS_API = 'api'
+
+# checkbox keys in the ini, same names as the old program's ini
+FLAGS = ['chkAutoInvoiceNo', 'chkSavePdf', 'chkApplyAccounting', 'chkMakePerosonInvoice', 'chkMakeExportSum',
+         'chkMakeShoppingMerge']
+
+
+@dataclass
+class Folder:
+    """The program folder: same layout as the old program (Base, db, ShippingInvoice, Result)."""
+    root: str
+
+    @property
+    def base(self):
+        return os.path.join(self.root, 'Base')
+
+    @property
+    def db(self):
+        return os.path.join(self.root, 'db', 'euromall.db')
+
+    @property
+    def shipping(self):
+        return os.path.join(self.root, 'ShippingInvoice')
+
+    @property
+    def result(self):
+        return os.path.join(self.root, 'Result')
+
+    @property
+    def ini(self):
+        return os.path.join(self.root, INI_NAME)
+
+    def shipping_files(self) -> List[str]:
+        files = [f for f in glob.glob(os.path.join(self.shipping, '*.xlsx')) if not os.path.basename(f).startswith('~$')]
+        return sorted(files, key=os.path.getmtime, reverse=True)
+
+
+@dataclass
+class Options:
+    mode: str = MODE_PROFORMA
+    carrier: str = CARRIER_CJ
+    auto_hawb: bool = True
+    save_pdf: bool = True
+    apply_accounting: bool = True
+    make_person_invoice: bool = False
+    make_export_per_company: bool = False
+    make_cargo_weight_merge: bool = True
+    address_mode: str = ADDRESS_OFFLINE
+    address_api_key: str = ''
+
+    def settings(self, work_date: dt.date) -> Settings:
+        return Settings(work_date=work_date, mode=self.mode, carrier=self.carrier, auto_hawb=self.auto_hawb,
+                        save_pdf=self.save_pdf, apply_accounting=self.apply_accounting,
+                        make_person_invoice=self.make_person_invoice,
+                        make_export_per_company=self.make_export_per_company,
+                        make_cargo_weight_merge=self.make_cargo_weight_merge)
+
+
+def load_options(path, mode=None) -> Options:
+    """Reads the [Proforma] or [Bill] section, like the old program's 설정불러오기."""
+    cp = configparser.ConfigParser()
+    cp.optionxform = str
+    cp.read(path, encoding='utf-8')
+    general = cp['General'] if cp.has_section('General') else {}
+    mode = mode or general.get('mode', MODE_PROFORMA)
+    sec = cp['Proforma' if mode == MODE_PROFORMA else 'Bill'] if cp.has_section(
+        'Proforma' if mode == MODE_PROFORMA else 'Bill') else {}
+    flag = lambda k, d: str(sec.get(k, '1' if d else '0')) == '1'
+    o = Options(mode=mode)
+    o.auto_hawb = flag('chkAutoInvoiceNo', True)
+    o.save_pdf = flag('chkSavePdf', True)
+    o.apply_accounting = flag('chkApplyAccounting', True)
+    o.make_person_invoice = flag('chkMakePerosonInvoice', mode == MODE_BILL)
+    o.make_export_per_company = flag('chkMakeExportSum', False)
+    o.make_cargo_weight_merge = flag('chkMakeShoppingMerge', True)
+    o.carrier = CARRIER_POST if str(sec.get('rdbPostOffice', '0')) == '1' else CARRIER_CJ
+    o.address_mode = general.get('address_mode', ADDRESS_OFFLINE)
+    o.address_api_key = general.get('address_api_key', '')
+    return o
+
+
+def save_options(path, o: Options):
+    cp = configparser.ConfigParser()
+    cp.optionxform = str
+    cp.read(path, encoding='utf-8')
+    name = 'Proforma' if o.mode == MODE_PROFORMA else 'Bill'
+    if not cp.has_section(name):
+        cp.add_section(name)
+    b = lambda v: '1' if v else '0'
+    cp[name].update({
+        'chkAutoInvoiceNo': b(o.auto_hawb), 'chkSavePdf': b(o.save_pdf), 'chkApplyAccounting': b(o.apply_accounting),
+        'chkMakePerosonInvoice': b(o.make_person_invoice), 'chkMakeExportSum': b(o.make_export_per_company),
+        'chkMakeShoppingMerge': b(o.make_cargo_weight_merge),
+        'rdbProforma': b(o.mode == MODE_PROFORMA), 'rdbBill': b(o.mode == MODE_BILL),
+        'rdbPostOffice': b(o.carrier == CARRIER_POST), 'rdbCjLogistics': b(o.carrier == CARRIER_CJ),
+    })
+    if not cp.has_section('General'):
+        cp.add_section('General')
+    cp['General'].update({'mode': o.mode, 'address_mode': o.address_mode, 'address_api_key': o.address_api_key})
+    with open(path, 'w', encoding='utf-8') as f:
+        cp.write(f)
+
+
+def english_address_function(o: Options, log: Callable[[str], None]):
+    if o.address_mode == ADDRESS_API and o.address_api_key:
+        from .address_api import JusoClient
+        client = JusoClient(o.address_api_key)
+
+        def lookup(shipment):
+            try:
+                found = client.english_address(shipment)
+                if found:
+                    return found
+            except Exception as e:
+                log(f'  영문주소 API 실패, 프로그램 내 변환 사용: {e}')
+            return offline_english_address(shipment)
+        return lookup
+    return offline_english_address
+
+
+def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
+            log: Callable[[str], None] = print, person_only: bool = False):
+    """작업시작: reads the shipping file, writes the result folder, then the account book and stock."""
+    log(f'입력 파일: {os.path.basename(shipping_file)}')
+    ref = RefData.load(os.path.join(folder.base, 'Base.xlsx'))
+    log(f'Base.xlsx: 거래처 {len(ref.companies)}곳, 상품 {len(ref.items)}개')
+    lines = read_shipping(shipping_file)
+    settings = o.settings(work_date)
+    if person_only:
+        settings.make_person_invoice = True
+    run = build_run(lines, ref, settings)
+    log(f'주문 {len(run.shipments)}건, 상품 줄 {len(lines)}개, 거래처 {len(run.invoices)}곳')
+    for w in run.warnings:
+        log('  주의: ' + w)
+
+    paths = Paths(base_dir=folder.base, result_dir=folder.result)
+    if person_only:
+        from .outputs import invoices
+        out_dir = run_folder(run, paths)
+        os.makedirs(out_dir, exist_ok=True)
+        addr = english_address_function(o, log)
+        for sh in run.shipments:
+            if sh.company.is_delivery_only:
+                continue
+            wb = invoices.person_invoice(run, sh, paths.template('PersonInvoice'), addr(sh))
+            wb.save(os.path.join(out_dir, invoices.person_invoice_filename(sh) + '.xlsx'))
+        log(f'개인 인보이스 저장: {out_dir}')
+        return run, out_dir
+
+    outputs = generate(run, paths, english_address=english_address_function(o, log))
+    out_dir = run_folder(run, paths)
+    log(f'결과 파일 {len(outputs)}개 저장: {out_dir}')
+    for w in run.warnings:
+        if w.startswith('PDF'):
+            log('  주의: ' + w)
+
+    if o.apply_accounting:
+        b = db.backup(folder.db)
+        db.record_run(folder.db, run)
+        log(f'회계·재고 반영 완료 (DB 백업: {os.path.basename(b)})')
+        for inv in run.invoices:
+            log(f'  {inv.invoice_no}: {inv.total:.2f} EUR')
+        log(f'  {run.export_invoice_no}: {sum(i.total for i in run.invoices):.2f} EUR')
+
+    backup_dir = os.path.join(os.path.dirname(shipping_file), 'backup')
+    os.makedirs(backup_dir, exist_ok=True)
+    shutil.copy2(shipping_file, backup_dir)
+    return run, out_dir
