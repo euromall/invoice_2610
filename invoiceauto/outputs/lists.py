@@ -4,7 +4,7 @@ import datetime as dt
 
 import openpyxl
 
-from ..engine import Run, Shipment, ItemLine
+from ..engine import Run, Shipment, ItemLine, MODE_PROFORMA
 from ..names import romanize_name
 from ..shipping import (C_NO, C_HAWB, C_BOX_CODE, C_WIDTH, C_DEPTH, C_HEIGHT, C_WEIGHT, C_BOXES,
                         C_CUSTOMS_DESIGNATION, C_CONTRACT_NO, C_BRAND, C_UNIT_PRICE, C_QTY, C_HS,
@@ -58,13 +58,17 @@ def _value(v, raw):
     return v
 
 
+def is_food(company, item) -> bool:
+    """Lines the old program reports as imported food: the company has a 영업등록번호 and the item a 식품종류 (0 counts)."""
+    return bool(company.report_br_number) and item is not None and item.food_type != ''
+
+
 def cargo_rows(run: Run):
     """One 78-column row per line, in tracking-number order."""
     rows = []
     seq = 0
     for s in run.shipments:
         c = s.company
-        report = bool(c.report_br_number)
         for i, l in enumerate(s.lines):
             seq += 1
             raw = list(l.line.raw)
@@ -80,18 +84,18 @@ def cargo_rows(run: Run):
             else:
                 out[C_WIDTH] = out[C_DEPTH] = out[C_HEIGHT] = 0
                 out[C_BOXES] = 0
-                out[C_POST_INVOICE] = None
+                # the old program repeats the tracking number on later lines of a bill, not of a quote
+                out[C_POST_INVOICE] = None if run.settings.mode == MODE_PROFORMA else str(s.hawb)
             if item:
                 out[C_CUSTOMS_DESIGNATION] = item.barcode or None
                 out[C_CONTRACT_NO] = item.url or None
                 out[C_BRAND] = item.brand or out[C_BRAND]
                 out[C_HS] = item.singo_hs_code or out[C_HS]
             out[C_UNIT_PRICE] = clean_number(l.declared_price)
-            if report and item:
+            if is_food(c, item):
                 out[C_FOOD_TYPE] = item.food_type
                 out[C_MANUFACTURER] = item.manufacturer or out[C_MANUFACTURER]
                 out[C_ORIGIN] = item.origin_country or out[C_ORIGIN]
-            if report:
                 out[43:49] = [c.report_br_number, c.report_company_name, c.report_ceo_name,
                               c.report_phone_number, c.report_address, c.report_url]
             out[59:66] = [c.type_code or None, c.abroad_seller_mark or None, c.abroad_seller_company_name or None,
@@ -201,7 +205,7 @@ def invoice_upload(run: Run, template_path):
 
 
 def food_declaration(run: Run, template_path):
-    """수입식품신고: one row per line of companies that have a 영업등록번호."""
+    """수입식품신고: one row per food line (see is_food)."""
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
     r = 3
@@ -213,6 +217,8 @@ def food_declaration(run: Run, template_path):
         ln = s.first
         for l in s.lines:
             item = l.item
+            if not is_food(c, item):
+                continue
             nr += 1
             vals = [nr, 'B', None, None, None, None, s.hawb, s.order_no, ln.recv_name,
                     text(ln.get(C_CUSTOMS_NO)) or None, text(ln.get(C_MOBILE)) or text(ln.get(C_TEL)) or None,

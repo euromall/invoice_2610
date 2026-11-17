@@ -67,6 +67,15 @@ class Item:
     origin_country: str
 
 
+def _food_type(v) -> str:
+    """식품종류 code; '0.00' written as text in Base.xlsx is the code 0."""
+    t = text(v).strip()
+    try:
+        return text(float(t)) if t else ''
+    except ValueError:
+        return t
+
+
 class RefData:
     def __init__(self, companies, items):
         self.companies = companies
@@ -126,7 +135,7 @@ class RefData:
                 name=name, weight=num(r[3]), unit_price=num(r[4]), item_code=text(r[5]), barcode=text(r[6]),
                 brand=text(r[7]), price=num(r[10]), remark=text(r[11]), url=text(r[12]),
                 singo_unit_price=num(r[13]), singo_hs_code=text(r[14]), export_hs_code=text(r[15]),
-                food_type=text(r[16]), manufacturer=text(r[17]), origin_country=text(r[18]),
+                food_type=_food_type(r[16]), manufacturer=text(r[17]), origin_country=text(r[18]),
             )
         wb.close()
         return cls(companies, items)
