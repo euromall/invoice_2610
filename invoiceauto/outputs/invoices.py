@@ -143,6 +143,10 @@ def export_invoice(run: Run, template_path, company_invoice: CompanyInvoice = No
         rows.extend((s, l) for s in sorted(inv.shipments, key=lambda s: s.order_no) for l in s.lines)
     first, last = _fill_item_table(ws, rows)
 
+    if company_invoice:                     # the old program left the importer table empty here
+        _set_sums(ws, first, last, first)
+        return wb
+
     # importer table: one row per company with its invoice number and total
     imp = find_row(ws, 1, 'Importer') + 1
     insert_rows(ws, imp, max(0, len(invs) - 1))

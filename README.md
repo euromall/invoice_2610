@@ -10,7 +10,8 @@
   db/euromall.db         회계·재고 DB (작업 전 db/backup/ 에 자동 백업)
   ShippingInvoice/       입력 엑셀 (작업 후 backup/ 에 복사)
   Result/Profoma_YYMMDD  견적서용 결과
-  Result/Bill_YYMMDD     청구서용 결과
+  Result/Invoice_YYMMDD  청구서용 결과
+  Result/Person_YYMMDD   개인 인보이스 (엑셀 + PDF)
 ```
 
 ## exe 만들기 (Windows)

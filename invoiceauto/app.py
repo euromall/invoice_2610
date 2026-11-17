@@ -9,7 +9,8 @@ from typing import Callable, List, Optional
 
 from . import db
 from .engine import Settings, build_run, MODE_PROFORMA, MODE_BILL, CARRIER_POST, CARRIER_CJ
-from .generate import Paths, generate, run_folder, offline_english_address
+from .generate import (Paths, generate, run_folder, person_folder, offline_english_address, save_pdfs,
+                       write_person_invoices)
 from .refdata import RefData
 from .shipping import read_shipping
 
@@ -193,19 +194,19 @@ def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
     paths = Paths(base_dir=folder.base, result_dir=folder.result)
     person = [sh for sh in person_candidates(run) if person_orders is None or sh.order_no in person_orders]
     if person_only:
-        from .outputs import invoices
-        out_dir = run_folder(run, paths)
-        os.makedirs(out_dir, exist_ok=True)
-        addr = english_address_function(o, log)
-        for sh in person:
-            wb = invoices.person_invoice(run, sh, paths.template('PersonInvoice'), addr(sh))
-            wb.save(os.path.join(out_dir, invoices.person_invoice_filename(sh) + '.xlsx'))
+        out_dir = person_folder(run, paths)
+        outputs = write_person_invoices(run, paths, person, english_address_function(o, log))
+        if o.save_pdf:
+            try:
+                save_pdfs(outputs, 'Profoma_')
+            except Exception as e:
+                log(f'  주의: PDF 저장 실패: {e}')
         log(f'개인 인보이스 {len(person)}건 저장: {out_dir}')
         return run, out_dir
 
     outputs = generate(run, paths, english_address=english_address_function(o, log), person_shipments=person)
     if settings.make_person_invoice:
-        log(f'개인 인보이스 {len(person)}건')
+        log(f'개인 인보이스 {len(person)}건 저장: {person_folder(run, paths)}')
     out_dir = run_folder(run, paths)
     log(f'결과 파일 {len(outputs)}개 저장: {out_dir}')
     for w in run.warnings:
