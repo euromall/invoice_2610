@@ -64,6 +64,11 @@ def generate(run: Run, paths: Paths, english_address: Optional[Callable[[str], s
         save(invoices.export_invoice(run, paths.template('ExportInvoiceSum')),
              invoices.export_invoice_filename(run), pdf=True)
 
+    if s.make_export_per_company:
+        for inv in run.export_invoices:
+            save(invoices.export_invoice(run, paths.template('ExportInvoice'), inv),
+                 invoices.company_export_invoice_filename(run, inv), pdf=True)
+
     if s.make_person_invoice:
         targets = person_shipments if person_shipments is not None else [
             sh for sh in run.shipments if not sh.company.is_delivery_only]

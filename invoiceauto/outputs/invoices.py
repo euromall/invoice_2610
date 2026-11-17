@@ -117,16 +117,25 @@ def person_invoice(run: Run, s: Shipment, template_path, english_address: str):
     return wb
 
 
-def export_invoice(run: Run, template_path):
-    """EMG commercial invoice: every non-delivery-only company, a blank row between companies."""
+def export_invoice(run: Run, template_path, company_invoice: CompanyInvoice = None):
+    """EMG commercial invoice: every non-delivery-only company, a blank row between companies.
+
+    With company_invoice: the per-company export invoice (ExportInvoice.xlsx), that company only, with the
+    company as consignee and its own invoice number.
+    """
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
     d = run.settings.work_date
-    replace_placeholders(ws, {'#invoice_no': run.export_invoice_no, '#date': _date(d)})
+    values = {'#invoice_no': run.export_invoice_no, '#date': _date(d)}
+    if company_invoice:
+        c = company_invoice.company
+        values.update({'#invoice_no': company_invoice.invoice_no, '#company': c.name, '#address2': c.address2,
+                       '#address1': c.address1, '#business_no': c.business_no})
+    replace_placeholders(ws, values)
     lief, _ = find_cell(ws, 'Lieferdatum')
     ws.cell(lief, 18).value = _date(run.settings.delivery_date)
 
-    invs = run.export_invoices
+    invs = [company_invoice] if company_invoice else run.export_invoices
     rows = []
     for i, inv in enumerate(invs):
         if i:
@@ -165,6 +174,10 @@ def company_invoice_filename(run: Run, inv: CompanyInvoice) -> str:
 
 def export_invoice_filename(run: Run) -> str:
     return f'Export_invoice_EMG_{run.settings.work_date:%Y%m%d}{run.settings.invoice_seq:02d}'
+
+
+def company_export_invoice_filename(run: Run, inv: CompanyInvoice) -> str:
+    return f'Export_invoice_{inv.company.uid}_{run.settings.work_date:%Y%m%d}{run.settings.invoice_seq:02d}'
 
 
 def person_invoice_filename(s: Shipment) -> str:
