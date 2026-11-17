@@ -158,8 +158,21 @@ def english_address_function(o: Options, log: Callable[[str], None]):
     return offline_english_address
 
 
+def preview_run(folder: Folder, shipping_file: str, work_date: dt.date, o: Options):
+    """Builds the run without writing anything, for the person-invoice order list."""
+    ref = RefData.load(os.path.join(folder.base, 'Base.xlsx'))
+    return build_run(read_shipping(shipping_file), ref, o.settings(work_date))
+
+
+def person_candidates(run):
+    """Orders that can get a person invoice: all but those of delivery-only (L) companies."""
+    return [sh for sh in run.shipments if not sh.company.is_delivery_only]
+
+
 def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
-            log: Callable[[str], None] = print, person_only: bool = False):
+            log: Callable[[str], None] = print, person_only: bool = False,
+            person_orders: Optional[set] = None):
+    """person_orders: order numbers picked for person invoices; None means every candidate."""
     """작업시작: reads the shipping file, writes the result folder, then the account book and stock."""
     if folder.test:
         log('[테스트 모드] 결과는 Result_test, 회계·재고는 db/euromall_test.db 에 기록합니다.')
@@ -178,20 +191,21 @@ def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
         log('  주의: ' + w)
 
     paths = Paths(base_dir=folder.base, result_dir=folder.result)
+    person = [sh for sh in person_candidates(run) if person_orders is None or sh.order_no in person_orders]
     if person_only:
         from .outputs import invoices
         out_dir = run_folder(run, paths)
         os.makedirs(out_dir, exist_ok=True)
         addr = english_address_function(o, log)
-        for sh in run.shipments:
-            if sh.company.is_delivery_only:
-                continue
+        for sh in person:
             wb = invoices.person_invoice(run, sh, paths.template('PersonInvoice'), addr(sh))
             wb.save(os.path.join(out_dir, invoices.person_invoice_filename(sh) + '.xlsx'))
-        log(f'개인 인보이스 저장: {out_dir}')
+        log(f'개인 인보이스 {len(person)}건 저장: {out_dir}')
         return run, out_dir
 
-    outputs = generate(run, paths, english_address=english_address_function(o, log))
+    outputs = generate(run, paths, english_address=english_address_function(o, log), person_shipments=person)
+    if settings.make_person_invoice:
+        log(f'개인 인보이스 {len(person)}건')
     out_dir = run_folder(run, paths)
     log(f'결과 파일 {len(outputs)}개 저장: {out_dir}')
     for w in run.warnings:

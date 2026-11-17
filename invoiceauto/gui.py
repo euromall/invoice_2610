@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import db, compare
-from .app import Folder, Options, load_options, save_options, run_job, ADDRESS_API, ADDRESS_OFFLINE
+from .app import (Folder, Options, load_options, save_options, run_job, preview_run, person_candidates,
+                  ADDRESS_API, ADDRESS_OFFLINE)
 from .engine import MODE_PROFORMA, MODE_BILL, CARRIER_POST, CARRIER_CJ
 
 TITLE = 'Euromall GmbH (euromallgmbh@gmail.com)'
@@ -56,14 +57,16 @@ class JobThread(QThread):
     message = Signal(str)
     done = Signal(bool)
 
-    def __init__(self, folder, shipping_file, work_date, options, person_only):
+    def __init__(self, folder, shipping_file, work_date, options, person_only, person_orders=None):
         super().__init__()
         self.args = (folder, shipping_file, work_date, options)
         self.person_only = person_only
+        self.person_orders = person_orders
 
     def run(self):
         try:
-            run_job(*self.args, log=self.message.emit, person_only=self.person_only)
+            run_job(*self.args, log=self.message.emit, person_only=self.person_only,
+                    person_orders=self.person_orders)
             self.done.emit(True)
         except Exception as e:
             self.message.emit(f'오류: {e}')
@@ -261,10 +264,22 @@ class MainWindow(QMainWindow):
         o = self.options()
         if o.address_mode == ADDRESS_API and not o.address_api_key:
             self.log('주의: API 승인키가 없어 프로그램 내 변환을 사용합니다.')
+        work_date = pydate(self.work_date.date())
+        person_orders = None
+        if person_only or o.make_person_invoice:
+            try:
+                run = preview_run(self.folder, path, work_date, o)
+            except Exception as e:
+                self.log(f'오류: {e}')
+                return
+            d = PersonPickDialog(self, person_candidates(run))
+            if not d.exec():
+                return
+            person_orders = d.picked()
         self.log_box.clear()
         self.btn_start.setEnabled(False)
         self.btn_person.setEnabled(False)
-        self.thread = JobThread(self.folder, path, pydate(self.work_date.date()), o, person_only)
+        self.thread = JobThread(self.folder, path, work_date, o, person_only, person_orders)
         self.thread.message.connect(self.log)
         self.thread.done.connect(self.finished)
         self.thread.start()
@@ -325,6 +340,69 @@ class MainWindow(QMainWindow):
         w = cls(self.folder)
         w.show()
         self.child_windows = [x for x in self.child_windows if x.isVisible()] + [w]
+
+
+class PersonPickDialog(QDialog):
+    """Order list before a run: the checked orders get a person invoice (all checked at first)."""
+
+    def __init__(self, parent, shipments):
+        super().__init__(parent)
+        self.setWindowTitle('개인 인보이스 만들 주문 선택')
+        self.resize(760, 480)
+        self.shipments = shipments
+        self.table = QTableWidget(len(shipments), 6)
+        self.table.setHorizontalHeaderLabels(['', '송장번호', '업체', '주문번호', '수령인', '금액 (EUR)'])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        for r, sh in enumerate(shipments):
+            chk = QTableWidgetItem()
+            chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            chk.setCheckState(Qt.Checked)
+            self.table.setItem(r, 0, chk)
+            for c, v in enumerate([sh.hawb, sh.company.uid, sh.order_no, sh.first.recv_name], start=1):
+                self.table.setItem(r, c, QTableWidgetItem(v))
+            amount = QTableWidgetItem(f'{sh.total:,.2f}')
+            amount.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(r, 5, amount)
+        self.table.cellClicked.connect(self.toggle)
+        for c, w in enumerate((30, 120, 60, 220, 110, 90)):
+            self.table.setColumnWidth(c, w)
+        self.count = QLabel()
+        self.table.itemChanged.connect(lambda _: self.update_count())
+        btn_all = QPushButton('전체 선택')
+        btn_none = QPushButton('전체 해제')
+        btn_all.clicked.connect(lambda: self.set_all(Qt.Checked))
+        btn_none.clicked.connect(lambda: self.set_all(Qt.Unchecked))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        bottom = QHBoxLayout()
+        for w in (btn_all, btn_none, self.count):
+            bottom.addWidget(w)
+        bottom.addStretch(1)
+        bottom.addWidget(bb)
+        v = QVBoxLayout(self)
+        v.addWidget(self.table, 1)
+        v.addLayout(bottom)
+        self.update_count()
+
+    def toggle(self, row, col):
+        if col != 0:
+            it = self.table.item(row, 0)
+            it.setCheckState(Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked)
+
+    def set_all(self, state):
+        for r in range(self.table.rowCount()):
+            self.table.item(r, 0).setCheckState(state)
+
+    def update_count(self):
+        n = len(self.picked())
+        self.count.setText(f'{n} / {len(self.shipments)}건 선택')
+
+    def picked(self) -> set:
+        return {sh.order_no for r, sh in enumerate(self.shipments)
+                if self.table.item(r, 0) and self.table.item(r, 0).checkState() == Qt.Checked}
 
 
 # --- Account Book / Stock ------------------------------------------------------------------------
