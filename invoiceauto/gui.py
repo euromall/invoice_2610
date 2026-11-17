@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import db
+from . import db, compare
 from .app import Folder, Options, load_options, save_options, run_job, ADDRESS_API, ADDRESS_OFFLINE
 from .engine import MODE_PROFORMA, MODE_BILL, CARRIER_POST, CARRIER_CJ
 
@@ -119,6 +119,20 @@ class MainWindow(QMainWindow):
         g_addr.layout().insertWidget(2, self.api_key)
         self.rdb_addr_api.toggled.connect(lambda on: self.api_key.setEnabled(on))
 
+        # 테스트 (기존 프로그램과 병행 비교)
+        self.chk_test = QCheckBox('테스트 모드')
+        self.chk_test.setToolTip('결과는 Result_test, 회계·재고는 db/euromall_test.db 에 기록합니다.')
+        btn_fresh = QPushButton('테스트 DB 새로 복사')
+        btn_compare = QPushButton('결과 비교')
+        btn_fresh.clicked.connect(self.fresh_test_db)
+        btn_compare.clicked.connect(self.compare_results)
+        self.chk_test.toggled.connect(self.test_mode_changed)
+        g_test = QGroupBox('테스트')
+        tl = QVBoxLayout(g_test)
+        for w in (self.chk_test, btn_fresh, btn_compare):
+            tl.addWidget(w)
+        tl.addStretch(1)
+
         # 입력 파일
         self.file_combo = QComboBox()
         btn_browse = QPushButton('찾기')
@@ -129,7 +143,7 @@ class MainWindow(QMainWindow):
         fl.addWidget(btn_browse)
 
         groups = QHBoxLayout()
-        for g in (g_set, g_mode, g_carrier, g_addr):
+        for g in (g_set, g_mode, g_carrier, g_addr, g_test):
             groups.addWidget(g)
         groups.addStretch(1)
 
@@ -188,7 +202,7 @@ class MainWindow(QMainWindow):
             apply_accounting=self.chk_account.isChecked(), make_person_invoice=self.chk_person.isChecked(),
             make_export_per_company=self.chk_export.isChecked(), make_cargo_weight_merge=self.chk_merge.isChecked(),
             address_mode=ADDRESS_API if self.rdb_addr_api.isChecked() else ADDRESS_OFFLINE,
-            address_api_key=self.api_key.text().strip())
+            address_api_key=self.api_key.text().strip(), test_mode=self.chk_test.isChecked())
 
     def apply_options(self, o: Options):
         self.rdb_proforma.blockSignals(True)
@@ -204,6 +218,8 @@ class MainWindow(QMainWindow):
         (self.rdb_addr_api if o.address_mode == ADDRESS_API else self.rdb_addr_offline).setChecked(True)
         self.api_key.setText(o.address_api_key)
         self.api_key.setEnabled(o.address_mode == ADDRESS_API)
+        self.chk_test.setChecked(o.test_mode)
+        self.test_mode_changed(o.test_mode)
 
     def mode_changed(self, proforma_on):
         """견적서용/청구서용 each keep their own checkbox set, like the old program."""
@@ -258,6 +274,49 @@ class MainWindow(QMainWindow):
         self.btn_person.setEnabled(True)
         self.log('작업 완료' if ok else '작업 실패')
         self.refresh_files()
+
+    def test_mode_changed(self, on):
+        self.folder.test = on
+        self.setWindowTitle(TITLE + ('  [테스트 모드]' if on else ''))
+
+    def fresh_test_db(self):
+        if not os.path.exists(self.folder.real_db):
+            QMessageBox.warning(self, TITLE, f'{self.folder.real_db} 파일이 없습니다.')
+            return
+        if QMessageBox.question(self, TITLE, '지금의 euromall.db 를 euromall_test.db 로 새로 복사할까요?\n'
+                                             '테스트 DB에 기록한 내용은 지워집니다.') != QMessageBox.Yes:
+            return
+        was = self.folder.test
+        self.folder.test = True
+        self.folder.prepare_test_db(fresh=True)
+        self.folder.test = was
+        self.log('euromall.db 를 euromall_test.db 로 새로 복사했습니다.')
+
+    def compare_results(self):
+        """Old program's result folder vs this program's, plus the account book of the work date."""
+        old_dir = QFileDialog.getExistingDirectory(self, '기존 프로그램 결과 폴더 선택',
+                                                   os.path.join(self.folder.root, 'Result'))
+        if not old_dir:
+            return
+        guess = os.path.join(self.folder.root, 'Result_test', os.path.basename(old_dir))
+        new_dir = QFileDialog.getExistingDirectory(self, '새 프로그램 결과 폴더 선택',
+                                                   guess if os.path.isdir(guess) else self.folder.root)
+        if not new_dir:
+            return
+        self.log_box.clear()
+        self.log(f'비교: {old_dir}\n   ↔ {new_dir}')
+        diffs = compare.compare_folders(old_dir, new_dir)
+        ymd = pydate(self.work_date.date()).isoformat()
+        if os.path.exists(self.folder.real_db) and os.path.exists(self.folder.test_db):
+            diffs += compare.compare_accounts(self.folder.real_db, self.folder.test_db, ymd)
+        for line in compare.summary(diffs):
+            self.log(line)
+        report = os.path.join(new_dir, f'{compare.REPORT_PREFIX}{os.path.basename(old_dir)}.xlsx')
+        compare.write_report(report, diffs)
+        self.log(f'비교 결과 저장: {report}')
+        self.log('  기존 프로그램의 오류를 고친 차이는 결과 파일의 "알려진 차이" 시트에 정리돼 있습니다.')
+        if sys.platform == 'win32':
+            os.startfile(report)
 
     def open_window(self, cls):
         if not os.path.exists(self.folder.db):
@@ -343,7 +402,7 @@ class RecordWindow(QWidget):
         super().__init__()
         self.folder = folder
         self.rows = []
-        self.setWindowTitle(self.title)
+        self.setWindowTitle(self.title + ('  [테스트 DB]' if folder.test else ''))
         self.resize(900, 520)
         today = dt.date.today()
         self.date_from = date_edit(today)

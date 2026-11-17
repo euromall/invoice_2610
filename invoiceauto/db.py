@@ -22,11 +22,12 @@ def connect(path):
 
 
 def backup(path, folder=None) -> str:
-    """Copies the database next to itself (db/backup/euromall_YYYYmmdd_HHMMSS.db) before a run writes to it."""
+    """Copies the database next to itself (db/backup/<name>_YYYYmmdd_HHMMSS.db) before a run writes to it."""
     import datetime as dt
     folder = folder or os.path.join(os.path.dirname(path), 'backup')
     os.makedirs(folder, exist_ok=True)
-    dst = os.path.join(folder, f'euromall_{dt.datetime.now():%Y%m%d_%H%M%S}.db')
+    stem = os.path.splitext(os.path.basename(path))[0]
+    dst = os.path.join(folder, f'{stem}_{dt.datetime.now():%Y%m%d_%H%M%S}.db')
     shutil.copy2(path, dst)
     return dst
 

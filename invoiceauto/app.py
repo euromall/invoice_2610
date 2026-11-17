@@ -24,16 +24,29 @@ FLAGS = ['chkAutoInvoiceNo', 'chkSavePdf', 'chkApplyAccounting', 'chkMakePeroson
 
 @dataclass
 class Folder:
-    """The program folder: same layout as the old program (Base, db, ShippingInvoice, Result)."""
+    """The program folder: same layout as the old program (Base, db, ShippingInvoice, Result).
+
+    In test mode the run writes to db/euromall_test.db and Result_test/, so it can be run next to the old
+    program on the same input without touching the real account book.
+    """
     root: str
+    test: bool = False
 
     @property
     def base(self):
         return os.path.join(self.root, 'Base')
 
     @property
-    def db(self):
+    def real_db(self):
         return os.path.join(self.root, 'db', 'euromall.db')
+
+    @property
+    def test_db(self):
+        return os.path.join(self.root, 'db', 'euromall_test.db')
+
+    @property
+    def db(self):
+        return self.test_db if self.test else self.real_db
 
     @property
     def shipping(self):
@@ -41,7 +54,14 @@ class Folder:
 
     @property
     def result(self):
-        return os.path.join(self.root, 'Result')
+        return os.path.join(self.root, 'Result_test' if self.test else 'Result')
+
+    def prepare_test_db(self, fresh=False) -> bool:
+        """Copies the real database to the test one when it is missing (or always, with fresh). True if copied."""
+        if self.test and os.path.exists(self.real_db) and (fresh or not os.path.exists(self.test_db)):
+            shutil.copy2(self.real_db, self.test_db)
+            return True
+        return False
 
     @property
     def ini(self):
@@ -64,6 +84,7 @@ class Options:
     make_cargo_weight_merge: bool = True
     address_mode: str = ADDRESS_OFFLINE
     address_api_key: str = ''
+    test_mode: bool = False
 
     def settings(self, work_date: dt.date) -> Settings:
         return Settings(work_date=work_date, mode=self.mode, carrier=self.carrier, auto_hawb=self.auto_hawb,
@@ -93,6 +114,7 @@ def load_options(path, mode=None) -> Options:
     o.carrier = CARRIER_POST if str(sec.get('rdbPostOffice', '0')) == '1' else CARRIER_CJ
     o.address_mode = general.get('address_mode', ADDRESS_OFFLINE)
     o.address_api_key = general.get('address_api_key', '')
+    o.test_mode = str(general.get('test_mode', '0')) == '1'
     return o
 
 
@@ -113,7 +135,8 @@ def save_options(path, o: Options):
     })
     if not cp.has_section('General'):
         cp.add_section('General')
-    cp['General'].update({'mode': o.mode, 'address_mode': o.address_mode, 'address_api_key': o.address_api_key})
+    cp['General'].update({'mode': o.mode, 'address_mode': o.address_mode, 'address_api_key': o.address_api_key,
+                          'test_mode': '1' if o.test_mode else '0'})
     with open(path, 'w', encoding='utf-8') as f:
         cp.write(f)
 
@@ -138,6 +161,10 @@ def english_address_function(o: Options, log: Callable[[str], None]):
 def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
             log: Callable[[str], None] = print, person_only: bool = False):
     """작업시작: reads the shipping file, writes the result folder, then the account book and stock."""
+    if folder.test:
+        log('[테스트 모드] 결과는 Result_test, 회계·재고는 db/euromall_test.db 에 기록합니다.')
+        if folder.prepare_test_db():
+            log('  euromall.db 를 euromall_test.db 로 복사했습니다.')
     log(f'입력 파일: {os.path.basename(shipping_file)}')
     ref = RefData.load(os.path.join(folder.base, 'Base.xlsx'))
     log(f'Base.xlsx: 거래처 {len(ref.companies)}곳, 상품 {len(ref.items)}개')
@@ -179,7 +206,8 @@ def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
             log(f'  {inv.invoice_no}: {inv.total:.2f} EUR')
         log(f'  {run.export_invoice_no}: {sum(i.total for i in run.invoices):.2f} EUR')
 
-    backup_dir = os.path.join(os.path.dirname(shipping_file), 'backup')
-    os.makedirs(backup_dir, exist_ok=True)
-    shutil.copy2(shipping_file, backup_dir)
+    if not folder.test:
+        backup_dir = os.path.join(os.path.dirname(shipping_file), 'backup')
+        os.makedirs(backup_dir, exist_ok=True)
+        shutil.copy2(shipping_file, backup_dir)
     return run, out_dir
