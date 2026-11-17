@@ -157,6 +157,8 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
             item = ref.item(ln.item_name)
             if item is None and company.invoice_type != 'L':
                 warnings.append(f'{ln.row}행: 상품 "{ln.item_name}"이(가) Base.xlsx newPrice에 없습니다.')
+            elif item is not None and item.name.strip() != ln.item_name:
+                warnings.append(f'{ln.row}행: 상품명 철자가 달라 비슷한 이름으로 찾았습니다: "{ln.item_name}" → "{item.name}"')
             if ln.weight > 0:
                 weight = ln.weight
             elif item is not None:
