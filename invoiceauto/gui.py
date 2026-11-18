@@ -15,8 +15,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import db
-from .app import Folder, Options, load_options, save_options, run_job, ADDRESS_API, ADDRESS_OFFLINE
+from . import db, compare
+from .app import (Folder, Options, load_options, save_options, run_job, preview_run, person_candidates,
+                  ADDRESS_API, ADDRESS_OFFLINE)
 from .engine import MODE_PROFORMA, MODE_BILL, CARRIER_POST, CARRIER_CJ
 
 TITLE = 'Euromall GmbH (euromallgmbh@gmail.com)'
@@ -56,14 +57,16 @@ class JobThread(QThread):
     message = Signal(str)
     done = Signal(bool)
 
-    def __init__(self, folder, shipping_file, work_date, options, person_only):
+    def __init__(self, folder, shipping_file, work_date, options, person_only, person_orders=None):
         super().__init__()
         self.args = (folder, shipping_file, work_date, options)
         self.person_only = person_only
+        self.person_orders = person_orders
 
     def run(self):
         try:
-            run_job(*self.args, log=self.message.emit, person_only=self.person_only)
+            run_job(*self.args, log=self.message.emit, person_only=self.person_only,
+                    person_orders=self.person_orders)
             self.done.emit(True)
         except Exception as e:
             self.message.emit(f'오류: {e}')
@@ -119,6 +122,20 @@ class MainWindow(QMainWindow):
         g_addr.layout().insertWidget(2, self.api_key)
         self.rdb_addr_api.toggled.connect(lambda on: self.api_key.setEnabled(on))
 
+        # 테스트 (기존 프로그램과 병행 비교)
+        self.chk_test = QCheckBox('테스트 모드')
+        self.chk_test.setToolTip('결과는 Result_test, 회계·재고는 db/euromall_test.db 에 기록합니다.')
+        btn_fresh = QPushButton('테스트 DB 새로 복사')
+        btn_compare = QPushButton('결과 비교')
+        btn_fresh.clicked.connect(self.fresh_test_db)
+        btn_compare.clicked.connect(self.compare_results)
+        self.chk_test.toggled.connect(self.test_mode_changed)
+        g_test = QGroupBox('테스트')
+        tl = QVBoxLayout(g_test)
+        for w in (self.chk_test, btn_fresh, btn_compare):
+            tl.addWidget(w)
+        tl.addStretch(1)
+
         # 입력 파일
         self.file_combo = QComboBox()
         btn_browse = QPushButton('찾기')
@@ -129,7 +146,7 @@ class MainWindow(QMainWindow):
         fl.addWidget(btn_browse)
 
         groups = QHBoxLayout()
-        for g in (g_set, g_mode, g_carrier, g_addr):
+        for g in (g_set, g_mode, g_carrier, g_addr, g_test):
             groups.addWidget(g)
         groups.addStretch(1)
 
@@ -188,7 +205,7 @@ class MainWindow(QMainWindow):
             apply_accounting=self.chk_account.isChecked(), make_person_invoice=self.chk_person.isChecked(),
             make_export_per_company=self.chk_export.isChecked(), make_cargo_weight_merge=self.chk_merge.isChecked(),
             address_mode=ADDRESS_API if self.rdb_addr_api.isChecked() else ADDRESS_OFFLINE,
-            address_api_key=self.api_key.text().strip())
+            address_api_key=self.api_key.text().strip(), test_mode=self.chk_test.isChecked())
 
     def apply_options(self, o: Options):
         self.rdb_proforma.blockSignals(True)
@@ -204,6 +221,8 @@ class MainWindow(QMainWindow):
         (self.rdb_addr_api if o.address_mode == ADDRESS_API else self.rdb_addr_offline).setChecked(True)
         self.api_key.setText(o.address_api_key)
         self.api_key.setEnabled(o.address_mode == ADDRESS_API)
+        self.chk_test.setChecked(o.test_mode)
+        self.test_mode_changed(o.test_mode)
 
     def mode_changed(self, proforma_on):
         """견적서용/청구서용 each keep their own checkbox set, like the old program."""
@@ -245,10 +264,22 @@ class MainWindow(QMainWindow):
         o = self.options()
         if o.address_mode == ADDRESS_API and not o.address_api_key:
             self.log('주의: API 승인키가 없어 프로그램 내 변환을 사용합니다.')
+        work_date = pydate(self.work_date.date())
+        person_orders = None
+        if person_only or o.make_person_invoice:
+            try:
+                run = preview_run(self.folder, path, work_date, o)
+            except Exception as e:
+                self.log(f'오류: {e}')
+                return
+            d = PersonPickDialog(self, person_candidates(run))
+            if not d.exec():
+                return
+            person_orders = d.picked()
         self.log_box.clear()
         self.btn_start.setEnabled(False)
         self.btn_person.setEnabled(False)
-        self.thread = JobThread(self.folder, path, pydate(self.work_date.date()), o, person_only)
+        self.thread = JobThread(self.folder, path, work_date, o, person_only, person_orders)
         self.thread.message.connect(self.log)
         self.thread.done.connect(self.finished)
         self.thread.start()
@@ -259,6 +290,49 @@ class MainWindow(QMainWindow):
         self.log('작업 완료' if ok else '작업 실패')
         self.refresh_files()
 
+    def test_mode_changed(self, on):
+        self.folder.test = on
+        self.setWindowTitle(TITLE + ('  [테스트 모드]' if on else ''))
+
+    def fresh_test_db(self):
+        if not os.path.exists(self.folder.real_db):
+            QMessageBox.warning(self, TITLE, f'{self.folder.real_db} 파일이 없습니다.')
+            return
+        if QMessageBox.question(self, TITLE, '지금의 euromall.db 를 euromall_test.db 로 새로 복사할까요?\n'
+                                             '테스트 DB에 기록한 내용은 지워집니다.') != QMessageBox.Yes:
+            return
+        was = self.folder.test
+        self.folder.test = True
+        self.folder.prepare_test_db(fresh=True)
+        self.folder.test = was
+        self.log('euromall.db 를 euromall_test.db 로 새로 복사했습니다.')
+
+    def compare_results(self):
+        """Old program's result folder vs this program's, plus the account book of the work date."""
+        old_dir = QFileDialog.getExistingDirectory(self, '기존 프로그램 결과 폴더 선택',
+                                                   os.path.join(self.folder.root, 'Result'))
+        if not old_dir:
+            return
+        guess = os.path.join(self.folder.root, 'Result_test', os.path.basename(old_dir))
+        new_dir = QFileDialog.getExistingDirectory(self, '새 프로그램 결과 폴더 선택',
+                                                   guess if os.path.isdir(guess) else self.folder.root)
+        if not new_dir:
+            return
+        self.log_box.clear()
+        self.log(f'비교: {old_dir}\n   ↔ {new_dir}')
+        diffs = compare.compare_folders(old_dir, new_dir)
+        ymd = pydate(self.work_date.date()).isoformat()
+        if os.path.exists(self.folder.real_db) and os.path.exists(self.folder.test_db):
+            diffs += compare.compare_accounts(self.folder.real_db, self.folder.test_db, ymd)
+        for line in compare.summary(diffs):
+            self.log(line)
+        report = os.path.join(new_dir, f'{compare.REPORT_PREFIX}{os.path.basename(old_dir)}.xlsx')
+        compare.write_report(report, diffs)
+        self.log(f'비교 결과 저장: {report}')
+        self.log('  기존 프로그램의 오류를 고친 차이는 결과 파일의 "알려진 차이" 시트에 정리돼 있습니다.')
+        if sys.platform == 'win32':
+            os.startfile(report)
+
     def open_window(self, cls):
         if not os.path.exists(self.folder.db):
             QMessageBox.warning(self, TITLE, f'{self.folder.db} 파일이 없습니다.')
@@ -266,6 +340,69 @@ class MainWindow(QMainWindow):
         w = cls(self.folder)
         w.show()
         self.child_windows = [x for x in self.child_windows if x.isVisible()] + [w]
+
+
+class PersonPickDialog(QDialog):
+    """Order list before a run: the checked orders get a person invoice (all checked at first)."""
+
+    def __init__(self, parent, shipments):
+        super().__init__(parent)
+        self.setWindowTitle('개인 인보이스 만들 주문 선택')
+        self.resize(760, 480)
+        self.shipments = shipments
+        self.table = QTableWidget(len(shipments), 6)
+        self.table.setHorizontalHeaderLabels(['', '송장번호', '업체', '주문번호', '수령인', '금액 (EUR)'])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        for r, sh in enumerate(shipments):
+            chk = QTableWidgetItem()
+            chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            chk.setCheckState(Qt.Checked)
+            self.table.setItem(r, 0, chk)
+            for c, v in enumerate([sh.hawb, sh.company.uid, sh.order_no, sh.first.recv_name], start=1):
+                self.table.setItem(r, c, QTableWidgetItem(v))
+            amount = QTableWidgetItem(f'{sh.total:,.2f}')
+            amount.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(r, 5, amount)
+        self.table.cellClicked.connect(self.toggle)
+        for c, w in enumerate((30, 120, 60, 220, 110, 90)):
+            self.table.setColumnWidth(c, w)
+        self.count = QLabel()
+        self.table.itemChanged.connect(lambda _: self.update_count())
+        btn_all = QPushButton('전체 선택')
+        btn_none = QPushButton('전체 해제')
+        btn_all.clicked.connect(lambda: self.set_all(Qt.Checked))
+        btn_none.clicked.connect(lambda: self.set_all(Qt.Unchecked))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        bottom = QHBoxLayout()
+        for w in (btn_all, btn_none, self.count):
+            bottom.addWidget(w)
+        bottom.addStretch(1)
+        bottom.addWidget(bb)
+        v = QVBoxLayout(self)
+        v.addWidget(self.table, 1)
+        v.addLayout(bottom)
+        self.update_count()
+
+    def toggle(self, row, col):
+        if col != 0:
+            it = self.table.item(row, 0)
+            it.setCheckState(Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked)
+
+    def set_all(self, state):
+        for r in range(self.table.rowCount()):
+            self.table.item(r, 0).setCheckState(state)
+
+    def update_count(self):
+        n = len(self.picked())
+        self.count.setText(f'{n} / {len(self.shipments)}건 선택')
+
+    def picked(self) -> set:
+        return {sh.order_no for r, sh in enumerate(self.shipments)
+                if self.table.item(r, 0) and self.table.item(r, 0).checkState() == Qt.Checked}
 
 
 # --- Account Book / Stock ------------------------------------------------------------------------
@@ -343,7 +480,7 @@ class RecordWindow(QWidget):
         super().__init__()
         self.folder = folder
         self.rows = []
-        self.setWindowTitle(self.title)
+        self.setWindowTitle(self.title + ('  [테스트 DB]' if folder.test else ''))
         self.resize(900, 520)
         today = dt.date.today()
         self.date_from = date_edit(today)
