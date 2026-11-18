@@ -159,6 +159,10 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
                 warnings.append(f'{ln.row}행: 상품 "{ln.item_name}"이(가) Base.xlsx newPrice에 없습니다.')
             elif item is not None and item.name.strip() != ln.item_name:
                 warnings.append(f'{ln.row}행: 상품명 철자가 달라 비슷한 이름으로 찾았습니다: "{ln.item_name}" → "{item.name}"')
+            if item is not None and item.name in ref.duplicate_rows:
+                rows = ', '.join(map(str, ref.duplicate_rows[item.name]))
+                warnings.append(f'{ln.row}행: 상품 "{item.name}"이(가) Base.xlsx newPrice {rows}행에 여러 번 있어 '
+                                f'맨 아래 {item.row}행(최신) 값을 썼습니다.')
             if ln.weight > 0:
                 weight = ln.weight
             elif item is not None:
