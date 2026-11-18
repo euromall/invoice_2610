@@ -120,4 +120,8 @@ def generate(run: Run, paths: Paths, english_address: Optional[Callable[[str], s
             outputs.extend(save_pdfs(outputs, pre))
         except Exception as e:                      # PDFs are a convenience; the Excel files are done
             run.warnings.append(f'PDF 저장 실패: {e}')
+    # the warnings shown on screen are also kept next to the results
+    with open(os.path.join(folder, f'{pre}작업기록_{date}.txt'), 'w', encoding='utf-8-sig') as f:
+        f.write('\n'.join(run.warnings) if run.warnings else '경고 없음')
+        f.write('\n')
     return outputs

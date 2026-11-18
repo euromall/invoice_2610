@@ -148,6 +148,9 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
 
     shipments = []
     for order_no, glines in groups.items():
+        # the old program sorts every line by item name (case-sensitive), so inside an order the lines are in
+        # name order and the order's place in the tracking-number sequence comes from its alphabetically first item
+        glines = sorted(glines, key=lambda ln: (ln.item_name, -ln.qty, ln.row))
         company = ref.company_for_sender(glines[0].sender)
         if company is None:
             warnings.append(f'{glines[0].row}행: 보내는사람 "{glines[0].sender}"이(가) Base.xlsx info에 없습니다.')

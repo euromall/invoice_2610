@@ -193,7 +193,7 @@ def packing_list(run: Run, template_path):
         l, qty = totals[name]
         item = l.item
         vals = [item.item_code if item else None, item.barcode if item else None, item.url if item else None,
-                clean_number(l.declared_price), name, qty]
+                clean_number(round(l.declared_price, 2)), name, qty]
         for j, v in enumerate(vals):
             ws.cell(r, j + 1).value = v
         r += 1
@@ -204,7 +204,8 @@ def invoice_upload(run: Run, template_path):
     """송장업로드: tracking number per order, for registering on the shopping malls."""
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
-    for i, s in enumerate(run.shipments):
+    # only orders that have a tracking number (in a bill run most orders have none yet)
+    for i, s in enumerate([s for s in run.shipments if s.hawb]):
         r = i + 2
         short = s.order_no.split('-', 1)[1] if '-' in s.order_no else s.order_no
         for j, v in enumerate([s.order_no, s.company.uid, short, s.hawb, s.first.recv_name, s.hawb]):

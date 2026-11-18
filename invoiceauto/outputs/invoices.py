@@ -38,7 +38,7 @@ def write_item_row(ws, r: int, nr, s: Shipment, l: ItemLine):
         item.item_code if item else None,       # I code
         item.barcode if item else None,         # J Barcode
         item.url if item else None,             # K url
-        clean_number(l.declared_price),         # L preis
+        clean_number(round(l.declared_price, 2)),   # L preis, 2 decimals like the old program
         ascii_latin(ln.display_name(item)),     # M Bezeichnung
         l.qty,                                  # N stk.
         clean_number(l.goods_amount),           # O Waren
