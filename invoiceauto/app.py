@@ -2,6 +2,7 @@
 import configparser
 import datetime as dt
 import glob
+import re
 import os
 import shutil
 from dataclasses import dataclass
@@ -95,11 +96,41 @@ class Options:
                         make_cargo_weight_merge=self.make_cargo_weight_merge)
 
 
-def load_options(path, mode=None) -> Options:
-    """Reads the [Proforma] or [Bill] section, like the old program's 설정불러오기."""
-    cp = configparser.ConfigParser()
+def _read_ini(path) -> configparser.ConfigParser:
+    """Tolerant ini reader: the old program's ini can start with a broken section header
+    (seen in use: '[10.' + newline + '.P/ ... ,Proforma]'), so lines before the first proper
+    [Section] are skipped and a repeated section does not fail."""
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
     cp.optionxform = str
-    cp.read(path, encoding='utf-8')
+    text_ = ''
+    for enc in ('utf-8-sig', 'cp949', 'latin-1'):
+        try:
+            with open(path, encoding=enc) as f:
+                text_ = f.read()
+            break
+        except (OSError, UnicodeDecodeError):
+            continue
+    lines = text_.splitlines()
+    start = next((i for i, ln in enumerate(lines) if re.fullmatch(r'\s*\[[A-Za-z_]\w*\]\s*', ln)), len(lines))
+    try:
+        cp.read_string('\n'.join(lines[start:]))
+    except configparser.Error:
+        pass
+    return cp
+
+
+def old_ini_path(root):
+    """The old program's ini next to its exe (00_Invice Auto ....ini), used until our own ini exists."""
+    found = sorted(f for f in glob.glob(os.path.join(root, '*.ini')) if os.path.basename(f) != INI_NAME)
+    return found[0] if found else None
+
+
+def load_options(path, mode=None) -> Options:
+    """Reads the [Proforma] or [Bill] section, like the old program's 설정불러오기.
+    Without our own ini yet, the old program's ini in the same folder is read instead."""
+    if not os.path.exists(path):
+        path = old_ini_path(os.path.dirname(path)) or path
+    cp = _read_ini(path)
     general = cp['General'] if cp.has_section('General') else {}
     mode = mode or general.get('mode', MODE_PROFORMA)
     sec = cp['Proforma' if mode == MODE_PROFORMA else 'Bill'] if cp.has_section(
@@ -120,9 +151,9 @@ def load_options(path, mode=None) -> Options:
 
 
 def save_options(path, o: Options):
-    cp = configparser.ConfigParser()
+    """Always writes our own ini (InvoiceAuto.ini); the old program's ini is never changed."""
+    cp = _read_ini(path) if os.path.exists(path) else configparser.ConfigParser(interpolation=None)
     cp.optionxform = str
-    cp.read(path, encoding='utf-8')
     name = 'Proforma' if o.mode == MODE_PROFORMA else 'Bill'
     if not cp.has_section(name):
         cp.add_section(name)
