@@ -9,6 +9,8 @@ from contextlib import closing
 from typing import List, Optional
 
 from .engine import Run, MODE_PROFORMA
+from .shipping import C_MOBILE, C_ADDR, C_ADDR_DETAIL, C_CUSTOMS_NO
+from .util import text
 
 STATUS_UNPAID, STATUS_PAID, STATUS_CANCELLED = '0', '1', '2'
 STATUS_LABELS = {STATUS_UNPAID: '미결제', STATUS_PAID: '결제', STATUS_CANCELLED: '취소'}
@@ -74,13 +76,19 @@ def record_run(path, run: Run):
                 con.execute(
                     'INSERT INTO tb_invoice (company_uid, item_name, item_seq, quantity, price, amount, order_no,'
                     ' invoice_no, recv_name, gross_weight, total_box, delivery_fee_amount, packing_fee_amount,'
-                    ' en_name, item_code, barcode, url, singo_unit_price) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    ' en_name, item_code, barcode, url, singo_unit_price, export_hs_code, flug_nr, mawb_nr,'
+                    ' mobile, address1, address2, customs_clearance_number) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (sh.company.uid, l.line.display_name(l.item), i + 1, l.qty, l.price, l.goods_amount,
                      sh.order_no, sh.hawb, l.line.recv_name, l.weight, sh.boxes if i == 0 else 0,
                      l.delivery_fee, l.packing_fee, sh.recv_name_en,
                      l.item.item_code if l.item else '', l.item.barcode if l.item else '',
-                     l.item.url if l.item else '', l.declared_price))
+                     l.item.url if l.item else '', l.declared_price,
+                     l.item.export_hs_code if l.item else '',
+                     l.item.barcode if l.item else '',     # the old program kept the barcode and URL here too
+                     l.item.url if l.item else '',
+                     text(l.line.get(C_MOBILE)), text(l.line.get(C_ADDR)), text(l.line.get(C_ADDR_DETAIL)),
+                     text(l.line.get(C_CUSTOMS_NO))))
 
 
 # --- screens -------------------------------------------------------------------------------------

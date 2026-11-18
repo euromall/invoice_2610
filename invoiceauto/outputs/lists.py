@@ -138,6 +138,14 @@ def cargo_weight_merge(run: Run):
     rows = [r[:len(SHIPPING_HEADER)] for r in cargo_rows(run)]
     for r in rows:
         r[C_CONTRACT_NO] = None      # Gmarket체결번호 stays empty in the carrier layout
+    # the weights of all lines of an order go on its first line, the other lines get 0
+    i = 0
+    for s in run.shipments:
+        n = len(s.lines)
+        rows[i][C_WEIGHT] = clean_number(round(sum(num(r[C_WEIGHT]) for r in rows[i:i + n]), 3))
+        for r in rows[i + 1:i + n]:
+            r[C_WEIGHT] = 0
+        i += n
     _write_rows(ws, rows, 2, len(SHIPPING_HEADER))
     return wb
 
