@@ -128,7 +128,8 @@ def old_ini_path(root):
 def load_options(path, mode=None) -> Options:
     """Reads the [Proforma] or [Bill] section, like the old program's 설정불러오기.
     Without our own ini yet, the old program's ini in the same folder is read instead."""
-    if not os.path.exists(path):
+    first_run = not os.path.exists(path)
+    if first_run:
         path = old_ini_path(os.path.dirname(path)) or path
     cp = _read_ini(path)
     general = cp['General'] if cp.has_section('General') else {}
@@ -146,7 +147,8 @@ def load_options(path, mode=None) -> Options:
     o.carrier = CARRIER_POST if str(sec.get('rdbPostOffice', '0')) == '1' else CARRIER_CJ
     o.address_mode = general.get('address_mode', ADDRESS_OFFLINE)
     o.address_api_key = general.get('address_api_key', '')
-    o.test_mode = str(general.get('test_mode', '0')) == '1'
+    # starts in test mode until settings are saved once, so a first try never touches euromall.db or Result/
+    o.test_mode = str(general.get('test_mode', '1' if first_run else '0')) == '1'
     return o
 
 
