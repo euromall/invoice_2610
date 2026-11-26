@@ -260,6 +260,45 @@ def read_pdf_pages(path):
             yield text, sorted_text, note
 
 
+INVOICE_NUMBER = (r"(?im)\b(?:Rechnungsnummer|Rechnungs-?Nr\.?|Rechnung\s+Nr\.?|Beleg-?Nr\.?|Invoice\s+(?:No\.?|Number|#)|인보이스\s*번호)"
+                  r"\s*[:#]?[ \t]*(?:\n[ \t]*)?([\w/-]*\d[\w/-]*)\b")
+
+
+def invoice_parts(page_texts):
+    """Page ranges [(first, last), ...] when one PDF holds several invoices (each starting with ‘Seite 1 von N’
+    and carrying its own invoice number), else []. Amazon puts every marketplace seller of an order in one file."""
+    starts = [index for index, text in enumerate(page_texts)
+              if re.search(r"(?i)\b(?:Seite|Page)\s+1\s+(?:von|of)\s+\d+\b", text)]
+    if len(starts) < 2 or starts[0] != 0:
+        return []
+    ranges = [(start, end - 1) for start, end in zip(starts, starts[1:] + [len(page_texts)])]
+    numbers = [unique(re.findall(INVOICE_NUMBER, "\n".join(page_texts[first:last + 1]))) for first, last in ranges]
+    return ranges if all(numbers) and len(set(numbers)) == len(numbers) else []
+
+
+def split_pdf(path, ranges):
+    """Write each invoice of a combined PDF to its own file next to it; the original goes to the 제외 folder.
+    Returns the new paths."""
+    path = Path(path)
+    created = []
+    try:
+        with open_evidence(path) as document:
+            for index, (first, last) in enumerate(ranges, 1):
+                target = free_name(path.parent, f"{path.stem}_{index}{path.suffix}")
+                with pymupdf.open() as part:
+                    part.insert_pdf(document, from_page=first, to_page=last)
+                    part.save(target)
+                created.append(target)
+        keep = path.parent / EXCLUDED_FOLDER
+        keep.mkdir(exist_ok=True)
+        move_evidence(path, free_name(keep, f"{path.stem}__나누기전_원본{path.suffix}"))
+    except (OSError, RuntimeError, ValueError):
+        for target in created:
+            target.unlink(missing_ok=True)
+        raise
+    return created
+
+
 def date_from_filename(path):
     """Issue date taken from a leading 20260702 / 2026-07-02 in the file name, or ''."""
     match = re.match(r"(20\d{2})-?(0[1-9]|1[0-2])-?(0[1-9]|[12]\d|3[01])(?=[_\- .])", Path(path).name)
@@ -287,6 +326,10 @@ def read_invoice_details(path, info=None):
     pages = list(read_pdf_pages(path))
     layouts = ["\n".join(page[index] for page in pages) for index in (0, 1)]
     scan_note = next((note for _, _, note in pages if note), "")
+    parts = invoice_parts([page[0] for page in pages])
+    if parts:
+        info["parts"] = parts
+        scan_note = f"인보이스 {len(parts)}개가 한 파일에 있음 · 더블클릭해서 나누기"
     fields = invoice_fields(layouts)
     text = layouts[0]
     if len(re.findall(r"\w", text)) >= 30 and not scan_note:
@@ -295,10 +338,7 @@ def read_invoice_details(path, info=None):
     numbers = []
     correction = False
     for layout in layouts:
-        numbers.extend(re.findall(
-            r"(?im)\b(?:Rechnungsnummer|Rechnungs-?Nr\.?|Rechnung\s+Nr\.?|Beleg-?Nr\.?|Invoice\s+(?:No\.?|Number|#)|인보이스\s*번호)\s*[:#]?[ \t]*(?:\n[ \t]*)?([\w/-]*\d[\w/-]*)\b",
-            layout,
-        ))
+        numbers.extend(re.findall(INVOICE_NUMBER, layout))
         correction |= bool(re.search(r"(?im)^\s*(?:Gutschrift|Stornorechnung|Credit Note)\b", layout))
     override = load_invoice_edits().get(digest(path))
     number = unique(numbers)
@@ -324,7 +364,9 @@ def read_invoice(path):
 def source_search_terms(value, kind):
     if kind == "발행일":
         day = date.fromisoformat(value)
-        return (value, day.strftime("%d.%m.%Y"), day.strftime("%d.%m.%y"), day.strftime("%d/%m/%Y"))
+        return tuple(dict.fromkeys((value, day.strftime("%d.%m.%Y"), day.strftime("%d.%m.%y"), day.strftime("%d/%m/%Y"),
+                                    *sorted(learned_formats.date_spellings(value), key=len, reverse=True),
+                                    f"{day.strftime('%d')} {learned_formats.GERMAN_MONTHS[day.month - 1]} {day.year}")))
     if kind == "총액":
         raw = value.split()[0]
         amount = Decimal(raw)
@@ -370,11 +412,54 @@ def source_locations(path, value, kind):
 def source_preview(path, index, coordinates):
     with open_evidence(path) as doc:
         page = doc[index]
+        if coordinates is None:  # whole page, small enough for the panel
+            scale = min(750 / max(1, page.rect.width), 620 / max(1, page.rect.height))
+            return page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).tobytes("png")
         area = pymupdf.Rect(coordinates)
         clip = pymupdf.Rect(page.rect.x0, area.y0 - 65, page.rect.x1, area.y1 + 65) & page.rect
         page.draw_rect(area + (-2, -2, 2, 2), color=(0.9, 0.38, 0.05), width=1.8, overlay=True)
         scale = min(2.0, 750 / max(1, clip.width))
         return page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), clip=clip, alpha=False).tobytes("png")
+
+
+def open_file(path):
+    """Open a file in the default program (where its text can be selected and copied)."""
+    try:
+        if os.name == "nt":
+            os.startfile(path)
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except OSError as error:
+        messagebox.showerror("열기 실패", f"{Path(path).name}: {error}")
+
+
+def make_copyable(text):
+    """Read-only Text that still lets the user select and copy (Ctrl+C, Ctrl+A, right-click)."""
+    def key(event):
+        if event.state & 0x4 and event.keysym.lower() in ("c", "a"):
+            if event.keysym.lower() == "a":
+                text.tag_add("sel", "1.0", "end")
+                return "break"
+            return None
+        if event.keysym in ("Left", "Right", "Up", "Down", "Prior", "Next", "Home", "End"):
+            return None
+        return "break"
+
+    def copy(all_text=False):
+        try:
+            value = text.get("1.0", "end-1c") if all_text else text.get("sel.first", "sel.last")
+        except tk.TclError:
+            value = text.get("1.0", "end-1c")
+        text.clipboard_clear()
+        text.clipboard_append(value)
+
+    menu = tk.Menu(text, tearoff=False)
+    menu.add_command(label="복사", command=copy)
+    menu.add_command(label="전체 복사", command=lambda: copy(True))
+    text.bind("<Key>", key)
+    text.bind("<<Paste>>", lambda event: "break")
+    text.bind("<<Cut>>", lambda event: "break")
+    text.bind("<Button-3>", lambda event: menu.tk_popup(event.x_root, event.y_root))
 
 
 def show_source_locations(parent, path, fields):
@@ -400,7 +485,12 @@ def show_source_locations(parent, path, fields):
         if not hits:
             image_label.configure(image="")
             image_label.image = None
-            display.configure(text="원본에서 같은 표기를 찾지 못했어요. PDF 원본을 직접 확인하세요.")
+            display.configure(text="원본에서 같은 표기를 찾지 못했어요. 아래 1페이지를 보거나 ‘PDF 열기’로 원본을 확인하세요.")
+            try:
+                image_label.image = tk.PhotoImage(data=base64.b64encode(source_preview(path, 0, None)).decode("ascii"))
+                image_label.configure(image=image_label.image)
+            except (OSError, ValueError, RuntimeError, IndexError, tk.TclError):
+                pass
             return
         position = (position + delta) % len(hits)
         page, box, matched = hits[position]
@@ -426,7 +516,7 @@ def show_source_locations(parent, path, fields):
             return
         show()
 
-    for text, callback in (("이전 위치", lambda: show(-1)), ("다음 위치", lambda: show(1))):
+    for text, callback in (("이전 위치", lambda: show(-1)), ("다음 위치", lambda: show(1)), ("PDF 열기", lambda: open_file(path))):
         ttk.Button(controls, text=text, command=callback).pack(side="left", padx=4)
     ttk.Label(window, text="같은 날짜나 금액이 여러 곳에 있으면 모두 표시해요. 주위 문구도 확인하세요.", padding=8).pack(anchor="w")
 
@@ -1033,6 +1123,7 @@ class App:
         self.rows = {}
         self.targets = {}
         self.invoice_like = {}
+        self.parts = {}  # combined PDFs: path -> page ranges of each invoice
         self.last_moves = []
         self.inbox_mode = False
         self.folder = None
@@ -1355,6 +1446,10 @@ class App:
                 record_error("pdf_read", error)
                 fields, note, number = ("", "", ""), "PDF 읽기 실패", ""
             self.invoice_like[path] = info.get("invoice_like", True)
+            if info.get("parts"):
+                self.parts[path] = info["parts"]
+            else:
+                self.parts.pop(path, None)
             self.rows[str(index)] = (path, fields, note, number)
             self.table.insert("", "end", iid=str(index))
         self.refresh()
@@ -1723,6 +1818,24 @@ class App:
         ttk.Button(footer, text="고른 파일에 적용", command=save).pack(side="right")
         entries[0].focus_set()
 
+    def split_combined(self, path):
+        parts = self.parts[path]
+        pages = ", ".join(f"{first + 1}" + (f"~{last + 1}" if last > first else "") + "쪽" for first, last in parts)
+        if not messagebox.askyesno("인보이스 나누기", (
+                f"{path.name}\n이 파일에는 판매자가 다른 인보이스 {len(parts)}개가 들어 있어요 ({pages}).\n"
+                f"인보이스마다 따로 파일로 나눌까요?\n원본은 ‘제외’ 폴더에 그대로 보관해요."), parent=self.root):
+            return
+        try:
+            created = split_pdf(path, parts)
+        except (OSError, RuntimeError, ValueError) as error:
+            record_error("split_pdf", error)
+            messagebox.showerror("나누기 실패", str(error), parent=self.root)
+            return
+        self.parts.pop(path, None)
+        self.load_folder()
+        self.notice(f"{len(created)}개 파일로 나눴어요: " + ", ".join(target.name for target in created)
+                    + f"\n원본은 ‘{EXCLUDED_FOLDER}’ 폴더에 있어요.", title="나누기 완료")
+
     def edit(self):
         selection = [key for key in self.table.selection() if key in self.rows]
         if len(selection) > 1:
@@ -1733,6 +1846,9 @@ class App:
             return
         key = selection[0]
         path, fields, _, number = self.rows[key]
+        if self.parts.get(path):
+            self.split_combined(path)
+            return
         dialog = InlineDialog(self.root)
         dialog.title("인보이스 정보 편집")
         dialog.transient(self.root)
@@ -1875,6 +1991,7 @@ class App:
         canvas.pack(fill="both", expand=True)
         text = tk.Text(right, wrap="word", font=("Consolas", 10))
         text.pack(fill="both", expand=True)
+        make_copyable(text)
         page_info = tk.StringVar()
         state = {"file": 0, "page": 0, "image": None, "content": ""}
 
@@ -1903,10 +2020,8 @@ class App:
                 record_error("markdown", error)
                 content, incomplete = f"읽지 못했어요: {error}", True
             state["content"] = content
-            text.configure(state="normal")
             text.delete("1.0", "end")
             text.insert("1.0", content)
-            text.configure(state="disabled")
             hint.set("본문 일부를 읽지 못했어요 · 원본을 확인하세요" if incomplete else "")
 
         def move(kind, step):

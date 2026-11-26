@@ -13,7 +13,7 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 from invoice_renamer import (  # noqa: E402
-    App, EditsFileError, duplicate_groups, free_name, import_evidence, work_folder, move_evidence, write_markdown, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
+    App, EditsFileError, duplicate_groups, free_name, import_evidence, work_folder, split_pdf, move_evidence, write_markdown, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
     read_invoice_details, remember_original_name, reserve_name,
 )
 from monthly_close import MonthlyClose, package_part, Transaction, decode_statement, german_import_error, index_pdfs, numbered_statement, read_statement_pdf  # noqa: E402
@@ -275,7 +275,23 @@ def run():
             check((inbox / "a.pdf").read_bytes() == b"%PDF-1.4 old" and (desk / "note.txt").exists() and len(history) == 2,
                   "Existing file kept, non-evidence left behind")
             check(free_name(inbox, "b.pdf").name == "b.pdf", "Free name")
-    print("PASS: v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+
+        # 14. v1.7.1: one PDF with two marketplace invoices is detected and split; the original goes to 제외.
+        combined = root / "combo" / "order.pdf"
+        combined.parent.mkdir()
+        with pymupdf.open() as document:
+            for text in ("Rechnung\nSeite 1 von 1\nVerkauft von Shop Eins GmbH\nRechnungsnummer DE1AAA1\nZahlbetrag 18,99 EUR",
+                         "Rechnung\nSeite 1 von 2\nVerkauft von Shop Zwei GmbH\nRechnungsnummer DE2BBB2\nZahlbetrag 11,00 EUR",
+                         "Rechnung\nRechnungsnummer DE2BBB2\nSeite 2 von 2"):
+                document.new_page().insert_text((60, 80), text)
+            document.save(combined)
+        info = {}
+        fields, note, number, _ = read_invoice_details(combined, info)
+        check(info.get("parts") == [(0, 0), (1, 2)] and "2개" in note and not fields[1], f"Combined PDF detected: {info} {note}")
+        parts = split_pdf(combined, info["parts"])
+        check([read_invoice_details(path)[0][1:] for path in parts] == [("Shop Eins GmbH", "18.99 EUR"), ("Shop Zwei GmbH", "11.00 EUR")]
+              and not combined.exists() and (combined.parent / "제외" / "order__나누기전_원본.pdf").exists(), "Combined PDF split")
+    print("PASS: v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":
