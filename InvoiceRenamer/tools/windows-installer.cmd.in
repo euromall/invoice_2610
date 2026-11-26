@@ -1,0 +1,105 @@
+@echo off
+setlocal DisableDelayedExpansion
+chcp 65001 >nul
+set "INVOICE_SETUP_FILE=%~f0"
+powershell.exe -NoProfile -Command "$text=[IO.File]::ReadAllText($env:INVOICE_SETUP_FILE); $body=$text -split '(?m)^# INVOICE_SETUP_SCRIPT\r?$',2; if($body.Length -ne 2){exit 1}; & ([ScriptBlock]::Create($body[1]))"
+if errorlevel 1 goto failed
+exit /b 0
+:failed
+echo [설치 오류] 인터넷 연결과 위 오류 내용을 확인하세요.
+pause
+exit /b 1
+# INVOICE_SETUP_SCRIPT
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$install = Join-Path $env:LOCALAPPDATA 'InvoiceRenamer\app'
+$managedPython = Join-Path $env:LOCALAPPDATA 'InvoiceRenamer\Python313'
+$temp = Join-Path ([IO.Path]::GetTempPath()) ('InvoiceRenamer-' + [Guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $temp, $install -Force | Out-Null
+    $payload = @'
+@ZIP_PAYLOAD@
+'@
+    $package = Join-Path $temp 'app.zip'
+    [IO.File]::WriteAllBytes($package, [Convert]::FromBase64String($payload))
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $package).Hash -ne '@ZIP_SHA256@') {
+        throw 'The installer payload is damaged. Download it again.'
+    }
+    $unpacked = Join-Path $temp 'app'
+    Expand-Archive -LiteralPath $package -DestinationPath $unpacked
+    if (Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" |
+            Where-Object { $_.CommandLine -match 'invoice_renamer\.py' }) {
+        throw 'Close InvoiceRenamer before updating.'
+    }
+    $nextVersion = (Get-Content -LiteralPath (Join-Path $unpacked 'VERSION') -Raw).Trim()
+    if (Test-Path -LiteralPath (Join-Path $install 'invoice_renamer.py')) {
+        $versionPath = Join-Path $install 'VERSION'
+        $oldVersion = if (Test-Path -LiteralPath $versionPath) { (Get-Content -LiteralPath $versionPath -Raw).Trim() } else { 'legacy' }
+        Write-Host "InvoiceRenamer: $oldVersion -> $nextVersion"
+        $root = Split-Path $install -Parent
+        $backup = Join-Path $root ('update-backups\' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
+        $savedApp = Join-Path $backup 'app'
+        $savedRecords = Join-Path $backup 'records'
+        New-Item -ItemType Directory -Path $savedApp, $savedRecords -Force | Out-Null
+        Get-ChildItem -LiteralPath $install -Force |
+            Where-Object { $_.Name -notin @('.venv', 'tessdata', '__pycache__') } |
+            Copy-Item -Destination $savedApp -Recurse
+        foreach ($name in @('monthly-close.json', 'invoice-edits.json')) {
+            $record = Join-Path $root $name
+            if (Test-Path -LiteralPath $record) { Copy-Item -LiteralPath $record -Destination $savedRecords }
+        }
+        Set-Content -LiteralPath (Join-Path $backup 'backup-ready.txt') -Value $oldVersion -Encoding Ascii
+        Write-Host "Update backup: $backup"
+    } else {
+        Write-Host "InvoiceRenamer: $nextVersion"
+    }
+    Get-ChildItem -LiteralPath $unpacked | Copy-Item -Destination $install -Recurse -Force
+
+    $venvPython = Join-Path $install '.venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        $python = Join-Path $managedPython 'python.exe'
+        if (-not (Test-Path -LiteralPath $python)) {
+            $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+            if ($launcher) {
+                $detected = & $launcher.Source -3 -c 'import sys, tkinter; assert sys.version_info >= (3, 10); print(sys.executable)' 2>$null
+                if ($LASTEXITCODE -eq 0 -and $detected -and (Test-Path -LiteralPath $detected)) {
+                    $python = $detected
+                }
+            }
+        }
+        if (-not (Test-Path -LiteralPath $python)) {
+            if (-not [Environment]::Is64BitOperatingSystem) { throw 'Use 64-bit Windows or install Python 3.10+ and run Start.bat from the ZIP.' }
+            Write-Host 'Downloading Python from python.org...'
+            $setup = Join-Path $temp 'python-setup.exe'
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://www.python.org/ftp/python/3.13.11/python-3.13.11-amd64.exe' -OutFile $setup
+            $signature = Get-AuthenticodeSignature -FilePath $setup
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Python Software Foundation') {
+                throw 'Python installer signature could not be verified.'
+            }
+            $args = @('/quiet','InstallAllUsers=0','Include_launcher=0','Include_test=0','Include_tcltk=1','Include_pip=1',"TargetDir=`"$managedPython`"")
+            $result = Start-Process -FilePath $setup -ArgumentList $args -Wait -PassThru
+            if ($result.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $python)) {
+                throw "Python setup failed: $($result.ExitCode)"
+            }
+        }
+        $env:INVOICE_SETUP_PYTHON = $python
+    }
+
+    $launcherPath = Join-Path $install 'Start.bat'
+    $programs = [Environment]::GetFolderPath('Programs')
+    if ($programs -and (Test-Path -LiteralPath $programs)) {
+        $shell = New-Object -ComObject WScript.Shell
+        $link = $shell.CreateShortcut((Join-Path $programs 'InvoiceRenamer.lnk'))
+        $link.TargetPath = $launcherPath
+        $link.WorkingDirectory = $install
+        $link.Save()
+    }
+    Write-Host "InvoiceRenamer: $install"
+    & $launcherPath
+    if ($LASTEXITCODE -ne 0) { throw 'The application could not start. See the preceding error.' }
+} catch {
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+} finally {
+    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+}
