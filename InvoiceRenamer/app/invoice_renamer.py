@@ -149,7 +149,8 @@ def tessdata_folder():
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 EVIDENCE_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
 EXCLUDED_FOLDER = "제외"
-STATEMENT_FOLDER = "명세서"  # imported bank/card statements, kept apart from evidence
+STATEMENT_FOLDER = "명세서"
+DUPLICATE_FOLDER = "중복"  # duplicate invoices set aside by 중복 정리 (never deleted)  # imported bank/card statements, kept apart from evidence
 INVOICE_WORDS = (
     "rechnung", "rechnungsnummer", "invoice", "receipt", "quittung", "beleg", "kassenbon", "ust", "mwst",
     "umsatzsteuer", "steuernummer", "vat", "netto", "brutto", "gesamt", "betrag", "summe", "total", "iban",
@@ -643,6 +644,58 @@ def reserve_name(folder, name, source, occupied):
     return folder / candidate
 
 
+def invoice_identity(fields, number):
+    """(seller, date, amount, number) used to spot the same invoice saved twice, or None if incomplete."""
+    day, seller, amount = fields
+    seller = re.sub(r"[\W_]+", "", seller.casefold())
+    number = re.sub(r"\s+", "", (number or "").casefold())
+    if not (day and seller and amount and number):
+        return None
+    return seller, day, amount.replace(",", ".").upper(), number
+
+
+def duplicate_groups(entries):
+    """Group files that are the same invoice.
+
+    entries: iterable of (key, path, fields, number, checksum). Two files belong together when their
+    content is identical, or when seller, issue date, total and invoice number all match.
+    Returns a list of groups; each group is a list of entries, the file to keep first."""
+    parent = {}
+
+    def find(item):
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    entries = list(entries)
+    seen = {}
+    for entry in entries:
+        key, _, fields, number, checksum = entry
+        parent[key] = key
+        for token in (("hash", checksum) if checksum else None, ("fields", invoice_identity(fields, number))):
+            if token is None or token[1] is None:
+                continue
+            if token in seen:
+                parent[find(key)] = find(seen[token])
+            else:
+                seen[token] = key
+    groups = {}
+    for entry in entries:
+        groups.setdefault(find(entry[0]), []).append(entry)
+
+    def keep_first(entry):
+        path = entry[1]
+        matched = path.name.startswith("[") or path.parent.name.startswith("매칭완료_")
+        try:
+            received = path.stat().st_mtime_ns  # the copy that arrived first is kept
+        except OSError:
+            received = 0
+        return (not matched, received, len(path.parts), path.name.casefold())
+
+    return [sorted(group, key=keep_first) for group in groups.values() if len(group) > 1]
+
+
 def move_without_overwrite(source, target):
     if os.name == "nt":
         source.rename(target)
@@ -816,6 +869,7 @@ class App:
         self.apply_button.pack(side="left", padx=6)
         ttk.Button(toolbar, text="원본·내용 나란히 보기", command=self.view_contents).pack(side="left", padx=6)
         more_menu(toolbar, "더보기 ▾", [
+            ("중복 인보이스 정리", self.clean_duplicates),
             ("인보이스 아닌 파일 → 제외 폴더", self.exclude_selected),
             ("마크다운 저장", self.save_markdown),
             ("정리 되돌리기", self.undo),
@@ -983,7 +1037,7 @@ class App:
                 path for path in candidates
                 if path.suffix.lower() in RENAMER_EXTENSIONS and not path.is_symlink() and path.is_file()
                 and path.resolve().is_relative_to(root)
-                and not {EXCLUDED_FOLDER, STATEMENT_FOLDER} & set(path.relative_to(self.folder).parts[:-1])
+                and not {EXCLUDED_FOLDER, STATEMENT_FOLDER, DUPLICATE_FOLDER} & set(path.relative_to(self.folder).parts[:-1])
             )
         except OSError as error:
             self.status.set(str(error))
@@ -1014,7 +1068,10 @@ class App:
             self.rows[str(index)] = (path, fields, note, number)
             self.table.insert("", "end", iid=str(index))
         self.refresh()
-        self.status.set(f"{self.folder}  |  증빙 {len(paths)}개")
+        groups = duplicate_groups((key, path, fields, number, cached_digest(path))
+                                  for key, (path, fields, _, number) in self.rows.items())
+        hint = f"  |  중복 의심 {len(groups)}묶음 · 더보기 → 중복 인보이스 정리" if groups else ""
+        self.status.set(f"{self.folder}  |  증빙 {len(paths)}개{hint}")
 
     def row_check(self, path, fields, note, number):
         """Return (text, tag) describing how well the evidence was read."""
@@ -1091,6 +1148,121 @@ class App:
         self.summary = counts
         if self.on_change:
             self.on_change()
+
+    def clean_duplicates(self):
+        """Show invoices saved more than once and move the extra copies into the 중복 folder."""
+        if self.folder is None or not self.rows:
+            self.notice("먼저 증빙 폴더를 여세요.")
+            return
+        entries = []
+        for key, (path, fields, note, number) in self.rows.items():
+            checksum = cached_digest(path)
+            entries.append((key, path, fields, number, checksum))
+        groups = duplicate_groups(entries)
+        if not groups:
+            self.notice("중복으로 보이는 인보이스가 없어요.\n내용이 같거나, 업체·발행일·총액·번호가 모두 같은 파일을 찾아요.")
+            return
+        dialog = InlineDialog(self.root)
+        dialog.title("중복 인보이스 정리")
+        dialog.geometry("1000x600")
+        dialog.grab_set()
+        ttk.Label(dialog, text=f"같은 인보이스로 보이는 묶음 {len(groups)}개예요. 체크한 파일은 규칙대로 파일명을 바꿔 ‘{DUPLICATE_FOLDER}’ 폴더로 옮겨요(삭제하지 않아요).\n"
+                               "내용이 완전히 같은 사본은 미리 체크했어요. ‘정보만 같음’은 독촉장·재발행본일 수 있으니 열어 보고 고르세요. 묶음마다 한 개는 꼭 남아요.",
+                  wraplength=950, padding=(14, 10, 14, 6)).pack(anchor="w")
+        frame = ttk.Frame(dialog)
+        frame.pack(fill="both", expand=True, padx=14)
+        columns = ("move", "group", "file", "day", "seller", "amount", "number", "kind")
+        table = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        for column, label, width in zip(columns, ("옮김", "묶음", "파일", "발행일", "업체", "총액", "번호", "판정"),
+                                        (50, 50, 290, 90, 150, 95, 110, 110)):
+            table.heading(column, text=label)
+            table.column(column, width=width, minwidth=40, anchor="center" if column in ("move", "group") else "w")
+        bar = ttk.Scrollbar(frame, command=table.yview)
+        table.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        table.pack(fill="both", expand=True)
+        table.tag_configure("keep", background=COLORS.get("ok_bg", "#e8f5ec"))
+        table.tag_configure("move", foreground=COLORS["muted"])
+        marked, rows, members = {}, {}, {}
+        for number, group in enumerate(groups, 1):
+            keep_hash = group[0][4]
+            members[number] = [entry[0] for entry in group]
+            for index, entry in enumerate(group):
+                key, path, fields, invoice_number, checksum = entry
+                exact = index > 0 and checksum and checksum == keep_hash
+                kind = "남길 파일" if index == 0 else "내용 동일" if exact else "정보만 같음"
+                marked[key] = bool(exact)
+                rows[key] = (number, path, fields, invoice_number, kind)
+
+        def fill():
+            table.delete(*table.get_children())
+            for key, (number, path, fields, invoice_number, kind) in rows.items():
+                table.insert("", "end", iid=key, tags=("move" if marked[key] else "keep" if kind == "남길 파일" else "",),
+                             values=("☑" if marked[key] else "☐", number, str(path.relative_to(self.folder)), *fields, invoice_number, kind))
+            count = sum(marked.values())
+            info.set(f"옮길 파일 {count}개")
+
+        def toggle(event):
+            key = table.identify_row(event.y)
+            if not key or table.identify_column(event.x) != "#1":
+                return
+            group = rows[key][0]
+            if not marked[key] and all(marked[other] for other in members[group] if other != key):
+                show_notice(dialog, "묶음마다 한 개는 남겨야 해요.")
+                return "break"
+            marked[key] = not marked[key]
+            fill()
+            table.selection_set(key)
+            return "break"
+
+        def open_selected(_event=None):
+            selection = table.selection()
+            if selection:
+                open_evidence(rows[selection[0]][1])
+
+        def apply():
+            chosen = [key for key, value in marked.items() if value]
+            if not chosen:
+                show_notice(dialog, "옮길 파일을 체크하세요.")
+                return
+            target_folder = self.folder / DUPLICATE_FOLDER
+            history, errors = [], []
+            try:
+                target_folder.mkdir(exist_ok=True)
+                occupied = {item.name.casefold() for item in target_folder.iterdir()}
+            except OSError as error:
+                messagebox.showerror("중복 폴더 만들기 실패", str(error), parent=dialog)
+                return
+            for key in chosen:
+                _, path, fields, invoice_number, _ = rows[key]
+                name = proposed_name(fields, path, invoice_number) or path.name  # same naming rule as 파일명 변경
+                target = reserve_name(target_folder, name, path, occupied)
+                try:
+                    if target is None:
+                        raise OSError("파일명이 너무 길어요.")
+                    checksum = digest(path)
+                    remember_original_name(path, checksum)
+                    move_without_overwrite(path, target)
+                    history.append((path, target, checksum))
+                except OSError as error:
+                    errors.append(f"{path.name}: {error}")
+            if history:
+                self.last_moves = history
+            dialog.destroy()
+            self.load_folder()
+            self.status.set(f"‘{DUPLICATE_FOLDER}’ 폴더로 {len(history)}개 이동 · 실패 {len(errors)}개 · 더보기 → 정리 되돌리기로 되돌릴 수 있어요")
+            if errors:
+                messagebox.showerror("이동 실패", "\n".join(errors[:8]), parent=self.root)
+
+        table.bind("<Button-1>", toggle)
+        table.bind("<Double-1>", open_selected)
+        info = tk.StringVar()
+        footer = tk.Frame(dialog, background=COLORS["bg"])
+        footer.pack(fill="x", padx=14, pady=10)
+        ttk.Button(footer, text="파일 열기", command=open_selected).pack(side="left")
+        tk.Label(footer, textvariable=info, background=COLORS["bg"], foreground=COLORS["muted"]).pack(side="left", padx=12)
+        ttk.Button(footer, text="체크한 파일을 중복 폴더로 이동", style="Primary.TButton", command=apply).pack(side="right")
+        fill()
 
     def exclude_selected(self):
         selection = [key for key in self.table.selection() if key in self.rows]

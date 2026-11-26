@@ -13,7 +13,7 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 from invoice_renamer import (  # noqa: E402
-    App, EditsFileError, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
+    App, EditsFileError, duplicate_groups, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
     read_invoice_details, remember_original_name, reserve_name,
 )
 from monthly_close import MonthlyClose, Transaction, decode_statement, german_import_error, index_pdfs, numbered_statement, read_statement_pdf  # noqa: E402
@@ -198,7 +198,20 @@ def run():
         check(close.file_statement({"path": str(practice_file), "period": "2026-11"}, [])[1] is None, "Practice mode does not move")
         (folder / "invoice-edits.json").write_text("{}", encoding="utf-8")
         check(not any("명세서" in document.path.parts for document in index_pdfs(evidence)[0]), "Statement folder not indexed as evidence")
-    print("PASS: v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+
+        # 10. v1.4.1: duplicate invoices by content or by seller/date/total/number.
+        base = (("2026-11-25", "greenist GmbH", "58.39 EUR"), "R1044176")
+        entries = [
+            ("a", Path("in/scan.pdf"), *base, "h1"),
+            ("b", Path("매칭완료_2611/[611-001]_x.pdf"), *base, "h2"),
+            ("c", Path("in/copy.pdf"), ("2026-11-25", "Greenist GmbH", "58,39 EUR"), "R 1044176", "h3"),
+            ("d", Path("in/other.pdf"), ("2026-11-25", "greenist GmbH", "58.39 EUR"), "R1044177", "h4"),
+            ("e", Path("in/same-bytes.pdf"), ("", "", ""), "", "h4"),
+            ("f", Path("in/no-number.pdf"), ("2026-11-25", "greenist GmbH", "58.39 EUR"), "", "h6"),
+        ]
+        groups = sorted(([entry[0] for entry in group] for group in duplicate_groups(entries)), key=len)
+        check(groups == [["d", "e"], ["b", "c", "a"]], f"Duplicate groups, matched file kept first: {groups}")
+    print("PASS: v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":
