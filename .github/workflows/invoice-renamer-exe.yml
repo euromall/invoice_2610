@@ -34,6 +34,7 @@ jobs:
             --splash tools\splash.png `
             --add-data "$app\VERSION;." `
             --add-data "$app\사용법.txt;." `
+            --add-data "$app\사용법.html;." `
             --add-data "$app\Beispiele;Beispiele" `
             --add-data "$app\tessdata;tessdata" `
             "$app\invoice_renamer.py"

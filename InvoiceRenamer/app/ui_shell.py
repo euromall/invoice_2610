@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tkinter as tk
+import webbrowser
 from tkinter import messagebox, ttk
 
 from release_info import VERSION
@@ -180,14 +181,15 @@ class Shell:
         tk.Frame(self.sidebar, height=1, background=COLORS["line"]).pack(fill="x", padx=14, pady=(16, 8))
         tk.Label(self.sidebar, text="도구", font=FONT_BOLD, background=COLORS["panel"], foreground=COLORS["muted"],
                  anchor="w").pack(fill="x", padx=18)
-        tools = [("작업 기록 백업", lambda: self.close and self.close.export_backup()),
+        tools = [("지난 달 열기", self.open_past_month),
+                 ("작업 기록 백업", lambda: self.close and self.close.export_backup()),
                  ("작업 기록 복원", lambda: self.close and self.close.restore_backup()),
                  ("전체 작업 백업", lambda: self.close and self.close.export_workspace_backup()),
                  ("전체 작업 복원", lambda: self.close and self.close.restore_workspace_backup()),
                  ("설치·작동 점검", self.app.diagnose), ("오류 진단 저장", self.app.save_diagnostics),
                  ("사용법 열기", self.open_manual)]
         if not self.practice_folder:
-            tools.insert(4, ("연습 모드 열기", self.app.open_practice))
+            tools.insert(5, ("연습 모드 열기", self.app.open_practice))
         for label, command in tools:
             link = tk.Label(self.sidebar, text=label, anchor="w", font=FONT, background=COLORS["panel"],
                             foreground=COLORS["ink"], cursor="hand2", padx=18, pady=3)
@@ -198,13 +200,21 @@ class Shell:
         tk.Label(self.sidebar, text=f"v{VERSION}", font=FONT_SMALL, background=COLORS["panel"],
                  foreground=COLORS["muted"]).pack(side="bottom", pady=8)
 
+    def open_past_month(self):
+        if self.close:
+            self.show(2)
+            self.close.open_past_month()
+
     def open_manual(self):
-        manual = Path(__file__).resolve().parent / "사용법.txt"
+        folder = Path(__file__).resolve().parent
+        manual = folder / "사용법.html"
+        if not manual.is_file():
+            manual = folder / "사용법.txt"
         try:
             if os.name == "nt":
                 os.startfile(manual)
-            else:
-                raise OSError("Windows에서만 열 수 있어요.")
+            elif not webbrowser.open(manual.as_uri()):
+                raise OSError("사용법 파일을 열 수 없어요.")
         except OSError as error:
             messagebox.showerror("사용법 열기 실패", str(error), parent=self.root)
 
@@ -244,6 +254,8 @@ class Shell:
             values = ["전체", *months]
             if list(self.month["values"]) != values:
                 self.month["values"] = values
+            if self.month.get() != self.close.month_filter.get():
+                self.month.set(self.close.month_filter.get())
             sources = len(self.close.statement_sources)
             notes[2] = f"명세서 {sources}개 · 거래 {len(self.close.transactions)}건" if sources else "명세서 추가"
             if sources:

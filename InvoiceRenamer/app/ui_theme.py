@@ -51,6 +51,7 @@ def apply_style(root):
     style.configure("Header.TLabel", background=COLORS["navy"], foreground="#ffffff", font=FONT_BOLD)
     style.configure("Status.TLabel", background=COLORS["panel"], foreground=COLORS["muted"], padding=(12, 6))
     style.configure("TCheckbutton", background=COLORS["bg"])
+    style.configure("Panel.TCheckbutton", background=COLORS["panel"])
     style.configure("TButton", padding=(10, 5), background=COLORS["panel"], bordercolor=COLORS["line"])
     style.map("TButton", background=[("active", COLORS["gray_light"])])
     for name, color, light in (("Primary", "blue", "blue_light"), ("Success", "green", "green_light"),
@@ -142,7 +143,7 @@ class InlineDialog(tk.Frame):
         self._place()
         self.lift()
         self.bind_class(self._tag, "<Escape>", lambda event: self._request_close())
-        self.after_idle(self._finish)
+        self.after(30, self._finish)
 
     # Toplevel-compatible calls ------------------------------------------
     def title(self, text=None):
@@ -194,8 +195,11 @@ class InlineDialog(tk.Frame):
 
     # Layout --------------------------------------------------------------
     def _available_width(self):
-        self._area.update_idletasks()
-        return max(420, self._area.winfo_width() - 12)
+        width = self._area.winfo_width()
+        if width <= 1:
+            self._area.update_idletasks()
+            width = self._area.winfo_width()
+        return max(420, width - 12)
 
     def _place(self):
         width = min(self._width or 640, self._available_width())

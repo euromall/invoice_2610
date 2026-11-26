@@ -909,8 +909,7 @@ class MonthlyClose:
         self.bar_area.pack(fill="x")
         steps = {
             2: [("은행·카드 명세서 추가", self.open_csv, "Primary.TButton"), ("여러 명세서 한 번에 추가", self.open_batch, None),
-                ("이어서 작업", self.resume, None), ("명세서 기간 점검", self.show_statement_periods, None),
-                ("번호 표시 PDF 명세서 보기", self.open_numbered_statements, None)],
+                ("이어서 작업", self.resume, None), ("지난 달 열기", self.open_past_month, None)],
             3: [("증빙 폴더 선택", self.select_folder, None), ("일괄 매칭 후보", self.batch_candidates, None),
                 ("카드대금·내부이체 후보", self.transfer_candidates, None), ("결제·환불 연결", self.link_refunds, None),
                 ("매칭완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
@@ -929,6 +928,10 @@ class MonthlyClose:
             frame = ttk.Frame(self.bar_area)
             for label, command, style in items:
                 ttk.Button(frame, text=label, command=command, style=style or "TButton").pack(side="left", padx=(0, 6))
+            if number == 2:
+                more_menu(frame, "더보기 ▾", [("명세서 양식 관리", self.manage_formats),
+                                             ("번호 표시 PDF 명세서 보기", self.open_numbered_statements),
+                                             ("명세서 기간 점검", self.show_statement_periods)]).pack(side="left")
             if number == 3:
                 more_menu(frame, "더보기 ▾", [("명세서 근거로 처리 (수수료 등)", self.mark_statement_evidence),
                                              ("이동 되돌리기", self.undo_archive)]).pack(side="left")
@@ -1354,11 +1357,14 @@ class MonthlyClose:
         }
         state.setdefault("source_accounts", {})[source_key] = account
         if remember and spec.get("layout"):
-            state.setdefault("import_profiles", {}).setdefault(spec["layout"], {})[account] = {
-                key: spec[key] for key in PROFILE_FIELDS
-            }
+            profiles = state.setdefault("import_profiles", {}).setdefault(spec["layout"], {})
+            label = profiles.get(account, {}).get("label")
+            profiles[account] = {key: spec[key] for key in PROFILE_FIELDS}
+            if label:
+                profiles[account]["label"] = label
         state.setdefault("statement_paths", {})[source_key] = str(source)
         state.setdefault("source_resolutions", {})[source_key] = resolutions
+        state.setdefault("source_specs", {})[source_key] = {**spec, "resolutions": resolutions}
         specs = {**self.session_specs, source_key: {**spec, "resolutions": resolutions}}
         if remember:
             state["session"] = {"sources": specs, "folder": str(self.folder) if self.folder else ""}
@@ -1380,6 +1386,10 @@ class MonthlyClose:
             return
         if self.transactions and not messagebox.askyesno("이어서 작업", "현재 화면을 마지막 저장 작업으로 바꿀까요?", parent=self.root):
             return
+        self.reload_sources(sources, session.get("folder"))
+
+    def reload_sources(self, sources, folder=None):
+        """Read saved statements again with their saved settings. Returns the number loaded."""
         prepared, problems = {}, []
         for checksum, spec in sources.items():
             path = Path(spec["path"])
@@ -1405,10 +1415,193 @@ class MonthlyClose:
             self.unresolved.set(True)
             for checksum, (spec, transactions, errors) in prepared.items():
                 self.add_statement(checksum, spec, transactions, errors, remember=False)
-            if session.get("folder"):
-                self.load_pdfs(Path(session["folder"]))
+            if folder:
+                self.load_pdfs(Path(folder))
         if problems:
             messagebox.showwarning("다시 열지 못한 명세서", "\n".join(problems), parent=self.root)
+        return len(prepared)
+
+    def saved_statements(self):
+        """Every statement imported before: {checksum: (months, account, path, spec or None)}."""
+        specs = {**self.state.get("session", {}).get("sources", {}), **self.state.get("source_specs", {})}
+        result = {}
+        for checksum, path in self.state.get("statement_paths", {}).items():
+            period = self.state.get("statement_periods", {}).get(checksum, {})
+            months = set()
+            for key, sources in self.state.get("transaction_sources", {}).items():
+                if checksum in sources and key in self.state["records"]:
+                    months.add(self.state["records"][key].get("period", ""))
+            if not months and period.get("start"):
+                months.add(str(period["start"])[:7])
+            result[checksum] = (sorted(month for month in months if month), period.get("account", ""), Path(path),
+                                specs.get(checksum))
+        return result
+
+    BUILT_IN_FORMATS = (
+        ("American Express (PDF)", "내장 판독기", "americanexpress.de · Abrechnungszeitraum"),
+        ("DKB Kreditkarte (PDF)", "내장 판독기", "Deutsche Kreditbank AG · Ihre Abrechnung vom"),
+        ("Deutsche Bank Konto (PDF)", "내장 판독기", "Deutsche Bank AG · Alter Saldo per"),
+        ("기타 PDF", "표 자동 인식", "결과를 꼭 확인하세요. 정확하지 않으면 CSV를 쓰거나 샘플을 보내 주세요."),
+    )
+
+    def format_rows(self):
+        """Saved import settings grouped by card/account name: [(layout, account, profile, files)]."""
+        files = {}
+        for checksum, info in self.state.get("statement_periods", {}).items():
+            files.setdefault(info.get("account", ""), []).append(info.get("file", ""))
+        rows = []
+        for layout, profiles in self.state.get("import_profiles", {}).items():
+            for account, profile in profiles.items():
+                rows.append((layout, account, profile, files.get(account, [])))
+        return sorted(rows, key=lambda row: (row[2].get("label") or row[1]).casefold())
+
+    def manage_formats(self):
+        dialog = InlineDialog(self.root)
+        dialog.title("명세서 양식 관리")
+        dialog.geometry("980x600")
+        dialog.grab_set()
+        footer = tk.Frame(dialog, background=COLORS["bg"])
+        footer.pack(side="bottom", fill="x", padx=14, pady=(6, 12))
+        ttk.Label(dialog, text="명세서를 처음 불러올 때 고른 열 설정이 카드·계좌 이름별로 저장돼요. 같은 양식의 파일을 다시 불러오면 자동으로 적용돼요.",
+                  wraplength=920, padding=(14, 10, 14, 4)).pack(anchor="w")
+        tk.Label(dialog, text="저장된 양식", font=FONT_BOLD, background=COLORS["bg"], anchor="w").pack(fill="x", padx=14, pady=(6, 2))
+        saved = self.table(dialog, ("표시 이름", "카드·계좌 (거래 구분용)", "통화", "날짜 순서", "부호 반전", "불러온 파일"),
+                           (170, 170, 60, 100, 80, 360))
+        tk.Label(dialog, text="프로그램에 들어 있는 PDF 양식", font=FONT_BOLD, background=COLORS["bg"], anchor="w").pack(fill="x", padx=14, pady=(8, 2))
+        built_in = self.table(dialog, ("양식", "방식", "알아보는 기준"), (220, 120, 600))
+        built_in.configure(height=4)
+        built_in.master.pack_configure(expand=False)
+        for row in self.BUILT_IN_FORMATS:
+            built_in.insert("", "end", values=row)
+        rows = {}
+
+        def fill():
+            saved.delete(*saved.get_children())
+            rows.clear()
+            for index, (layout, account, profile, used) in enumerate(self.format_rows()):
+                rows[str(index)] = (layout, account)
+                saved.insert("", "end", iid=str(index), values=(
+                    profile.get("label") or account, account, profile.get("currency", ""), profile.get("date_order", ""),
+                    "예" if profile.get("flip_sign") else "", ", ".join(dict.fromkeys(used))[:120] or "-"))
+            if not rows:
+                saved.insert("", "end", values=("아직 저장된 양식이 없어요", "", "", "", "", ""))
+
+        def chosen():
+            selection = saved.selection()
+            if not selection or selection[0] not in rows:
+                messagebox.showinfo("명세서 양식", "목록에서 양식을 하나 선택하세요.", parent=dialog)
+                return None
+            return rows[selection[0]]
+
+        def rename():
+            target = chosen()
+            if not target:
+                return
+            layout, account = target
+            current = self.state["import_profiles"][layout][account].get("label") or account
+            label = simpledialog.askstring("표시 이름", "목록에 보일 이름 (예: DKB 비자카드 개인)\n거래 구분용 이름은 바뀌지 않아요.",
+                                           initialvalue=current, parent=dialog)
+            if label is None:
+                return
+            state = deepcopy(self.state)
+            state["import_profiles"][layout][account]["label"] = label.strip()
+            if self.save(state):
+                fill()
+
+        def forget():
+            target = chosen()
+            if not target:
+                return
+            layout, account = target
+            if not messagebox.askyesno("양식 삭제", f"‘{account}’ 양식 설정을 지울까요?\n이미 불러온 거래·연결·메모는 지워지지 않아요. 다음에 같은 파일을 불러오면 열을 다시 고르게 돼요.", parent=dialog):
+                return
+            state = deepcopy(self.state)
+            del state["import_profiles"][layout][account]
+            if not state["import_profiles"][layout]:
+                del state["import_profiles"][layout]
+            if self.save(state):
+                fill()
+
+        ttk.Button(footer, text="표시 이름 바꾸기", command=rename).pack(side="left")
+        ttk.Button(footer, text="양식 삭제", command=forget).pack(side="left", padx=(6, 0))
+        tk.Label(footer, text="새 PDF 양식이 필요하면 개인정보를 가린 샘플 1장을 보내 주세요.", background=COLORS["bg"],
+                 foreground=COLORS["muted"]).pack(side="right")
+        fill()
+
+    def open_past_month(self):
+        saved = self.saved_statements()
+        if not saved:
+            self.notice("아직 불러온 적 있는 명세서가 없어요.")
+            return
+        months = sorted({month for months, *_ in saved.values() for month in months}, reverse=True)
+        dialog = InlineDialog(self.root)
+        dialog.title("지난 달 열기")
+        dialog.geometry("900x560")
+        dialog.grab_set()
+        ttk.Label(dialog, text="월을 고르면 그달 명세서를 다시 불러와요. 연결·메모·번호·제출 이력은 그대로 이어져요. 확정한 달은 ‘월 마감 확정·재열기’에서 다시 열어야 수정할 수 있어요.",
+                  wraplength=840, padding=(14, 10, 14, 4)).pack(anchor="w")
+        top = tk.Frame(dialog, background=COLORS["bg"])
+        top.pack(fill="x", padx=14, pady=(4, 8))
+        tk.Label(top, text="월", font=FONT_BOLD, background=COLORS["bg"]).pack(side="left")
+        month = ttk.Combobox(top, values=months, state="readonly", width=10)
+        month.pack(side="left", padx=8)
+        if months:
+            month.current(0)
+        table = self.table(dialog, ("선택", "명세서 파일", "카드·계좌", "포함 월", "상태"), (50, 300, 150, 150, 200))
+        table.tag_configure("off", foreground=COLORS["muted"])
+        picked = {}
+        periods = self.state.get("periods", {})
+
+        def state_of(path, spec):
+            if spec is None:
+                return "설정 없음 · 다시 추가 필요"
+            if not path.is_file():
+                return "파일 없음 · 위치 확인"
+            return "열 수 있음"
+
+        def fill(_event=None):
+            table.delete(*table.get_children())
+            picked.clear()
+            chosen = month.get()
+            for checksum, (covered, account, path, spec) in saved.items():
+                if chosen not in covered:
+                    continue
+                ready = state_of(path, spec) == "열 수 있음"
+                picked[checksum] = ready
+                table.insert("", "end", iid=checksum, tags=() if ready else ("off",), values=(
+                    "☑" if ready else "–", path.name, account, ", ".join(covered), state_of(path, spec)))
+            locked = periods.get(chosen, {}).get("locked")
+            info.set(f"{chosen} · {'마감 확정됨 (보기 전용)' if locked else '수정 가능'}")
+
+        def toggle(event):
+            key = table.identify_row(event.y)
+            if key and state_of(saved[key][2], saved[key][3]) == "열 수 있음":
+                picked[key] = not picked[key]
+                table.set(key, "선택", "☑" if picked[key] else "☐")
+
+        def go():
+            chosen = {key: saved[key][3] for key, value in picked.items() if value}
+            if not chosen:
+                messagebox.showerror("지난 달 열기", "열 수 있는 명세서를 한 개 이상 선택하세요.", parent=dialog)
+                return
+            if self.transactions and not messagebox.askyesno("지난 달 열기", "지금 화면의 거래 대신 선택한 달의 명세서를 불러올까요?\n지금 작업은 ‘이어서 작업’으로 다시 열 수 있어요.", parent=dialog):
+                return
+            target = month.get()
+            dialog.destroy()
+            folder = self.folder or (Path(self.state.get("session", {}).get("folder")) if self.state.get("session", {}).get("folder") else None)
+            if self.reload_sources(chosen, folder if folder and Path(folder).is_dir() else None):
+                self.month_filter.set(target)
+                self.refresh()
+                self.status.set(f"{target} 명세서를 열었어요.")
+
+        info = tk.StringVar()
+        month.bind("<<ComboboxSelected>>", fill)
+        table.bind("<Button-1>", toggle)
+        footer = tk.Frame(dialog, background=COLORS["bg"])
+        footer.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Label(footer, textvariable=info, background=COLORS["bg"], foreground=COLORS["muted"]).pack(side="left")
+        ttk.Button(footer, text="선택한 명세서 열기", style="Primary.TButton", command=go).pack(side="right")
+        fill()
 
     def search_all_months(self):
         if not self.folder:
@@ -2815,6 +3008,104 @@ class MonthlyClose:
         if supplemental and not keys:
             self.notice("전달한 마감본을 이력에서 표시한 뒤, 새 증빙이나 변경된 거래가 있는지 확인하세요.")
             return
+        self.choose_package(keys, lambda chosen: self.preview_package(chosen, supplemental, previous, current),
+                            supplemental)
+
+    def package_sources(self, keys):
+        """Statement files that hold at least one of the given transactions."""
+        wanted = set(keys)
+        links = self.state.get("transaction_sources", {})
+        if any(not links.get(key) for key in wanted):
+            return dict(self.statement_sources)  # older records without a source: keep every statement
+        return {checksum: path for checksum, path in self.statement_sources.items()
+                if any(checksum in links.get(key, {}) for key in wanted)}
+
+    def choose_package(self, keys, proceed, supplemental=False):
+        """Let the user pick months, statements and transactions before the ZIP is built."""
+        dialog = InlineDialog(self.root)
+        dialog.title("추가 제출 범위 선택" if supplemental else "세무사 제출 범위 선택")
+        dialog.geometry("1000x640")
+        dialog.grab_set()
+        links = self.state.get("transaction_sources", {})
+        months = sorted({self.record(key)["period"] for key in keys})
+        names = {checksum: path.name for checksum, path in self.statement_sources.items()}
+        chosen_month = self.month_filter.get()
+        month_vars = {month: tk.BooleanVar(value=chosen_month in ("전체", month)) for month in months}
+        source_vars = {checksum: tk.BooleanVar(value=True) for checksum in names}
+        picked = {key: True for key in keys}
+        ttk.Label(dialog, text="월과 명세서를 고른 뒤, 빼고 싶은 거래는 체크를 눌러 해제하세요. 선택한 거래에 연결된 증빙과 그 거래가 들어 있는 명세서만 ZIP에 들어가요.",
+                  wraplength=940, padding=(14, 10, 14, 4)).pack(anchor="w")
+        filters = tk.Frame(dialog, background=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"],
+                           highlightcolor=COLORS["line"], padx=12, pady=8)
+        filters.pack(fill="x", padx=14, pady=(4, 8))
+        tk.Label(filters, text="월", font=FONT_BOLD, background=COLORS["panel"]).grid(row=0, column=0, sticky="nw", padx=(0, 10))
+        month_row = tk.Frame(filters, background=COLORS["panel"])
+        month_row.grid(row=0, column=1, sticky="w")
+        tk.Label(filters, text="명세서", font=FONT_BOLD, background=COLORS["panel"]).grid(row=1, column=0, sticky="nw", padx=(0, 10), pady=(6, 0))
+        source_row = tk.Frame(filters, background=COLORS["panel"])
+        source_row.grid(row=1, column=1, sticky="w", pady=(6, 0))
+        table = self.table(dialog, ("선택", "번호", "월", "거래일", "가맹점·거래처", "금액", "상태"), (50, 80, 70, 90, 330, 110, 200))
+        table.tag_configure("off", foreground=COLORS["muted"])
+        summary = tk.StringVar()
+
+        def visible(key):
+            record = self.record(key)
+            if not month_vars.get(record["period"], tk.BooleanVar(value=True)).get():
+                return False
+            sources = links.get(key, {})
+            return not sources or any(source_vars[checksum].get() for checksum in sources if checksum in source_vars)
+
+        def fill():
+            table.delete(*table.get_children())
+            ordered = sorted(keys, key=lambda key: (self.record(key)["period"], self.record(key).get("number", "")))
+            for key in ordered:
+                if not visible(key):
+                    continue
+                item, record = self.transactions[key], self.record(key)
+                table.insert("", "end", iid=key, tags=() if picked[key] else ("off",), values=(
+                    "☑" if picked[key] else "☐", record.get("number", ""), record["period"], item.day.isoformat(),
+                    item.merchant, f"{item.amount:.2f} {item.currency}", self.status_for(key)))
+            count = len(selected())
+            summary.set(f"선택 {count}건 · 명세서 {len(self.package_sources(selected()))}개")
+
+        def selected():
+            return [key for key in keys if picked[key] and visible(key)]
+
+        def toggle(event):
+            key = table.identify_row(event.y)
+            if key:
+                picked[key] = not picked[key]
+                fill()
+                table.see(key)
+
+        def set_all(value):
+            for key in table.get_children():
+                picked[key] = value
+            fill()
+
+        for month, var in month_vars.items():
+            ttk.Checkbutton(month_row, text=month, variable=var, command=fill, style="Panel.TCheckbutton").pack(side="left", padx=(0, 10))
+        for checksum, var in source_vars.items():
+            ttk.Checkbutton(source_row, text=names[checksum], variable=var, command=fill, style="Panel.TCheckbutton").pack(side="left", padx=(0, 10))
+        table.bind("<Button-1>", toggle)
+
+        def go():
+            chosen = selected()
+            if not chosen:
+                messagebox.showerror("제출 범위", "ZIP에 넣을 거래를 한 건 이상 선택하세요.", parent=dialog)
+                return
+            dialog.destroy()
+            proceed(chosen)
+
+        footer = tk.Frame(dialog, background=COLORS["bg"])
+        footer.pack(fill="x", padx=14, pady=(0, 12))
+        ttk.Button(footer, text="전체 선택", command=lambda: set_all(True)).pack(side="left")
+        ttk.Button(footer, text="전체 해제", command=lambda: set_all(False)).pack(side="left", padx=(6, 0))
+        tk.Label(footer, textvariable=summary, background=COLORS["bg"], foreground=COLORS["muted"]).pack(side="left", padx=12)
+        ttk.Button(footer, text="선택한 거래로 미리보기 →", style="Primary.TButton", command=go).pack(side="right")
+        fill()
+
+    def preview_package(self, keys, supplemental, previous, current):
         months = sorted({self.record(key)["period"] for key in keys})
         versions = self.state.get("exports", {})
         revision = max((entry["version"] for month in months for entry in versions.get(month, [])), default=0) + 1
@@ -2927,7 +3218,8 @@ class MonthlyClose:
                 source_list = io.StringIO(newline="")
                 source_writer = csv.writer(source_list, delimiter=";")
                 source_writer.writerow(["Datei im ZIP", "Quelldatei", "SHA-256"])
-                for index, (checksum, source) in enumerate(self.statement_sources.items() if baselines is None else [], 1):
+                sources = self.statement_sources if keys is None else self.package_sources(keys)
+                for index, (checksum, source) in enumerate(sources.items() if baselines is None else [], 1):
                     arcname = f"Kontoauszuege/{index:02d}_{source.name}"
                     data = source.read_bytes()
                     if hashlib.sha256(data).hexdigest() != checksum:
