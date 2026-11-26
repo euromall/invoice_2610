@@ -27,7 +27,7 @@ from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MONEY, MONTH_FOLDER, dige
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
-from ui_theme import FONT_TITLE, transaction_tag
+from ui_theme import COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, InlineDialog, show_notice, transaction_tag
 from workspace_backup import add_attachment, attachment_path, create_backup, restore_workspace
 
 
@@ -902,6 +902,11 @@ class MonthlyClose:
         5: ("5. 세무사 제출", "독일어 ZIP·Excel 대조표를 만들고 전달 상태를 기록해요. 내부 메모는 들어가지 않아요."),
     }
 
+    def notice(self, message, kind="info"):
+        """Show a guidance message as a pop-up inside the window and keep it in the status line."""
+        self.status.set(message)
+        show_notice(self.root, message, kind=kind)
+
     def show_step(self, number):
         self.step = number
         for frame in self.step_bars.values():
@@ -949,7 +954,7 @@ class MonthlyClose:
         try:
             key, _, rows, layout = self.read_import(path)
             if key in self.statement_sources:
-                self.status.set("예시 명세서를 이미 불러왔어요.")
+                self.notice("예시 명세서를 이미 불러왔어요.")
                 return
             spec = {"path": str(path), "columns": [0, 1, 2, 3], "currency": "EUR",
                     "date_order": "DD/MM/YYYY", "account": "연습 카드", "period": "", "flip_sign": False, "layout": layout}
@@ -966,7 +971,7 @@ class MonthlyClose:
         names = filedialog.askopenfilenames(parent=self.root, filetypes=[("CSV / TSV / PDF", "*.csv *.tsv *.pdf")])
         if not names:
             return
-        window = tk.Toplevel(self.root)
+        window = InlineDialog(self.root)
         window.title("명세서 여러 개 가져오기")
         window.geometry("1040x560")
         window.transient(self.root)
@@ -1006,7 +1011,7 @@ class MonthlyClose:
         def edit_selected(_event=None):
             selection = table.selection()
             if len(selection) != 1:
-                self.status.set("설정을 확인할 명세서 한 개를 선택하세요.")
+                self.notice("설정을 확인할 명세서 한 개를 선택하세요.")
                 return
             key = selection[0]
             path = by_path[key]
@@ -1076,7 +1081,7 @@ class MonthlyClose:
         item = self.single_card()
         if item is None:
             return
-        window = tk.Toplevel(self.root)
+        window = InlineDialog(self.root)
         window.title("독일어 인보이스 요청 초안")
         window.geometry("740x440")
         window.transient(self.root)
@@ -1131,7 +1136,7 @@ class MonthlyClose:
             record_error("statement", error)
             messagebox.showerror("명세서 열기 실패", str(error), parent=self.root)
             return
-        dialog = tk.Toplevel(owner)
+        dialog = InlineDialog(owner)
         dialog.title("은행·카드 명세서 열 지정")
         dialog.transient(owner)
         dialog.grab_set()
@@ -1295,7 +1300,7 @@ class MonthlyClose:
         session = self.state.get("session", {})
         sources = session.get("sources", {})
         if not sources:
-            self.status.set("이어 열 수 있는 명세서가 없어요.")
+            self.notice("이어 열 수 있는 명세서가 없어요.")
             return
         if self.transactions and not messagebox.askyesno("이어서 작업", "현재 화면을 마지막 저장 작업으로 바꿀까요?", parent=self.root):
             return
@@ -1327,14 +1332,14 @@ class MonthlyClose:
             if session.get("folder"):
                 self.load_pdfs(Path(session["folder"]))
         if problems:
-            messagebox.showwarning("다시 열지 못한 명세서", "\\n".join(problems), parent=self.root)
+            messagebox.showwarning("다시 열지 못한 명세서", "\n".join(problems), parent=self.root)
 
     def search_all_months(self):
         if not self.folder:
             self.select_folder()
             if not self.folder:
                 return
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("전체 월 통합 검색")
         dialog.geometry("1100x520")
         toolbar = ttk.Frame(dialog, padding=8)
@@ -1409,9 +1414,9 @@ class MonthlyClose:
     def show_statement_periods(self):
         items = list(self.state.get("statement_periods", {}).values())
         if not items:
-            self.status.set("기간을 점검할 명세서를 불러오세요.")
+            self.notice("기간을 점검할 명세서를 불러오세요.")
             return
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("계좌별 명세서 기간 점검")
         dialog.geometry("1050x510")
         ttk.Label(dialog, text="누락·겹침은 발행처가 기간을 표시한 명세서끼리 비교해요.", padding=8).pack(anchor="w")
@@ -1430,7 +1435,7 @@ class MonthlyClose:
             self.select_folder()
             if not self.folder:
                 return
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("거래에 연결되지 않은 증빙")
         dialog.geometry("1080x460")
         controls = ttk.Frame(dialog, padding=8)
@@ -1477,7 +1482,7 @@ class MonthlyClose:
             return
         record = self.record(item.key)
         if self.linked(item.key) or record.get("transfer") or record.get("refund_group"):
-            self.status.set("증빙 또는 별도 거래 연결이 없는 거래를 선택하세요.")
+            self.notice("증빙 또는 별도 거래 연결이 없는 거래를 선택하세요.")
             return
 
         def commit(state, values):
@@ -1526,9 +1531,9 @@ class MonthlyClose:
 
     def review_pairs(self, title, rows, commit):
         if not rows:
-            self.status.set("확인할 후보가 없어요.")
+            self.notice("확인할 후보가 없어요.")
             return
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title(title)
         dialog.geometry("1040x470")
         dialog.transient(self.root)
@@ -1631,7 +1636,7 @@ class MonthlyClose:
     def archive_matched(self):
         moves, skipped = self.matched_moves()
         if not moves:
-            self.status.set(f"옮길 매칭완료 증빙이 없어요. 중복 또는 마감월 확인 필요 {skipped}개.")
+            self.notice(f"옮길 매칭완료 증빙이 없어요. 중복 또는 마감월 확인 필요 {skipped}개.")
             return
         preview = "\n".join(str(target.relative_to(self.folder)) for _, target in moves[:5])
         more = f"\n… 외 {len(moves) - 5}개" if len(moves) > 5 else ""
@@ -1660,7 +1665,7 @@ class MonthlyClose:
 
     def undo_archive(self):
         if not self.last_moves:
-            self.status.set("되돌릴 증빙 이동이 없어요.")
+            self.notice("되돌릴 증빙 이동이 없어요.")
             return
         if not messagebox.askyesno("이동 되돌리기", f"증빙 {len(self.last_moves)}개를 원래 폴더로 되돌릴까요?", parent=self.root):
             return
@@ -1826,7 +1831,7 @@ class MonthlyClose:
         item = self.single_card()
         if not item:
             return
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("거래 보조 자료")
         dialog.geometry("800x420")
         dialog.transient(self.root)
@@ -1884,9 +1889,9 @@ class MonthlyClose:
     def monthly_review(self):
         rows = review_months(self.state, self.invoices)
         if not rows:
-            self.status.set("먼저 증빙이나 명세서를 불러오세요.")
+            self.notice("먼저 증빙이나 명세서를 불러오세요.")
             return
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("월별 누락 점검표")
         dialog.geometry("1100x480")
         controls = ttk.Frame(dialog, padding=8)
@@ -1930,7 +1935,7 @@ class MonthlyClose:
 
     def restore_workspace_backup(self):
         if self.practice_folder:
-            self.status.set("연습 모드는 예시 자료만 사용해요.")
+            self.notice("연습 모드는 예시 자료만 사용해요.")
             return
         source = filedialog.askopenfilename(parent=self.root, filetypes=[("전체 작업 백업", "*.zip")])
         if not source:
@@ -1985,7 +1990,7 @@ class MonthlyClose:
 
     def restore_backup(self):
         if self.practice_folder:
-            self.status.set("연습 모드는 예시 자료만 사용해요.")
+            self.notice("연습 모드는 예시 자료만 사용해요.")
             return
         selected = filedialog.askopenfilename(parent=self.root, filetypes=[("작업 백업", "*.json")])
         if not selected:
@@ -2022,9 +2027,9 @@ class MonthlyClose:
     def manage_period(self):
         months = sorted({record.get("period", "") for record in self.state["records"].values()} - {""}, reverse=True)
         if not months:
-            self.status.set("먼저 명세서를 불러오세요.")
+            self.notice("먼저 명세서를 불러오세요.")
             return
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("월 마감 확정·재열기")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -2073,10 +2078,10 @@ class MonthlyClose:
         cards = self.cards.selection()
         docs = [self.visible_pdfs[key] for key in self.pdfs.selection()]
         if not cards or (not remove and not docs):
-            self.status.set("거래와 연결할 PDF를 선택하세요. 후보가 없다면 ‘전체 증빙 표시’를 켜세요.")
+            self.notice("거래와 연결할 PDF를 선택하세요. 후보가 없다면 ‘전체 증빙 표시’를 켜세요.")
             return
         if not remove and any(self.record(key).get("transfer") or self.record(key).get("refund_group") for key in cards):
-            self.status.set("증빙을 연결하려면 먼저 이체 또는 환불 연결을 해제하세요.")
+            self.notice("증빙을 연결하려면 먼저 이체 또는 환불 연결을 해제하세요.")
             return
         keys = {doc.key for doc in docs}
         if remove:
@@ -2128,7 +2133,7 @@ class MonthlyClose:
     def single_card(self):
         selected = self.cards.selection()
         if len(selected) != 1:
-            self.status.set("카드 거래 한 건을 선택하세요.")
+            self.notice("카드 거래 한 건을 선택하세요.")
             return None
         return self.transactions[selected[0]]
 
@@ -2147,54 +2152,93 @@ class MonthlyClose:
         if item is None:
             return
         record = self.record(item.key)
-        dialog = tk.Toplevel(self.root)
-        dialog.title("거래 메모·기록")
-        dialog.transient(self.root)
+        dialog = InlineDialog(self.root)
+        dialog.title("메모·기록")
+        dialog.geometry("900x660")
         dialog.grab_set()
-        form = ttk.Frame(dialog, padding=12)
-        form.pack(fill="both", expand=True)
+        ttk.Label(dialog, text=self.card_label(item), style="Summary.TLabel", font=FONT_BOLD).pack(fill="x", padx=14, pady=(12, 8))
+        columns = ttk.Frame(dialog)
+        columns.pack(fill="both", expand=True, padx=14)
+        columns.columnconfigure(0, weight=1, uniform="note")
+        columns.columnconfigure(1, weight=1, uniform="note")
 
-        def text_box(label, value, height):
-            ttk.Label(form, text=label).pack(anchor="w", pady=(6, 2))
-            box = tk.Text(form, width=66, height=height, wrap="word")
+        def card(column, row, title, hint, weight=0):
+            frame = tk.Frame(columns, background=COLORS["panel"], highlightthickness=1,
+                             highlightbackground=COLORS["line"], highlightcolor=COLORS["line"], padx=12, pady=10)
+            frame.grid(row=row, column=column, sticky="nsew", padx=(0, 8) if column == 0 else (8, 0), pady=(0, 10))
+            columns.rowconfigure(row, weight=weight)
+            tk.Label(frame, text=title, font=FONT_BOLD, background=COLORS["panel"], foreground=COLORS["ink"],
+                     anchor="w").pack(fill="x")
+            if hint:
+                tk.Label(frame, text=hint, font=FONT_SMALL, background=COLORS["panel"], foreground=COLORS["muted"],
+                         anchor="w", justify="left", wraplength=380).pack(fill="x", pady=(0, 6))
+            return frame
+
+        def text_box(parent, value, height):
+            box = tk.Text(parent, height=height, wrap="word", width=40)
             box.insert("1.0", value)
-            box.pack(fill="x")
+            box.pack(fill="both", expand=True)
             return box
 
-        ttk.Label(form, text=self.card_label(item)).pack(anchor="w")
-        internal = text_box("내 작업 메모 · 프로그램 안에서만 표시", record.get("note", ""), 3)
-        history = "\n".join(f"{entry['date']} · {entry['text']}" for entry in record.get("timeline", []))
-        previous = text_box("작업 기록", history, 5)
-        previous.configure(state="disabled")
-        action = text_box("새 작업 기록 · 예) 인보이스 요청", "", 2)
-        when = ttk.Entry(form, width=15)
-        ttk.Label(form, text="작업 기록 날짜").pack(anchor="w", pady=(6, 2))
-        when.insert(0, date.today().isoformat())
-        when.pack(anchor="w")
-        external = text_box("세무사 전달 메모 (독일어) · ZIP에 포함", record.get("advisor_note", ""), 3)
-        templates = ttk.Frame(form)
-        templates.pack(anchor="w")
-        for title, wording in GERMAN_TEMPLATES.items():
-            ttk.Button(templates, text=title, command=lambda value=wording: external.insert("end", ("\n" if external.get("1.0", "end-1c") else "") + value)).pack(side="left", padx=2)
-        follow_up = ttk.Combobox(form, values=list(FOLLOW_UP), state="readonly")
-        ttk.Label(form, text="후속 처리 상태").pack(anchor="w", pady=(6, 2))
-        follow_up.set(record.get("follow_up", ""))
-        follow_up.pack(anchor="w")
-        ttk.Label(form, text="증빙 후속 예정일 (YYYY-MM-DD, 선택)").pack(anchor="w", pady=(6, 2))
-        due = ttk.Entry(form, width=15)
-        due.insert(0, record.get("due", ""))
-        due.pack(anchor="w")
+        mine = card(0, 0, "내 작업 메모", "프로그램 안에서만 보여요. 세무사 ZIP에는 들어가지 않아요.", 1)
+        internal = text_box(mine, record.get("note", ""), 4)
 
-        ttk.Button(form, text="독일어 초안 미리보기", command=lambda: self.preview_draft(
-            dialog, item, action.get("1.0", "end-1c").strip() or internal.get("1.0", "end-1c").strip(),
+        log = card(0, 1, "작업 기록", "언제 무엇을 했는지 쌓아 두는 기록이에요.", 1)
+        timeline = record.get("timeline", [])
+        history = tk.Listbox(log, height=4, activestyle="none", background=COLORS["panel"],
+                             foreground=COLORS["ink"], selectbackground=COLORS["blue_light"])
+        for entry in timeline:
+            history.insert("end", f"{entry['date']}  {entry['text']}")
+        if not timeline:
+            history.insert("end", "아직 기록이 없어요.")
+            history.itemconfigure(0, foreground=COLORS["muted"])
+        history.pack(fill="both", expand=True)
+        add_row = tk.Frame(log, background=COLORS["panel"])
+        add_row.pack(fill="x", pady=(8, 0))
+        when = ttk.Entry(add_row, width=11)
+        when.insert(0, date.today().isoformat())
+        when.pack(side="left")
+        action = ttk.Entry(add_row)
+        action.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        tk.Label(log, text="새 기록 · 예) 인보이스 요청 메일 보냄 (저장할 때 추가돼요)", font=FONT_SMALL,
+                 background=COLORS["panel"], foreground=COLORS["muted"], anchor="w").pack(fill="x", pady=(4, 0))
+
+        follow = card(1, 0, "후속 처리", "상태가 ‘세무사 확인 필요’나 ‘증빙 확보 불가’면 주황색으로 표시돼요.")
+        follow_row = tk.Frame(follow, background=COLORS["panel"])
+        follow_row.pack(fill="x")
+        tk.Label(follow_row, text="상태", background=COLORS["panel"]).grid(row=0, column=0, sticky="w")
+        follow_up = ttk.Combobox(follow_row, values=list(FOLLOW_UP), state="readonly", width=16)
+        follow_up.set(record.get("follow_up", ""))
+        follow_up.grid(row=1, column=0, sticky="w", padx=(0, 12))
+        tk.Label(follow_row, text="예정일 (YYYY-MM-DD, 선택)", background=COLORS["panel"]).grid(row=0, column=1, sticky="w")
+        due = ttk.Entry(follow_row, width=14)
+        due.insert(0, record.get("due", ""))
+        due.grid(row=1, column=1, sticky="w")
+
+        advisor_card = card(1, 1, "세무사 전달 메모 · 독일어", "세무사용 ZIP에 들어가요. 아래 문구를 누르면 추가돼요.", 1)
+        templates = tk.Frame(advisor_card, background=COLORS["panel"])
+        templates.pack(fill="x", pady=(0, 6))
+        external = None
+        short = {"인보이스 요청 중": "요청 중", "다음 주까지 제출 예정": "다음 주 제출", "세무사 검토 요청": "검토 요청"}
+        for title, wording in GERMAN_TEMPLATES.items():
+            ttk.Button(templates, text="+ " + short.get(title, title), style="Chip.TButton", command=lambda value=wording: external.insert(
+                "end", ("\n" if external.get("1.0", "end-1c") else "") + value)).pack(side="left", padx=(0, 4))
+        external = text_box(advisor_card, record.get("advisor_note", ""), 4)
+        ttk.Button(advisor_card, text="상태·예정일로 독일어 초안 만들기", command=lambda: self.preview_draft(
+            dialog, item, action.get().strip() or internal.get("1.0", "end-1c").strip(),
             due.get().strip(), follow_up.get(), external,
         )).pack(anchor="w", pady=(6, 0))
 
         def save():
             planned, entered = due.get().strip(), when.get().strip()
-            event = action.get("1.0", "end-1c").strip()
+            event = action.get().strip()
             if (planned and normalized_date(planned) != planned) or (event and (not entered or normalized_date(entered) != entered)):
                 messagebox.showerror("날짜 확인", "날짜를 YYYY-MM-DD 형식으로 입력하세요.", parent=dialog)
+                return
+            try:
+                advisor = german_input(external.get("1.0", "end-1c").strip())
+            except ValueError as error:
+                messagebox.showerror("독일어 메모 확인", str(error), parent=dialog)
                 return
             state = deepcopy(self.state)
             record = state["records"].setdefault(item.key, {})
@@ -2204,8 +2248,14 @@ class MonthlyClose:
                 record.setdefault("timeline", []).append({"date": entered, "text": event})
             if self.save(state):
                 dialog.destroy()
+                self.status.set(f"메모 저장 · {self.card_label(item)}")
 
-        ttk.Button(form, text="저장", command=save).pack(anchor="e", pady=(8, 0))
+        footer = tk.Frame(dialog, background=COLORS["bg"])
+        footer.pack(fill="x", padx=14, pady=(0, 12))
+        ttk.Button(footer, text="저장", style="Primary.TButton", command=save).pack(side="right")
+        ttk.Button(footer, text="취소", command=dialog.destroy).pack(side="right", padx=(0, 8))
+        dialog.bind("<Control-s>", lambda event: save())
+        internal.focus_set()
 
     def preview_draft(self, parent, item, source, due, follow_up, destination):
         try:
@@ -2216,7 +2266,7 @@ class MonthlyClose:
         if not draft:
             messagebox.showinfo("독일어 초안", "요청·수신·검토 상태를 선택하거나 요청 내용을 적어 주세요.", parent=parent)
             return
-        window = tk.Toplevel(parent)
+        window = InlineDialog(parent)
         window.title("독일어 초안 검토")
         window.transient(parent)
         window.grab_set()
@@ -2235,7 +2285,7 @@ class MonthlyClose:
             except ValueError as error:
                 messagebox.showerror("독일어 초안", str(error), parent=window)
                 return
-            destination.insert("end", ("\\n" if destination.get("1.0", "end-1c") else "") + approved)
+            destination.insert("end", ("\n" if destination.get("1.0", "end-1c") else "") + approved)
             window.destroy()
             parent.grab_set()
 
@@ -2249,10 +2299,10 @@ class MonthlyClose:
     def edit_document_note(self):
         selected = self.pdfs.selection()
         if len(selected) != 1:
-            self.status.set("세무사 메모를 남길 증빙 한 개를 선택하세요.")
+            self.notice("세무사 메모를 남길 증빙 한 개를 선택하세요.")
             return
         doc = self.visible_pdfs[selected[0]]
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("증빙 전달 메모")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -2278,7 +2328,7 @@ class MonthlyClose:
         box.focus_set()
 
     def edit_fields(self, title, context, fields, commit):
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title(title)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -2348,7 +2398,7 @@ class MonthlyClose:
     def edit_hospitality(self):
         selected = self.pdfs.selection()
         if len(selected) != 1:
-            self.status.set("접대비 정보를 입력할 증빙 한 장을 선택하세요.")
+            self.notice("접대비 정보를 입력할 증빙 한 장을 선택하세요.")
             return
         doc = self.visible_pdfs[selected[0]]
         saved = self.state.get("hospitality", {}).get(doc.key, {})
@@ -2373,7 +2423,7 @@ class MonthlyClose:
 
     def followup_list(self):
         today = date.today().isoformat()
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("증빙 후속 목록")
         dialog.geometry("890x370")
         ttk.Label(dialog, text="미수신·기한 경과·세무 검토 또는 추가 전달이 필요한 거래", padding=8).pack(anchor="w")
@@ -2406,7 +2456,7 @@ class MonthlyClose:
         table.bind("<Double-1>", open_record)
 
     def export_history(self):
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("마감본 이력")
         dialog.geometry("940x460")
         panel = ttk.Frame(dialog, padding=8)
@@ -2451,7 +2501,7 @@ class MonthlyClose:
     def link_refunds(self):
         keys = list(self.cards.selection())
         if len(keys) < 2:
-            self.status.set("결제 한 건과 환불 한 건 이상을 Ctrl로 함께 선택하세요.")
+            self.notice("결제 한 건과 환불 한 건 이상을 Ctrl로 함께 선택하세요.")
             return
         try:
             remaining = refund_balance([self.transactions[key] for key in keys])
@@ -2474,9 +2524,9 @@ class MonthlyClose:
             return
         entries = list(self.visible_pdfs.items())
         if not entries:
-            self.status.set("표시할 증빙이 없어요. ‘전체 증빙 표시’를 켜서 확인하세요.")
+            self.notice("표시할 증빙이 없어요. ‘전체 증빙 표시’를 켜서 확인하세요.")
             return
-        window = tk.Toplevel(self.root)
+        window = InlineDialog(self.root)
         window.title("거래와 증빙 나란히 보기")
         window.geometry("1110x720")
         window.transient(self.root)
@@ -2552,7 +2602,7 @@ class MonthlyClose:
     def edit_correction(self):
         selection = self.pdfs.selection()
         if len(selection) != 1:
-            self.status.set("정정 인보이스 한 장을 선택하세요.")
+            self.notice("정정 인보이스 한 장을 선택하세요.")
             return
         correction = self.visible_pdfs[selection[0]]
         meta = correction.tax_fields or {}
@@ -2580,7 +2630,7 @@ class MonthlyClose:
     def open_pdf(self):
         selected = self.pdfs.selection()
         if len(selected) != 1:
-            self.status.set("열 PDF 한 개를 선택하세요.")
+            self.notice("열 PDF 한 개를 선택하세요.")
             return
         self.open_evidence_file(self.visible_pdfs[selected[0]].path)
 
@@ -2610,7 +2660,7 @@ class MonthlyClose:
 
     def export_csv(self):
         if not self.transactions and not self.errors:
-            self.status.set("먼저 은행·카드 명세서를 불러오세요.")
+            self.notice("먼저 은행·카드 명세서를 불러오세요.")
             return
         path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".csv", initialfile="월마감_증빙.csv", filetypes=[("CSV", "*.csv")])
         if not path:
@@ -2643,7 +2693,7 @@ class MonthlyClose:
 
     def export_zip(self, supplemental=False):
         if not self.statement_sources:
-            self.status.set("먼저 은행·카드 명세서를 불러오세요.")
+            self.notice("먼저 은행·카드 명세서를 불러오세요.")
             return
         current = delivery_changes(self.state, self.transactions)
         for key, snapshot in current.items():
@@ -2663,7 +2713,7 @@ class MonthlyClose:
             if not supplemental or (baseline is not None and old != snapshot):
                 keys.append(key)
         if supplemental and not keys:
-            self.status.set("전달한 마감본을 이력에서 표시한 뒤, 새 증빙이나 변경된 거래가 있는지 확인하세요.")
+            self.notice("전달한 마감본을 이력에서 표시한 뒤, 새 증빙이나 변경된 거래가 있는지 확인하세요.")
             return
         months = sorted({self.record(key)["period"] for key in keys})
         versions = self.state.get("exports", {})
@@ -2691,7 +2741,7 @@ class MonthlyClose:
                 messagebox.showerror("제출 미리보기 실패", str(error), parent=self.root)
                 return
             translation_count = sum(note == "Übersetzung der Notiz ausstehend." for _, note in notes)
-            dialog = tk.Toplevel(self.root)
+            dialog = InlineDialog(self.root)
             dialog.title("추가 제출 미리보기" if supplemental else "세무사용 ZIP 미리보기")
             dialog.geometry("950x540")
             dialog.transient(self.root)

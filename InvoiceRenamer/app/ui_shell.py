@@ -95,6 +95,7 @@ class Shell:
         self.sidebar.pack_propagate(False)
         self.content = ttk.Frame(body)
         self.content.pack(side="left", fill="both", expand=True)
+        root.dialog_area = self.content  # detail panels open over this area
         self.status_bar = ttk.Label(root, style="Status.TLabel")
         self.status_bar.pack(side="bottom", fill="x", before=body)
 

@@ -17,6 +17,7 @@ from zipfile import ZipFile
 import pymupdf
 
 from release_info import VERSION, export_diagnostics, record_error
+from ui_theme import InlineDialog, show_notice
 
 
 DATE = r"(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})"
@@ -324,7 +325,7 @@ def source_preview(path, index, coordinates):
 
 
 def show_source_locations(parent, path, fields):
-    window = tk.Toplevel(parent)
+    window = InlineDialog(parent)
     window.title("추출값 원본 위치")
     window.transient(parent)
     window.grab_set()
@@ -841,6 +842,11 @@ class App:
         else:
             self.root.after_idle(self.first_check)
 
+    def notice(self, message, kind="info"):
+        """Show a guidance message as a pop-up inside the window and keep it in the status line."""
+        self.status.set(message)
+        show_notice(self.root, message, kind=kind)
+
     def report_callback_error(self, error_type, error, traceback):
         record_error("gui", error)
         messagebox.showerror("화면 오류", "동작 중 오류가 발생했어요. ‘오류 진단 저장’에서 현재 세션의 진단을 저장할 수 있어요.", parent=self.root)
@@ -1043,7 +1049,7 @@ class App:
     def exclude_selected(self):
         selection = [key for key in self.table.selection() if key in self.rows]
         if not selection or self.folder is None:
-            self.status.set("제외 폴더로 옮길 파일을 선택하세요. ‘인보이스 아님 의심’ 보기에서 고르면 편해요.")
+            self.notice("제외 폴더로 옮길 파일을 선택하세요. ‘인보이스 아님 의심’ 보기에서 고르면 편해요.")
             return
         if not messagebox.askyesno("제외 폴더로 이동", f"선택한 파일 {len(selection)}개를 ‘{EXCLUDED_FOLDER}’ 폴더로 옮길까요?\n"
                                    "파일은 지워지지 않고, ‘정리 되돌리기’로 되돌릴 수 있어요.", parent=self.root):
@@ -1077,11 +1083,11 @@ class App:
     def edit(self):
         selection = self.table.selection()
         if len(selection) != 1:
-            self.status.set("편집할 PDF 한 개를 선택하세요.")
+            self.notice("편집할 PDF 한 개를 선택하세요.")
             return
         key = selection[0]
         path, fields, _, number = self.rows[key]
-        dialog = tk.Toplevel(self.root)
+        dialog = InlineDialog(self.root)
         dialog.title("인보이스 정보 편집")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -1132,7 +1138,7 @@ class App:
             if key in self.targets:
                 changes.append((key, path, self.targets[key]))
         if not changes:
-            self.status.set("변경 가능한 행을 선택하세요.")
+            self.notice("변경 가능한 행을 선택하세요.")
             return
         count = len(changes)
         prompt = f"선택한 PDF {count}개를 발행월 폴더로 옮기고 가능한 파일의 이름을 변경할까요?"
@@ -1176,7 +1182,7 @@ class App:
 
     def undo(self):
         if not self.last_moves:
-            self.status.set("되돌릴 정리 작업이 없어요.")
+            self.notice("되돌릴 정리 작업이 없어요.")
             return
         if not messagebox.askyesno("정리 되돌리기", f"마지막 작업에서 옮긴 PDF {len(self.last_moves)}개를 되돌릴까요?"):
             return
@@ -1203,7 +1209,7 @@ class App:
     def save_markdown(self):
         selection = self.table.selection()
         if not selection:
-            self.status.set("마크다운으로 저장할 PDF를 선택하세요.")
+            self.notice("마크다운으로 저장할 PDF를 선택하세요.")
             return
         self.status.set("PDF 본문을 읽고 있어요…")
         self.root.update_idletasks()
