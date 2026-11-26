@@ -1,4 +1,4 @@
-"""Checks for the v1.1.1 fixes. Runs without a screen, using synthetic data only."""
+"""Checks for the v1.1.1 and v1.2 fixes. Runs without a screen, using synthetic data only."""
 
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 from invoice_renamer import (  # noqa: E402
-    EditsFileError, filename_fields, invoice_fields, load_invoice_edits, original_stem, proposed_name,
+    App, EditsFileError, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
     read_invoice_details, remember_original_name, reserve_name,
 )
 from monthly_close import decode_statement, german_import_error, index_pdfs  # noqa: E402
@@ -77,6 +77,19 @@ def run():
     legacy = "Datum;Beschreibung\n01.02.2026;Änderung\n".encode("cp1252")
     check(decode_statement(legacy, legacy=True) == legacy.decode("cp949"), "Already imported files keep the old reading")
 
+    # 3b. v1.2: invoice-likeness and required-field check in step 1.
+    check(invoice_likeness("Rechnung Nr. 5\nNetto 10,00 Brutto 11,90 MwSt 19%") >= 3, "Invoice words")
+    check(invoice_likeness("Urlaubsfoto am Strand mit Freunden und Familie") == 0, "Not an invoice")
+    from types import SimpleNamespace
+    probe = SimpleNamespace(invoice_like={Path("x.pdf"): False})
+    row = lambda fields, note="", number="R1", path=Path("a.pdf"): App.row_check(probe, path, fields, note, number)
+    check(row(("2026-11-25", "Shop", "58.39 EUR")) == ("", "ok"), "Complete row")
+    check(row(("2026-11-25", "", "58.39 EUR"))[1] == "bad", "Missing seller is red")
+    check(row(("2026-11-25", "", "580.00 EUR"), number="")[0] == "필수 누락: 업체명, 인보이스 번호", "All missing fields listed")
+    check(row(("2026-11-25", "Shop", "58.39 EUR"), number="")[1] == "warn", "Small receipt without number is amber")
+    check(row(("2026-11-25", "Shop", "580.00 EUR"), number="")[1] == "bad", "Large invoice without number is red")
+    check(row(("2026-11-25", "Shop", "58.39 EUR"), path=Path("x.pdf"))[1] == "muted", "Not-invoice suspicion is gray")
+
     with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
         root = Path(scratch)
 
@@ -135,7 +148,7 @@ def run():
             pass
         else:
             raise AssertionError("Damaged edits file")
-    print("PASS: v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+    print("PASS: v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":

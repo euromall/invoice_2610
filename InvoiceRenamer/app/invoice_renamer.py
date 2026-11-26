@@ -147,6 +147,20 @@ def tessdata_folder():
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 EVIDENCE_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
+EXCLUDED_FOLDER = "제외"
+INVOICE_WORDS = (
+    "rechnung", "rechnungsnummer", "invoice", "receipt", "quittung", "beleg", "kassenbon", "ust", "mwst",
+    "umsatzsteuer", "steuernummer", "vat", "netto", "brutto", "gesamt", "betrag", "summe", "total", "iban",
+    "zahlbar", "fällig", "영수증", "세금계산서", "청구서", "합계", "공급가액", "부가세",
+)
+
+
+def invoice_likeness(text):
+    """Rough score: how many invoice words appear in the text."""
+    words = text.casefold()
+    return sum(1 for word in INVOICE_WORDS if re.search(rf"(?<!\w){re.escape(word)}", words))
+
+
 # The renaming screen also lists XRechnung XML files. Monthly close keeps its own list.
 RENAMER_EXTENSIONS = EVIDENCE_EXTENSIONS | {".xml"}
 
@@ -207,7 +221,10 @@ def read_pdf_pages(path):
             yield text, sorted_text, note
 
 
-def read_invoice_details(path):
+def read_invoice_details(path, info=None):
+    """info (optional dict) receives 'invoice_like': False when the content does not look like an invoice."""
+    info = info if info is not None else {}
+    info["invoice_like"] = True
     structured = structured_fields(Path(path))
     if structured and (all(structured[0]) or Path(path).suffix.lower() == ".xml"):
         fields, number, correction = structured
@@ -223,6 +240,10 @@ def read_invoice_details(path):
     layouts = ["\n".join(page[index] for page in pages) for index in (0, 1)]
     scan_note = next((note for _, _, note in pages if note), "")
     fields = invoice_fields(layouts)
+    text = layouts[0]
+    if len(re.findall(r"\w", text)) >= 30 and not scan_note:
+        score = invoice_likeness(text) + (2 if fields[2] else 0)
+        info["invoice_like"] = score >= 3
     numbers = []
     correction = False
     for layout in layouts:
@@ -235,6 +256,7 @@ def read_invoice_details(path):
     number = unique(numbers)
     if override:
         fields, scan_note = tuple(override[:3]), ""
+        info["invoice_like"] = True
         if len(override) > 3:
             number = override[3]
     return fields, scan_note, number, correction
@@ -748,46 +770,64 @@ def check_installation(folder=None):
 
 
 class App:
-    def __init__(self, root, practice_folder=None):
+    """Step 1: collect evidence, check what was read, rename and file it."""
+
+    def __init__(self, root, practice_folder=None, container=None, on_change=None):
+        from ui_theme import FONT_TITLE, configure_tags, more_menu
+
         self.root = root
         self.rows = {}
         self.targets = {}
+        self.invoice_like = {}
         self.last_moves = []
         self.inbox_mode = False
         self.folder = None
         self.practice_folder = practice_folder
-        title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
-        root.title(f"[연습 모드] {title}" if practice_folder else title)
-        self.root.report_callback_exception = self.report_callback_error
-        root.geometry("1120x490")
-        toolbar = ttk.Frame(root, padding=10)
+        self.on_change = on_change
+        if container is None:
+            title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
+            root.title(f"[연습 모드] {title}" if practice_folder else title)
+            root.geometry("1120x560")
+            container = root
+            self.root.report_callback_exception = self.report_callback_error
+        head = ttk.Frame(container, padding=(18, 14, 18, 4))
+        head.pack(fill="x")
+        ttk.Label(head, text="1. 증빙 모으기·정리", style="Title.TLabel", font=FONT_TITLE).pack(anchor="w")
+        ttk.Label(head, style="Muted.TLabel", text=(
+            "인보이스 폴더를 열면 발행일·업체명·총액·인보이스 번호를 읽어요. "
+            "빨간 행은 필수 항목을 못 읽은 파일, 회색 행은 인보이스가 아닌 것 같은 파일이에요.")).pack(anchor="w")
+        toolbar = ttk.Frame(container, padding=(18, 8, 18, 4))
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="PDF 폴더 선택", command=self.choose).pack(side="left")
+        ttk.Button(toolbar, text="폴더 열기", command=self.choose).pack(side="left")
+        ttk.Button(toolbar, text="새 인보이스 가져오기 (미분류)", command=self.open_inbox).pack(side="left", padx=6)
+        ttk.Button(toolbar, text="선택 항목 편집", command=self.edit).pack(side="left", padx=6)
+        self.apply_button = ttk.Button(toolbar, text="선택 항목 파일명 변경", command=self.apply, style="Primary.TButton")
+        self.apply_button.pack(side="left", padx=6)
+        more_menu(toolbar, "더보기 ▾", [
+            ("인보이스 아닌 파일 → 제외 폴더", self.exclude_selected),
+            ("마크다운 저장", self.save_markdown),
+            ("정리 되돌리기", self.undo),
+        ]).pack(side="left", padx=6)
+        options = ttk.Frame(container, padding=(18, 0, 18, 6))
+        options.pack(fill="x")
         self.include_subfolders = tk.BooleanVar()
-        ttk.Checkbutton(toolbar, text="하위 폴더 포함", variable=self.include_subfolders, command=self.load_folder).pack(side="left", padx=8)
-        ttk.Button(toolbar, text="선택 항목 편집", command=self.edit).pack(side="left", padx=8)
-        self.apply_button = ttk.Button(toolbar, text="선택 항목 파일명 변경", command=self.apply)
-        self.apply_button.pack(side="left")
+        ttk.Checkbutton(options, text="하위 폴더 포함", variable=self.include_subfolders, command=self.load_folder).pack(side="left")
         self.by_month = tk.BooleanVar()
-        ttk.Checkbutton(toolbar, text="발행월 폴더로 이동", variable=self.by_month, command=self.refresh).pack(side="left", padx=8)
-        ttk.Button(toolbar, text="마크다운 저장", command=self.save_markdown).pack(side="left", padx=8)
-        ttk.Button(toolbar, text="카드 명세서 월 마감", command=self.open_close).pack(side="left", padx=8)
-        ttk.Button(toolbar, text="정리 되돌리기", command=self.undo).pack(side="left")
-        quick = ttk.Frame(root, padding=(10, 0, 10, 6))
-        quick.pack(fill="x")
-        ttk.Button(quick, text="새 인보이스 가져오기", command=self.open_inbox).pack(side="left")
-        ttk.Button(quick, text="설치·작동 점검", command=self.diagnose).pack(side="left", padx=8)
-        ttk.Button(quick, text="오류 진단 저장", command=self.save_diagnostics).pack(side="left")
-        if not practice_folder:
-            ttk.Button(quick, text="연습 모드 열기", command=self.open_practice).pack(side="left", padx=8)
+        ttk.Checkbutton(options, text="발행월 폴더로 이동", variable=self.by_month, command=self.refresh).pack(side="left", padx=12)
+        self.view = tk.StringVar(value="전체")
+        for label in ("전체", "필수 누락", "인보이스 아님 의심", "변경 가능"):
+            ttk.Radiobutton(options, text=label, value=label, variable=self.view, command=self.refresh,
+                            style="Chip.TRadiobutton").pack(side="left", padx=(8, 0))
         self.status = tk.StringVar(value="폴더를 선택하세요. 여러 행은 Ctrl 또는 Shift로 선택할 수 있어요.")
-        ttk.Label(root, textvariable=self.status, padding=(10, 6)).pack(fill="x", side="bottom")
-        frame = ttk.Frame(root, padding=(10, 0, 10, 4))
+        if container is root:
+            ttk.Label(root, textvariable=self.status, style="Status.TLabel").pack(fill="x", side="bottom")
+        frame = ttk.Frame(container, padding=(18, 0, 18, 8))
         frame.pack(fill="both", expand=True)
         self.table = ttk.Treeview(frame, columns=("old", "new", "status"), show="headings")
-        for column, label, width in zip(self.table["columns"], ("현재 파일명", "변경할 파일명", "상태"), (330, 460, 250)):
+        for column, label, width in zip(self.table["columns"], ("현재 파일명", "변경할 파일명", "읽기 결과·상태"), (320, 470, 260)):
             self.table.heading(column, text=label)
             self.table.column(column, width=width, minwidth=110)
+        configure_tags(self.table)
         bar = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=bar.set)
         bar.pack(side="right", fill="y")
@@ -797,7 +837,7 @@ class App:
         if practice_folder:
             self.folder = practice_folder / "Belege"
             self.load_folder()
-            self.status.set("연습 모드 · 예시 증빙을 열었어요. ‘카드 명세서 월 마감’에서 예시 명세서도 불러올 수 있어요.")
+            self.status.set("연습 모드 · 예시 증빙을 열었어요. 왼쪽 ‘2. 명세서 불러오기’에서 예시 명세서도 불러올 수 있어요.")
         else:
             self.root.after_idle(self.first_check)
 
@@ -879,8 +919,10 @@ class App:
         if self.folder is None:
             return
         scanned = {row[0]: row for row in self.rows.values()}
+        stale = {key for key in self.rows if self.table.exists(key)} | set(self.table.get_children())
+        if stale:
+            self.table.delete(*stale)
         self.rows.clear()
-        self.table.delete(*self.table.get_children())
         try:
             root = self.folder.resolve()
             if self.inbox_mode:
@@ -890,7 +932,7 @@ class App:
             paths = sorted(
                 path for path in candidates
                 if path.suffix.lower() in RENAMER_EXTENSIONS and not path.is_symlink() and path.is_file()
-                and path.resolve().is_relative_to(root)
+                and path.resolve().is_relative_to(root) and EXCLUDED_FOLDER not in path.relative_to(self.folder).parts[:-1]
             )
         except OSError as error:
             self.status.set(str(error))
@@ -908,15 +950,42 @@ class App:
                 self.rows[str(index)] = scanned[path]
                 self.table.insert("", "end", iid=str(index))
                 continue
+            if index % 5 == 0:
+                self.status.set(f"증빙을 읽고 있어요… {index + 1}/{len(paths)}")
+                self.root.update_idletasks()
+            info = {}
             try:
-                fields, note, number, _ = read_invoice_details(path)
+                fields, note, number, _ = read_invoice_details(path, info)
             except (OSError, RuntimeError, ValueError) as error:
                 record_error("pdf_read", error)
                 fields, note, number = ("", "", ""), "PDF 읽기 실패", ""
+            self.invoice_like[path] = info.get("invoice_like", True)
             self.rows[str(index)] = (path, fields, note, number)
             self.table.insert("", "end", iid=str(index))
         self.refresh()
         self.status.set(f"{self.folder}  |  증빙 {len(paths)}개")
+
+    def row_check(self, path, fields, note, number):
+        """Return (text, tag) describing how well the evidence was read."""
+        if note:
+            return f"확인 필요 · {note}", "bad"
+        if not self.invoice_like.get(path, True):
+            return "인보이스 아님 의심 · 내용 확인", "muted"
+        missing = [label for label, value in zip(("발행일", "업체명", "총액"), fields) if not value]
+        small = False
+        if not number:
+            amount, _, currency = fields[2].partition(" ")
+            try:
+                small = currency == "EUR" and abs(Decimal(amount)) <= 250
+            except ArithmeticError:
+                small = False
+            if not small:
+                missing.append("인보이스 번호")
+        if missing:
+            return "필수 누락: " + ", ".join(missing), "bad"
+        if small:
+            return "번호 없음 · 250€ 이하 소액영수증 확인", "warn"
+        return "", "ok"
 
     def refresh(self):
         organize = self.inbox_mode or self.by_month.get()
@@ -926,34 +995,84 @@ class App:
         if self.folder is None:
             return
         occupied = {}
+        counts = {"bad": 0, "muted": 0, "ok": 0, "warn": 0}
+        shown = []
+        view = self.view.get() if hasattr(self, "view") else "전체"
         for key, (path, fields, note, number) in self.rows.items():
             source_label = str(path.relative_to(self.folder))
+            check, tag = self.row_check(path, fields, note, number)
+            counts[tag] += 1
             folder = self.folder / fields[0][:7] if organize and fields[0] else path.parent
             name = proposed_name(fields, path, number)
             keep_name = organize and not self.inbox_mode and bool(fields[0]) and not name
             if keep_name:
                 name = path.name
+            target_label, status = "", check
             if name and not note:
                 try:
                     if folder not in occupied:
                         occupied[folder] = {item.name.casefold() for item in folder.iterdir()} if folder.exists() else set()
                     target = reserve_name(folder, name, path, occupied[folder])
                 except OSError:
-                    self.table.item(key, values=(source_label, "", "확인 필요 · 대상 폴더 열기 실패"))
-                    continue
+                    target, status, tag = None, "확인 필요 · 대상 폴더 열기 실패", "bad"
+                    name = ""
+                if name and target is None:
+                    status, tag = "확인 필요 · 파일명이 너무 김", "bad"
+                elif name:
+                    target_label = str(target.relative_to(self.folder))
+                    if target == path:
+                        done = "이름 정리 완료"
+                    else:
+                        self.targets[key] = target
+                        done = "이동 가능 · 기존 이름 사용" if keep_name else "변경 가능"
+                    status = f"{check} · {done}" if check else done
+            elif not check:
+                status, tag = "확인 필요 · 파일명이 너무 김", "bad"
+            self.table.item(key, values=(source_label, target_label, status), tags=(tag,))
+            visible = (view == "전체" or (view == "필수 누락" and tag == "bad")
+                       or (view == "인보이스 아님 의심" and tag == "muted") or (view == "변경 가능" and key in self.targets))
+            if visible:
+                shown.append(key)
+        self.table.detach(*self.table.get_children())
+        for index, key in enumerate(shown):
+            self.table.move(key, "", index)
+        self.summary = counts
+        if self.on_change:
+            self.on_change()
+
+    def exclude_selected(self):
+        selection = [key for key in self.table.selection() if key in self.rows]
+        if not selection or self.folder is None:
+            self.status.set("제외 폴더로 옮길 파일을 선택하세요. ‘인보이스 아님 의심’ 보기에서 고르면 편해요.")
+            return
+        if not messagebox.askyesno("제외 폴더로 이동", f"선택한 파일 {len(selection)}개를 ‘{EXCLUDED_FOLDER}’ 폴더로 옮길까요?\n"
+                                   "파일은 지워지지 않고, ‘정리 되돌리기’로 되돌릴 수 있어요.", parent=self.root):
+            return
+        target_folder = self.folder / EXCLUDED_FOLDER
+        history, errors = [], []
+        try:
+            target_folder.mkdir(exist_ok=True)
+            occupied = {item.name.casefold() for item in target_folder.iterdir()}
+        except OSError as error:
+            messagebox.showerror("제외 폴더 만들기 실패", str(error), parent=self.root)
+            return
+        for key in selection:
+            path = self.rows[key][0]
+            target = reserve_name(target_folder, path.name, path, occupied)
+            try:
                 if target is None:
-                    self.table.item(key, values=(source_label, "", "확인 필요 · 파일명이 너무 김"))
-                    continue
-                if target == path:
-                    status = "현재 위치와 이름이 같음"
-                else:
-                    self.targets[key] = target
-                    status = "이동 가능 · 기존 이름 사용" if keep_name else "변경 가능"
-                self.table.item(key, values=(source_label, str(target.relative_to(self.folder)), status))
-            else:
-                missing = ", ".join(label for label, value in zip(("발행일", "업체명", "총액"), fields) if not value)
-                reason = missing or "파일명이 너무 김"
-                self.table.item(key, values=(source_label, "", note or f"확인 필요 · {reason}"))
+                    raise OSError("파일명이 너무 길어요.")
+                checksum = digest(path)
+                move_without_overwrite(path, target)
+                history.append((path, target, checksum))
+            except OSError as error:
+                errors.append(f"{path.name}: {error}")
+        if history:
+            self.last_moves = history
+        self.load_folder()
+        self.status.set(f"제외 폴더로 {len(history)}개 이동 · 실패 {len(errors)}개")
+        if errors:
+            messagebox.showerror("이동 실패", "\n".join(errors[:8]), parent=self.root)
 
     def edit(self):
         selection = self.table.selection()
@@ -995,6 +1114,7 @@ class App:
                 messagebox.showerror("수정값 저장 실패", str(error), parent=dialog)
                 return
             self.rows[key] = (path, edited, "", values[3])
+            self.invoice_like[path] = True
             self.refresh()
             dialog.destroy()
 
@@ -1044,6 +1164,7 @@ class App:
                 errors.append(f"{path.name}: {error}")
                 continue
             self.rows[key] = (target, *self.rows[key][1:])
+            self.invoice_like[target] = self.invoice_like.pop(path, True)
             history.append((path, target, checksum))
         if history:
             self.last_moves = history
@@ -1112,9 +1233,8 @@ def run_practice():
         former = os.environ.get("LOCALAPPDATA")
         os.environ["LOCALAPPDATA"] = str(workspace / "data")
         try:
-            app_root = tk.Tk()
-            App(app_root, practice_folder=session)
-            app_root.mainloop()
+            from ui_shell import run_shell
+            run_shell(practice_folder=session)
         finally:
             if former is None:
                 os.environ.pop("LOCALAPPDATA", None)
@@ -1127,6 +1247,5 @@ if __name__ == "__main__":
     if "--practice" in sys.argv[1:]:
         run_practice()
     else:
-        app_root = tk.Tk()
-        App(app_root)
-        app_root.mainloop()
+        from ui_shell import run_shell
+        run_shell()

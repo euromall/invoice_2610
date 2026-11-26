@@ -27,6 +27,7 @@ from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MONEY, MONTH_FOLDER, dige
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
+from ui_theme import FONT_TITLE, transaction_tag
 from workspace_backup import add_attachment, attachment_path, create_backup, restore_workspace
 
 
@@ -780,10 +781,16 @@ def german_request(item, merchant):
 
 
 class MonthlyClose:
-    def __init__(self, parent, folder, practice_folder=None):
-        self.root = tk.Toplevel(parent)
-        self.root.title(("[연습 모드] " if practice_folder else "") + f"카드 명세서 월 마감 · v{VERSION}")
-        self.root.geometry("1160x720")
+    def __init__(self, parent, folder, practice_folder=None, container=None, on_change=None):
+        self.embedded = container is not None
+        self.on_change = on_change
+        if self.embedded:
+            self.root = parent.winfo_toplevel()
+        else:
+            self.root = tk.Toplevel(parent)
+            self.root.title(("[연습 모드] " if practice_folder else "") + f"카드 명세서 월 마감 · v{VERSION}")
+            self.root.geometry("1160x720")
+            container = self.root
         self.folder = folder
         self.practice_folder = practice_folder
         self.transactions = {}
@@ -805,58 +812,120 @@ class MonthlyClose:
                     raise ValueError("저장 형식 오류")
         except (OSError, ValueError, KeyError, TypeError) as error:
             messagebox.showerror("마감 기록 열기 실패", str(error), parent=self.root)
+            if self.embedded:
+                raise RuntimeError(f"마감 기록 열기 실패: {error}") from error
             self.root.destroy()
             return
 
-        top = ttk.Frame(self.root, padding=8)
-        top.pack(fill="x")
-        self.buttons(top, [
-            ("은행·카드 명세서 추가", self.open_csv), ("여러 명세서 추가", self.open_batch), ("증빙 폴더 선택", self.select_folder),
-            ("CSV 내보내기", self.export_csv), ("세무사용 ZIP", self.export_zip), ("추가 제출 ZIP", lambda: self.export_zip(supplemental=True)),
-            ("매칭완료 폴더로 이동", self.archive_matched),
-        ])
-        actions = ttk.Frame(self.root, padding=(8, 0, 8, 4))
-        actions.pack(fill="x")
-        self.buttons(actions, [
-            ("이어서 작업", self.resume), ("일괄 매칭 후보", self.batch_candidates),
-            ("카드대금·내부이체 후보", self.transfer_candidates), ("결제·환불 연결", self.link_refunds), ("이동 되돌리기", self.undo_archive), ("후속 목록", self.followup_list), ("마감본 이력", self.export_history),
-        ])
-        workflow = ttk.Frame(self.root, padding=(8, 0, 8, 4))
-        workflow.pack(fill="x")
-        self.buttons(workflow, [
-            ("작업 백업", self.export_backup), ("작업 복원", self.restore_backup),
-            ("월 마감 확정·재열기", self.manage_period), ("전체 월 검색", self.search_all_months),
-            ("미연결 증빙", self.show_unlinked_invoices), ("명세서 기간 점검", self.show_statement_periods),
-            ("명세서 근거 표시", self.mark_statement_evidence), ("월별 누락 점검표", self.monthly_review),
-            ("전체 작업 백업", self.export_workspace_backup), ("전체 작업 복원", self.restore_workspace_backup),
-        ])
-        if practice_folder:
-            ttk.Button(workflow, text="예시 명세서 불러오기", command=lambda: self.load_practice_statement(practice_folder)).pack(side="left")
-        self.unresolved = tk.BooleanVar()
-        ttk.Checkbutton(top, text="확인 필요한 거래만", variable=self.unresolved, command=self.refresh).pack(side="left", padx=8)
-        self.status = tk.StringVar(value="은행·카드 명세서와 증빙 폴더를 선택하세요.")
-        ttk.Label(self.root, textvariable=self.status, padding=8, wraplength=1100).pack(side="bottom", fill="x")
+        from ui_theme import configure_tags, more_menu
 
-        body = ttk.Panedwindow(self.root, orient="vertical")
-        body.pack(fill="both", expand=True, padx=8, pady=4)
+        self.step = 3
+        self.month_filter = tk.StringVar(value="전체")
+        self.unresolved = tk.BooleanVar(value=False)
+        self.view = tk.StringVar(value="전체")
+        self.unresolved.trace_add("write", lambda *_: self.view.set("확인 필요" if self.unresolved.get() else "전체"))
+        self.head = ttk.Frame(container, padding=(18, 14, 18, 4))
+        self.head.pack(fill="x")
+        self.title_var = tk.StringVar()
+        self.hint_var = tk.StringVar()
+        ttk.Label(self.head, textvariable=self.title_var, style="Title.TLabel", font=FONT_TITLE).pack(anchor="w")
+        ttk.Label(self.head, textvariable=self.hint_var, style="Muted.TLabel").pack(anchor="w")
+        self.bar_area = ttk.Frame(container, padding=(18, 6, 18, 2))
+        self.bar_area.pack(fill="x")
+        steps = {
+            2: [("은행·카드 명세서 추가", self.open_csv, "Primary.TButton"), ("여러 명세서 한 번에 추가", self.open_batch, None),
+                ("이어서 작업", self.resume, None), ("명세서 기간 점검", self.show_statement_periods, None)],
+            3: [("증빙 폴더 선택", self.select_folder, None), ("일괄 매칭 후보", self.batch_candidates, None),
+                ("카드대금·내부이체 후보", self.transfer_candidates, None), ("결제·환불 연결", self.link_refunds, None),
+                ("매칭완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
+            4: [("월별 누락 점검표", self.monthly_review, "Primary.TButton"), ("미연결 증빙", self.show_unlinked_invoices, None),
+                ("후속 목록", self.followup_list, None), ("명세서 기간 점검", self.show_statement_periods, None),
+                ("전체 월 검색", self.search_all_months, None)],
+            5: [("세무사용 ZIP 만들기", self.export_zip, "Primary.TButton"),
+                ("추가 제출 ZIP", lambda: self.export_zip(supplemental=True), None),
+                ("마감본 이력·전달 상태", self.export_history, None), ("월 마감 확정·재열기", self.manage_period, None),
+                ("CSV 내보내기", self.export_csv, None)],
+        }
+        if practice_folder:
+            steps[2].insert(0, ("예시 명세서 불러오기", lambda: self.load_practice_statement(practice_folder), "Success.TButton"))
+        self.step_bars = {}
+        for number, items in steps.items():
+            frame = ttk.Frame(self.bar_area)
+            for label, command, style in items:
+                ttk.Button(frame, text=label, command=command, style=style or "TButton").pack(side="left", padx=(0, 6))
+            if number == 3:
+                more_menu(frame, "더보기 ▾", [("명세서 근거로 처리 (수수료 등)", self.mark_statement_evidence),
+                                             ("이동 되돌리기", self.undo_archive)]).pack(side="left")
+            self.step_bars[number] = frame
+        chips = ttk.Frame(container, padding=(18, 4, 18, 4))
+        chips.pack(fill="x")
+        for label in ("전체", "확인 필요", "증빙 없음", "대조 완료"):
+            ttk.Radiobutton(chips, text=label, value=label, variable=self.view, command=self.refresh,
+                            style="Chip.TRadiobutton").pack(side="left", padx=(0, 6))
+        self.status = tk.StringVar(value="은행·카드 명세서와 증빙 폴더를 선택하세요.")
+        ttk.Label(chips, textvariable=self.status, style="Muted.TLabel").pack(side="right")
+
+        body = ttk.Panedwindow(container, orient="vertical")
+        body.pack(fill="both", expand=True, padx=18, pady=(2, 10))
+        self.body = body
         upper, lower = ttk.Frame(body), ttk.Frame(body)
+        self.lower = lower
         body.add(upper, weight=3)
         body.add(lower, weight=2)
-        self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태", "메모"), (85, 105, 240, 120, 230, 200))
+        self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태", "메모"), (85, 100, 260, 120, 230, 200))
+        configure_tags(self.cards)
         self.cards.bind("<<TreeviewSelect>>", lambda event: self.show_invoices())
-        controls = ttk.Frame(lower, padding=(0, 5))
+        controls = ttk.Frame(lower, padding=(0, 6))
         controls.pack(fill="x")
+        ttk.Button(controls, text="선택 연결", command=self.link, style="Success.TButton").pack(side="left", padx=(0, 6))
         self.buttons(controls, [
-            ("선택 연결", self.link), ("연결 해제", self.unlink), ("증빙 열기", self.open_pdf),
-            ("나란히 보기", self.compare_documents), ("정정·원본 연결", self.edit_correction),
-            ("거래 메모·기록", self.edit_note), ("증빙 전달 메모", self.edit_document_note), ("보조 자료 첨부", self.edit_attachments), ("배분·차액", self.edit_allocation), ("접대비", self.edit_hospitality), ("Gmail 검색", self.search_gmail), ("인보이스 요청 초안", self.draft_invoice_request),
+            ("연결 해제", self.unlink), ("나란히 보기", self.compare_documents), ("증빙 열기", self.open_pdf),
+            ("메모·기록", self.edit_note), ("인보이스 요청 초안", self.draft_invoice_request), ("Gmail 검색", self.search_gmail),
         ])
+        more_menu(controls, "더보기 ▾", [
+            ("배분·차액", self.edit_allocation), ("정정·원본 연결", self.edit_correction), ("접대비 정보", self.edit_hospitality),
+            ("보조 자료 첨부", self.edit_attachments), ("증빙 전달 메모 (독일어)", self.edit_document_note),
+        ]).pack(side="left")
         self.all_pdfs = tk.BooleanVar()
         ttk.Checkbutton(controls, text="전체 증빙 표시", variable=self.all_pdfs, command=self.show_invoices).pack(side="left", padx=8)
-        self.pdfs = self.table(lower, ("증빙", "발행일", "총액", "인보이스 번호", "상태"), (420, 100, 110, 130, 200))
+        self.pdfs = self.table(lower, ("증빙", "발행일", "총액", "인보이스 번호", "추천·상태"), (420, 100, 110, 130, 220))
+        configure_tags(self.pdfs)
         self.pdfs.bind("<Double-1>", lambda event: self.open_pdf())
+        self.show_step(3)
         if folder:
             self.load_pdfs(folder)
+
+    STEP_TEXT = {
+        2: ("2. 명세서 불러오기", "Amex·DKB·Deutsche Bank PDF 또는 은행·카드 CSV를 불러와요. 같은 파일을 다시 열면 거래번호가 유지돼요."),
+        3: ("3. 증빙 매칭", "거래를 고르면 금액이 같은 증빙이 아래에 추천 순서로 나와요. 초록 행이 가장 유력한 후보예요."),
+        4: ("4. 누락 점검", "증빙 없는 거래, 거래 없는 증빙, 번역 대기, 명세서 기간 공백을 확인해요."),
+        5: ("5. 세무사 제출", "독일어 ZIP·Excel 대조표를 만들고 전달 상태를 기록해요. 내부 메모는 들어가지 않아요."),
+    }
+
+    def show_step(self, number):
+        self.step = number
+        for frame in self.step_bars.values():
+            frame.pack_forget()
+        self.step_bars[number].pack(side="left")
+        title, hint = self.STEP_TEXT[number]
+        self.title_var.set(title)
+        self.hint_var.set(hint)
+        panes = self.body.panes()
+        if number == 3 and str(self.lower) not in map(str, panes):
+            self.body.add(self.lower, weight=2)
+        elif number != 3 and str(self.lower) in map(str, panes):
+            self.body.forget(self.lower)
+
+    def summary(self):
+        counts = Counter()
+        months = set()
+        for key in self.transactions:
+            record = self.record(key)
+            months.add(record.get("period", ""))
+            if self.month_filter.get() not in ("전체", record.get("period")):
+                continue
+            counts[transaction_tag(self.status_for(key), record.get("follow_up", ""))] += 1
+        return counts, sorted(filter(None, months), reverse=True)
 
     def buttons(self, parent, buttons):
         for label, command in buttons:
@@ -1652,22 +1721,31 @@ class MonthlyClose:
         selected = self.cards.selection()
         self.cards.delete(*self.cards.get_children())
         counts = Counter()
+        view = self.view.get()
+        month = self.month_filter.get()
         for key, item in self.transactions.items():
             state = self.status_for(key)
             counts[state] += 1
-            follow = self.record(key).get("follow_up")
-            if not self.unresolved.get() or follow in ("요청 중", "세무사 확인 필요", "증빙 확보 불가") or state not in ("금액 대조 완료", "내부이체 확인", "전액 환불 확인"):
+            record = self.record(key)
+            if month not in ("전체", record.get("period")):
+                continue
+            follow = record.get("follow_up")
+            tag = transaction_tag(state, follow or "")
+            unresolved = follow in ("요청 중", "세무사 확인 필요", "증빙 확보 불가") or state not in ("금액 대조 완료", "내부이체 확인", "전액 환불 확인")
+            if (view == "전체" or (view == "확인 필요" and unresolved) or (view == "증빙 없음" and state == "증빙 미연결")
+                    or (view == "대조 완료" and tag in ("ok", "transfer"))):
                 self.cards.insert("", "end", iid=key, values=(
-                    self.record(key).get("number", ""), item.day, item.merchant, f"{item.amount} {item.currency}", state, self.note_preview(key),
-                ))
+                    record.get("number", ""), item.day, item.merchant, f"{item.amount} {item.currency}", state, self.note_preview(key),
+                ), tags=(tag,))
         self.cards.selection_set([key for key in selected if self.cards.exists(key)])
         self.show_invoices()
         self.status.set(
             f"거래 {len(self.transactions)}건 · 확인 완료 {counts['금액 대조 완료']}건 · "
             f"미연결 {counts['증빙 미연결']}건 · CSV 오류 {len(self.errors)}행 · "
             f"PDF {len(self.invoices)}개 · PDF 읽기 오류 {len(self.read_issues)}개"
-            + (f"   |   {self.folder}" if self.folder else "")
         )
+        if self.on_change:
+            self.on_change()
 
     def show_invoices(self):
         self.pdfs.delete(*self.pdfs.get_children())
@@ -1704,7 +1782,13 @@ class MonthlyClose:
             if doc.tax_fields and doc.tax_fields.get("structured"):
                 labels.append("E-Rechnung")
             self.visible_pdfs[str(index)] = doc
-            self.pdfs.insert("", "end", iid=str(index), values=(
+            best = exact[0].key if exact and not linked else None
+            if doc.key == best:
+                labels.insert(0, "추천 1순위")
+            tag = "ok" if doc.key in linked or doc.key == best else "warn" if doc.key in seen else ""
+            if doc.key in self.duplicates:
+                tag = "bad"
+            self.pdfs.insert("", "end", iid=str(index), tags=(tag,) if tag else (), values=(
                 doc.path.name, doc.day or "", f"{signed_total(doc)} {doc.currency}" if doc.amount is not None else "",
                 doc.number, " · ".join(labels),
             ))

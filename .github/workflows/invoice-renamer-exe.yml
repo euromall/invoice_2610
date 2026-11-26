@@ -30,7 +30,8 @@ jobs:
           pyinstaller --noconfirm --onefile --windowed --name InvoiceRenamer `
             --paths "$app" `
             --hidden-import monthly_close --hidden-import tax_documents --hidden-import advisor_workbook `
-            --hidden-import workspace_backup --hidden-import release_info `
+            --hidden-import workspace_backup --hidden-import release_info --hidden-import ui_shell --hidden-import ui_theme `
+            --splash tools\splash.png `
             --add-data "$app\VERSION;." `
             --add-data "$app\사용법.txt;." `
             --add-data "$app\Beispiele;Beispiele" `
