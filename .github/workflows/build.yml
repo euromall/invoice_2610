@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt pyinstaller==6.11.1
-      - run: pyinstaller --noconfirm --onefile --windowed --name InvoiceAuto main.py
+      - run: pyinstaller --noconfirm --onefile --windowed --splash assets/splash.png --name InvoiceAuto main.py
       - uses: actions/upload-artifact@v4
         with:
           name: InvoiceAuto

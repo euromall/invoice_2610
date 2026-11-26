@@ -34,12 +34,17 @@ def run_folder(run: Run, paths: Paths) -> str:
     """Result/Profoma_YYMMDD (견적서용) or Result/Invoice_YYMMDD (청구서용), as the old program named them."""
     d = run.settings.work_date
     prefix = 'Profoma' if run.settings.mode == MODE_PROFORMA else 'Invoice'
-    return os.path.join(paths.result_dir, f'{prefix}_{d:%y%m%d}')
+    return os.path.join(paths.result_dir, f'{prefix}_{d:%y%m%d}{seq_suffix(run)}')
+
+
+def seq_suffix(run: Run) -> str:
+    """A second run of the same date (차수 02, 03 ..) gets its own folder: Profoma_261118_02."""
+    return f'_{run.settings.invoice_seq:02d}' if run.settings.invoice_seq > 1 else ''
 
 
 def person_folder(run: Run, paths: Paths) -> str:
     """Person invoices go to their own folder, Result/Person_YYMMDD, in both modes."""
-    return os.path.join(paths.result_dir, f'Person_{run.settings.work_date:%y%m%d}')
+    return os.path.join(paths.result_dir, f'Person_{run.settings.work_date:%y%m%d}{seq_suffix(run)}')
 
 
 def save_pdfs(outputs, prefix=''):

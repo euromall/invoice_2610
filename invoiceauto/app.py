@@ -87,9 +87,11 @@ class Options:
     address_mode: str = ADDRESS_OFFLINE
     address_api_key: str = ''
     test_mode: bool = False
+    invoice_seq: int = 1        # 차수: 01 normally, 02.. when a date is run again without overwriting
 
     def settings(self, work_date: dt.date) -> Settings:
         return Settings(work_date=work_date, mode=self.mode, carrier=self.carrier, auto_hawb=self.auto_hawb,
+                        invoice_seq=self.invoice_seq,
                         save_pdf=self.save_pdf, apply_accounting=self.apply_accounting,
                         make_person_invoice=self.make_person_invoice,
                         make_export_per_company=self.make_export_per_company,
@@ -259,3 +261,78 @@ def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
         os.makedirs(backup_dir, exist_ok=True)
         shutil.copy2(shipping_file, backup_dir)
     return run, out_dir
+
+
+# --- earlier runs of a date (작업일자 달력, 같은 날짜 확인) ------------------------------------------
+
+RUN_DIR = re.compile(r'(Profoma|Invoice)_(\d{6})(?:_(\d{2}))?$')
+
+
+def worked_dates(folder: Folder) -> dict:
+    """{date: {'proforma', 'bill'}} from the result folders (Profoma_YYMMDD[_NN], Invoice_YYMMDD[_NN])."""
+    out = {}
+    try:
+        names = os.listdir(folder.result)
+    except OSError:
+        return out
+    for n in names:
+        m = RUN_DIR.match(n)
+        if not m:
+            continue
+        try:
+            d = dt.datetime.strptime(m.group(2), '%y%m%d').date()
+        except ValueError:
+            continue
+        out.setdefault(d, set()).add(MODE_PROFORMA if m.group(1) == 'Profoma' else MODE_BILL)
+    return out
+
+
+@dataclass
+class PreviousRun:
+    folders: List[str]          # result folders of this date and mode, oldest first
+    last_time: dt.datetime
+    next_seq: int               # 차수 for a new run that keeps the earlier one
+    companies: int = 0          # account book rows of that date
+    paid: List[str] = None      # companies with a deposit recorded
+
+
+def previous_run(folder: Folder, work_date: dt.date, mode: str) -> Optional[PreviousRun]:
+    """The earlier run of this date and mode, or None. The result folder is what counts: the account book
+    is shared by both modes (a bill updates the quote's row), so it is only shown for information."""
+    prefix = 'Profoma' if mode == MODE_PROFORMA else 'Invoice'
+    ymd6 = f'{work_date:%y%m%d}'
+    found = []
+    try:
+        for n in os.listdir(folder.result):
+            m = RUN_DIR.match(n)
+            if m and m.group(1) == prefix and m.group(2) == ymd6:
+                found.append((int(m.group(3) or 1), os.path.join(folder.result, n)))
+    except OSError:
+        return None
+    if not found:
+        return None
+    found.sort()
+    seqs = {s for s, _ in found}
+    info = PreviousRun(folders=[p for _, p in found],
+                       last_time=dt.datetime.fromtimestamp(max(os.path.getmtime(p) for _, p in found)),
+                       next_seq=max(seqs) + 1, paid=[])
+    try:
+        rows = db.account_rows(folder.db, work_date.isoformat(), work_date.isoformat())
+        info.companies = len({r['company_uid'] for r in rows if r['company_uid'] != 'EMG'})
+        info.paid = sorted({r['company_uid'] for r in rows if float(r.get('deposit_amount') or 0) > 0})
+        for r in rows:      # an account-book number above the folders' (e.g. 차수 made by the old program)
+            no = str(r.get('invoice_no') or '')
+            if no[-8:-2] == ymd6 and no[-2:].isdigit():
+                info.next_seq = max(info.next_seq, int(no[-2:]) + 1)
+    except Exception:
+        pass
+    return info
+
+
+def archive_run(folder: Folder, path: str) -> str:
+    """Moves an earlier result folder to Result/backup/<name>_<time> before it is made again."""
+    dest_dir = os.path.join(folder.result, 'backup')
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, f'{os.path.basename(path)}_{dt.datetime.now():%Y%m%d_%H%M%S}')
+    shutil.move(path, dest)
+    return dest
