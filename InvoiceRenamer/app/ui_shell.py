@@ -8,7 +8,7 @@ import webbrowser
 from tkinter import messagebox, ttk
 
 from release_info import VERSION
-from ui_theme import COLORS, FONT, FONT_BOLD, FONT_SMALL, apply_style
+from ui_theme import COLORS, FONT, FONT_BOLD, FONT_SMALL, apply_style, attach_help
 
 
 APP_TITLE = "InvoiceRenamer · 독일 월마감"
@@ -114,6 +114,7 @@ class Shell:
         self.build_sidebar()
         self.current = None
         self.show(1)
+        root.after(300, lambda: attach_help(root))  # mouse-over explanations
         self.update_overview()
 
     # Header -----------------------------------------------------------
@@ -224,7 +225,7 @@ class Shell:
         if number > 1 and self.close is None:
             messagebox.showerror("작업 기록", "작업 기록(monthly-close.json)을 열지 못해 2~5단계를 사용할 수 없어요.", parent=self.root)
             return
-        self.current = number
+        previous, self.current = self.current, number
         self.page1.pack_forget()
         self.page2.pack_forget()
         if number == 1:
@@ -234,6 +235,8 @@ class Shell:
             if number == 3 and self.close.folder is None and self.app.folder is not None:
                 self.close.load_pdfs(self.app.folder)
                 self.close.file_loaded_statements()
+            elif number == 3 and self.close.folder is not None and previous == 1:
+                self.close.load_pdfs(self.close.folder)  # pick up names changed in step 1
             self.close.show_step(number)
             self.page2.pack(fill="both", expand=True)
             self.status_bar.configure(textvariable=self.close.status)

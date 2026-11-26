@@ -88,6 +88,13 @@ def run():
             check(any(name.endswith("_Auszug.pdf") for name in names), "Original PDF statement in ZIP")
             check(any(name.endswith("_Auszug_nummeriert.pdf") for name in names), "Numbered PDF statement in ZIP")
             load_workbook(io.BytesIO(result.read("Abgleich.xlsx")))
+        trimmed = root / "Monatsabschluss-auswahl.zip"
+        app.write_package(trimmed, omit={"nummeriert", "04_Importfehler.csv", "Hinweise.txt", "Belege", "01_Abgleich.csv"})
+        with ZipFile(trimmed) as result:
+            names = result.namelist()
+            check(not any(name.endswith("_nummeriert.pdf") for name in names) and "04_Importfehler.csv" not in names
+                  and "Hinweise.txt" not in names, "Parts left out of the ZIP")
+            check("01_Abgleich.csv" in names and any(name.startswith("Belege/") for name in names), "Required parts kept")
         del app.statement_sources[digest(statement)]
         del app.state["transaction_sources"]
 

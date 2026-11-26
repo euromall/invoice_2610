@@ -401,7 +401,7 @@ def export_markdown(path, fields, number):
 def markdown_text(path, fields, number):
     """Markdown summary and page text of an evidence file: (content, incomplete)."""
     issued, seller, total = fields
-    lines = ["# 인보이스", "", "- PDF 파일명: " + markdown_value(path.name)]
+    lines = [MARKDOWN_HEADING, "", "- PDF 파일명: " + markdown_value(path.name)]
     if path.suffix.lower() == ".xml":
         lines[2] = "- 원본 파일명: " + markdown_value(path.name)
         lines.append("- 원본 형식: XRechnung XML (전자 인보이스 원본, 페이지 본문 없음)")
@@ -423,6 +423,12 @@ def markdown_text(path, fields, number):
 
 def write_markdown(path, content):
     target = path.with_suffix(".md")
+    if target.is_file() and not target.is_symlink() and generated_markdown(target):
+        temporary = target.with_name(target.name + ".tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as output:
+            output.write(content)
+        os.replace(temporary, target)  # refresh the program's own summary
+        return target
     index = 2
     while True:
         try:
@@ -696,6 +702,44 @@ def duplicate_groups(entries):
     return [sorted(group, key=keep_first) for group in groups.values() if len(group) > 1]
 
 
+MARKDOWN_HEADING = "# 인보이스"
+
+
+def generated_markdown(path):
+    """True when path is a Markdown summary written by this program."""
+    try:
+        with path.open(encoding="utf-8") as stream:
+            return stream.readline().strip() == MARKDOWN_HEADING
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def move_sidecar(source, target):
+    """Move the program's Markdown summary along with its evidence file and update the file name line.
+
+    Returns the new Markdown path, or None when there was no summary or it could not be moved."""
+    old, new = source.with_suffix(".md"), target.with_suffix(".md")
+    if old == new or not old.is_file() or old.is_symlink() or not generated_markdown(old) or new.exists():
+        return None
+    try:
+        text = old.read_text(encoding="utf-8")
+        text = re.sub(r"(?m)^- (PDF|원본) 파일명: .*$", lambda match: f"- {match[1]} 파일명: " + markdown_value(target.name), text, count=1)
+        with new.open("x", encoding="utf-8", newline="\n") as output:
+            output.write(text)
+        old.unlink()
+    except OSError as error:
+        record_error("markdown_move", error)
+        new.unlink(missing_ok=True) if new.exists() and old.exists() else None
+        return None
+    return new
+
+
+def move_evidence(source, target):
+    """Move an evidence file without overwriting, taking its Markdown summary with it."""
+    move_without_overwrite(source, target)
+    move_sidecar(source, target)
+
+
 def move_without_overwrite(source, target):
     if os.name == "nt":
         source.rename(target)
@@ -757,7 +801,7 @@ def undo_moves(history):
             if current.is_symlink() or digest(current) != checksum:
                 raise OSError("이동한 파일이 변경됐어요.")
             original.parent.mkdir(parents=True, exist_ok=True)
-            move_without_overwrite(current, original)
+            move_evidence(current, original)
         except OSError as error:
             failed.append((original, current, checksum, str(error)))
         else:
@@ -769,12 +813,12 @@ def organize_invoice(source, target, fields, number):
     checksum = digest(source)
     remember_original_name(source, checksum)
     target.parent.mkdir(exist_ok=True)
-    move_without_overwrite(source, target)
+    move_evidence(source, target)
     try:
         _, incomplete = export_markdown(target, fields, number)
     except (OSError, RuntimeError, ValueError) as error:
         try:
-            move_without_overwrite(target, source)
+            move_evidence(target, source)
         except OSError as rollback_error:
             return checksum, False, f"마크다운 저장 및 PDF 복원 실패 ({error} / {rollback_error})"
         raise
@@ -863,15 +907,15 @@ class App:
         toolbar = ttk.Frame(container, padding=(18, 8, 18, 4))
         toolbar.pack(fill="x")
         ttk.Button(toolbar, text="폴더 열기", command=self.choose).pack(side="left")
-        ttk.Button(toolbar, text="새 인보이스 가져오기 (미분류)", command=self.open_inbox).pack(side="left", padx=6)
-        ttk.Button(toolbar, text="선택 항목 편집", command=self.edit).pack(side="left", padx=6)
-        self.apply_button = ttk.Button(toolbar, text="선택 항목 파일명 변경", command=self.apply, style="Primary.TButton")
+        ttk.Button(toolbar, text="새 인보이스 (미분류)", command=self.open_inbox).pack(side="left", padx=6)
+        ttk.Button(toolbar, text="편집", command=self.edit).pack(side="left", padx=6)
+        self.apply_button = ttk.Button(toolbar, text="파일명 변경", command=self.apply, style="Primary.TButton")
         self.apply_button.pack(side="left", padx=6)
-        ttk.Button(toolbar, text="원본·내용 나란히 보기", command=self.view_contents).pack(side="left", padx=6)
+        ttk.Button(toolbar, text="원본·내용 보기", command=self.view_contents).pack(side="left", padx=6)
+        ttk.Button(toolbar, text="중복 정리", command=self.clean_duplicates).pack(side="left", padx=6)
         more_menu(toolbar, "더보기 ▾", [
-            ("중복 인보이스 정리", self.clean_duplicates),
             ("인보이스 아닌 파일 → 제외 폴더", self.exclude_selected),
-            ("마크다운 저장", self.save_markdown),
+            ("마크다운 다시 만들기", self.save_markdown),
             ("정리 되돌리기", self.undo),
         ]).pack(side="left", padx=6)
         options = ttk.Frame(container, padding=(18, 0, 18, 6))
@@ -940,10 +984,10 @@ class App:
         else:
             self.table.selection_set(rows)
 
-    def notice(self, message, kind="info"):
+    def notice(self, message, kind="info", title="안내"):
         """Show a guidance message as a pop-up inside the window and keep it in the status line."""
-        self.status.set(message)
-        show_notice(self.root, message, kind=kind)
+        self.status.set(message.replace("\n", " "))
+        show_notice(self.root, message, title=title, kind=kind)
 
     def report_callback_error(self, error_type, error, traceback):
         record_error("gui", error)
@@ -1004,7 +1048,7 @@ class App:
         self.inbox_mode = True
         self.load_folder()
         self.table.selection_set(tuple(self.targets))
-        self.status.set(f"{inbox} · 정리 가능한 {len(self.targets)}개 선택됨 · 경로 확인 후 ‘정리하고 마크다운 저장’")
+        self.status.set(f"{inbox} · 정리 가능한 {len(self.targets)}개 선택됨 · 경로 확인 후 ‘정리하기 (미분류)’")
 
     def choose(self):
         if self.practice_folder:
@@ -1070,7 +1114,7 @@ class App:
         self.refresh()
         groups = duplicate_groups((key, path, fields, number, cached_digest(path))
                                   for key, (path, fields, _, number) in self.rows.items())
-        hint = f"  |  중복 의심 {len(groups)}묶음 · 더보기 → 중복 인보이스 정리" if groups else ""
+        hint = f"  |  중복 의심 {len(groups)}묶음 · ‘중복 정리’를 눌러 확인하세요" if groups else ""
         self.status.set(f"{self.folder}  |  증빙 {len(paths)}개{hint}")
 
     def row_check(self, path, fields, note, number):
@@ -1097,7 +1141,7 @@ class App:
 
     def refresh(self):
         organize = self.inbox_mode or self.by_month.get()
-        button = "정리하고 마크다운 저장" if self.inbox_mode else "선택 항목 정리" if organize else "선택 항목 파일명 변경"
+        button = "정리하기 (미분류)" if self.inbox_mode else "정리하기" if organize else "파일명 변경"
         self.apply_button.configure(text=button)
         self.targets.clear()
         if self.folder is None:
@@ -1242,7 +1286,7 @@ class App:
                         raise OSError("파일명이 너무 길어요.")
                     checksum = digest(path)
                     remember_original_name(path, checksum)
-                    move_without_overwrite(path, target)
+                    move_evidence(path, target)
                     history.append((path, target, checksum))
                 except OSError as error:
                     errors.append(f"{path.name}: {error}")
@@ -1287,7 +1331,7 @@ class App:
                 if target is None:
                     raise OSError("파일명이 너무 길어요.")
                 checksum = digest(path)
-                move_without_overwrite(path, target)
+                move_evidence(path, target)
                 history.append((path, target, checksum))
             except OSError as error:
                 errors.append(f"{path.name}: {error}")
@@ -1359,11 +1403,9 @@ class App:
             self.notice("변경 가능한 행을 선택하세요.")
             return
         count = len(changes)
-        prompt = f"선택한 PDF {count}개를 발행월 폴더로 옮기고 가능한 파일의 이름을 변경할까요?"
-        if not self.by_month.get():
-            prompt = f"선택한 PDF {count}개의 파일명을 변경할까요?"
-        if self.inbox_mode:
-            prompt = f"선택한 PDF {count}개의 이름을 변경하고 발행월별로 옮긴 뒤 마크다운을 저장할까요?"
+        prompt = f"선택한 PDF {count}개를 발행월 폴더로 옮기고 이름을 바꾼 뒤 마크다운(.md)도 함께 저장할까요?"
+        if not self.by_month.get() and not self.inbox_mode:
+            prompt = f"선택한 PDF {count}개의 파일명을 바꾸고 마크다운(.md)도 함께 저장할까요?"
         if not messagebox.askyesno("PDF 정리", prompt):
             return
         errors = []
@@ -1373,17 +1415,11 @@ class App:
             try:
                 if path.is_symlink() or not target.resolve().is_relative_to(self.folder.resolve()):
                     raise OSError("선택한 인보이스 폴더 안의 파일과 경로만 정리할 수 있어요.")
-                if self.inbox_mode:
-                    checksum, saved, warning = organize_invoice(path, target, self.rows[key][1], self.rows[key][3])
-                    markdown += int(saved)
-                    if warning:
-                        errors.append(f"{path.name}: {warning}")
-                else:
-                    checksum = digest(path)
-                    remember_original_name(path, checksum)
-                    target.parent.mkdir(exist_ok=True)
-                    move_without_overwrite(path, target)
-            except OSError as error:
+                checksum, saved, warning = organize_invoice(path, target, self.rows[key][1], self.rows[key][3])
+                markdown += int(saved)
+                if warning:
+                    errors.append(f"{path.name}: {warning}")
+            except (OSError, RuntimeError, ValueError) as error:
                 record_error("file_move", error)
                 errors.append(f"{path.name}: {error}")
                 continue
@@ -1393,10 +1429,12 @@ class App:
         if history:
             self.last_moves = history
         self.refresh()
-        detail = f" · 마크다운 {markdown}개 저장" if self.inbox_mode else ""
-        self.status.set(f"{len(history)}개 변경 완료{detail} · 확인/실패 {len(errors)}개")
+        self.status.set(f"{len(history)}개 변경 완료 · 마크다운 {markdown}개 저장 · 확인/실패 {len(errors)}개")
         if errors:
             messagebox.showerror("변경 실패", "\n".join(errors[:8]))
+        elif history:
+            self.notice(f"파일 {len(history)}개의 이름을 바꾸고 마크다운 {markdown}개를 PDF 옆에 저장했어요.\n"
+                        "다음: 왼쪽 ‘2. 명세서 불러오기’로 가세요.", title="정리 완료")
 
     def undo(self):
         if not self.last_moves:
@@ -1431,7 +1469,7 @@ class App:
             self.notice("볼 파일을 한 개 이상 선택하세요.")
             return
         dialog = InlineDialog(self.root)
-        dialog.title("원본·내용 나란히 보기")
+        dialog.title("원본·내용 보기")
         dialog.geometry("1200x700")
         dialog.grab_set()
         top = tk.Frame(dialog, background=COLORS["bg"], padx=14, pady=8)
@@ -1531,9 +1569,13 @@ class App:
             except (OSError, RuntimeError, ValueError) as error:
                 record_error("markdown", error)
                 errors.append(f"{path.name}: {error}")
-        self.status.set(f"마크다운 {len(selection) - len(errors)}개 저장 · 본문 확인 필요 {partial}개 · 실패 {len(errors)}개")
+        saved = len(selection) - len(errors)
+        self.status.set(f"마크다운 {saved}개 저장 · 본문 확인 필요 {partial}개 · 실패 {len(errors)}개")
         if errors:
             messagebox.showerror("마크다운 저장 실패", "\n".join(errors[:8]), parent=self.root)
+        else:
+            extra = f"\n스캔 본문을 일부 못 읽은 파일이 {partial}개 있어요. ‘원본·내용 보기’로 확인하세요." if partial else ""
+            self.notice(f"마크다운 {saved}개를 PDF와 같은 폴더에 같은 이름(.md)으로 저장했어요.{extra}", title="저장 완료")
 
 
 def run_practice():

@@ -63,6 +63,7 @@ footer{color:var(--muted);text-align:center;font-size:12px;padding:10px 0 30px}
 <div class="card"><b>처음이라면</b>왼쪽 아래 도구에서 <b>연습 모드 열기</b>를 눌러 예시 자료로 먼저 연습하세요. 연습 기록은 창을 닫으면 사라져요.</div>
 <div class="card"><b>작업은 자동 저장</b>연결·메모·편집값은 누르는 즉시 저장돼요. 따로 저장 버튼을 찾지 않아도 돼요.</div>
 <div class="card"><b>상세 창</b>메모·편집 같은 상세 화면은 오른쪽 패널로 열려요. <b>닫기</b>나 <b>Esc</b>로 닫아요.</div>
+<div class="card"><b>버튼 설명</b>버튼이나 더보기 메뉴 항목에 마우스를 올려 두면 무슨 기능인지 노란 말풍선으로 알려 줘요.</div>
 </div>
 </section>
 
@@ -72,29 +73,30 @@ footer{color:var(--muted);text-align:center;font-size:12px;padding:10px 0 30px}
 <ol>
 <li><b>폴더 열기</b>로 인보이스 PDF·사진·XRechnung XML이 있는 폴더를 고르세요.</li>
 <li>빨간 행은 <b>더블클릭</b>해서 빠진 값을 직접 입력하세요. 입력값은 저장 즉시 기록돼요.</li>
-<li>바꿀 행의 <b>☐</b>를 눌러 체크하세요. 맨 위 <b>☑</b> 칸을 누르면 전체 선택·해제돼요. 그다음 <b>선택 항목 파일명 변경</b>을 눌러야 실제 파일 이름이 바뀌어요.</li>
-<li><b>원본·내용 나란히 보기</b>를 누르면 왼쪽에 PDF, 오른쪽에 읽어 낸 내용(마크다운)이 함께 보여요. 숫자가 맞는지 눈으로 확인하고, 필요하면 <b>마크다운 파일로 저장</b>하세요.</li>
+<li>바꿀 행의 <b>☐</b>를 눌러 체크하세요. 맨 위 <b>☑</b> 칸을 누르면 전체 선택·해제돼요. 그다음 <b>파일명 변경</b>을 눌러야 실제 파일 이름이 바뀌어요.</li>
+<li><b>원본·내용 보기</b>를 누르면 왼쪽에 PDF, 오른쪽에 읽어 낸 내용(마크다운)이 함께 보여요. 숫자가 맞는지 눈으로 확인하고, 필요하면 <b>마크다운 파일로 저장</b>하세요.</li>
 </ol>
-<figure><img src="@IMG:viewer@" alt="원본·내용 나란히 보기"><figcaption>원본·내용 나란히 보기. ◀ ▶로 쪽을 넘기고, 이전·다음 파일로 바로 옮겨 가요.</figcaption></figure>
+<figure><img src="@IMG:viewer@" alt="원본·내용 보기"><figcaption>원본·내용 보기. ◀ ▶로 쪽을 넘기고, 이전·다음 파일로 바로 옮겨 가요.</figcaption></figure>
 <table><tr><th>상태</th><th>뜻</th><th>할 일</th></tr>
 <tr><td><span class="tag ok">변경 가능</span></td><td>필수 항목을 다 읽음</td><td>그대로 파일명 변경</td></tr>
 <tr><td><span class="tag rd">필수 누락</span></td><td>발행일·업체명·총액·번호 중 못 읽은 것이 있음</td><td>더블클릭해서 입력</td></tr>
 <tr><td><span class="tag am">번호 없음</span></td><td>250€ 이하 소액영수증 (§33 UStDV)</td><td>영수증이면 그대로 둬도 됨</td></tr>
 <tr><td><span class="tag gr">인보이스 아님 의심</span></td><td>인보이스 단어가 거의 없음</td><td>더보기 → <b>인보이스 아닌 파일 → 제외 폴더</b></td></tr>
-<tr><td><span class="tag am">중복 의심</span></td><td>내용이 같거나 업체·발행일·총액·번호가 모두 같은 파일 (상태줄에 묶음 수 표시)</td><td>더보기 → <b>중복 인보이스 정리</b>: 체크한 사본을 이름 규칙대로 바꿔 <code>중복</code> 폴더로 옮김. 지우지 않음</td></tr>
+<tr><td><span class="tag am">중복 의심</span></td><td>내용이 같거나 업체·발행일·총액·번호가 모두 같은 파일 (상태줄에 묶음 수 표시)</td><td><b>중복 정리</b>: 체크한 사본을 이름 규칙대로 바꿔 <code>중복</code> 폴더로 옮김. 지우지 않음</td></tr>
 </table>
 <p>새 이름 예: <code>58.39_26-11-25_greenist GmbH_Nr_R1044176_invoice.pdf</code></p>
-<div class="tip">입력·수정값은 자동 저장돼요. <b>마크다운 저장</b>은 PDF 내용을 텍스트(.md)로 내보내는 부가 기능이에요.</div>
+<div class="tip"><b>파일명 변경</b>을 누르면 이름을 바꾸면서 PDF 내용을 같은 이름의 마크다운(.md)으로 함께 저장하고, 끝나면 안내 팝업이 떠요. 파일을 옮길 때(매칭완료·중복·제외·되돌리기) 마크다운도 따라가요. 값을 고친 뒤 내용을 새로 맞추려면 더보기 → <b>마크다운 다시 만들기</b>.</div>
 </section>
 
 <section id="s2">
 <h2><span class="n">2</span>명세서 불러오기</h2>
-<figure><img src="@IMG:step2@" alt="2단계 화면"><figcaption>불러온 거래에는 자동으로 거래번호(예: 611-001)가 붙어요.</figcaption></figure>
+<figure><img src="@IMG:step2@" alt="2단계 화면"><figcaption>불러오기가 끝나면 거래 수와 다음 단계 버튼이 있는 안내가 떠요. 거래번호(예: 611-001)는 자동으로 붙어요.</figcaption></figure>
 <ul>
 <li><b>은행·카드 명세서 추가</b>: CSV나 PDF 한 개. 처음 쓰는 양식이면 날짜·가맹점·금액 열을 한 번 골라 주세요. 다음부터는 자동이에요.</li>
 <li><b>거래번호</b>는 불러오는 순간 자동으로 붙어요. <code>611-001</code> = 2026년(6) 11월 첫 거래. 다시 불러와도 같은 번호예요.</li>
 <li>PDF는 American Express, DKB, Deutsche Bank를 정확히 읽어요. 다른 은행은 CSV를 권해요.</li>
 <li>불러온 명세서 원본은 내용을 바꾸지 않고 증빙 폴더 안 <code>명세서/2026-11</code> 같은 월 폴더로 <b>옮겨져요</b>. 같은 이름이 있으면 <code>(2)</code>를 붙여 덮어쓰지 않아요. 증빙 폴더를 아직 고르지 않았다면, 3단계에서 폴더를 고를 때 옮겨요. 연습 모드에서는 옮기지 않아요.</li>
+<li>불러오기가 끝나면 거래 수와 함께 <b>증빙 매칭으로 이동 →</b> 버튼이 있는 안내가 떠요.</li>
 <li>더보기 → <b>명세서 양식 관리</b>에서 저장된 양식을 카드·은행 이름별로 보고, 표시 이름을 바꾸거나 지울 수 있어요.</li>
 </ul>
 <figure><img src="@IMG:formats@" alt="명세서 양식 관리"><figcaption>명세서 양식 관리. 새 PDF 양식이 필요하면 개인정보를 가린 샘플을 보내 주세요.</figcaption></figure>
@@ -110,8 +112,9 @@ footer{color:var(--muted);text-align:center;font-size:12px;padding:10px 0 30px}
 <li>증빙이 없으면 왼쪽 아래 <b>메모·기록</b>, <b>인보이스 요청 초안</b>, <b>Gmail 검색</b>을 쓰세요. 카드대금·내부이체·환불은 <b>증빙 없이 처리 ▾</b>에 있어요.</li>
 <li>다 끝나면 <b>매칭완료 폴더로 이동</b>을 누르고, 아래 <b>다음 단계: 누락 점검 →</b>으로 넘어가세요.</li>
 </ol>
-<div class="tip"><b>한 건씩 안 해도 돼요.</b> <b>일괄 매칭 후보</b>를 누르면 금액이 같고, 날짜가 7일 안이고, 업체가 같은 증빙이 딱 하나뿐인 쌍을 모아 보여 줘요. 여러 행을 골라(Ctrl·Shift, 또는 전체 선택) 한꺼번에 연결해요. 애매한 것만 한 건씩 보면 돼요.</div>
+<div class="tip"><b>한 건씩 안 해도 돼요.</b> 금액·날짜가 1:1로 맞는 후보가 있으면 위에 파란 띠가 나와요. <b>한 번에 연결하기</b>를 누르면 후보 목록이 열리고, 업체명이나 번호까지 맞는 <b>확실</b> 후보는 미리 체크돼 있어요. <b>거의 일치</b> 후보는 열어 보고 체크하세요. 연결된 거래는 <b>확인 필요</b> 목록에서 빠지고 <b>대조 완료</b>에서 볼 수 있어요.</div>
 <h3>메모·기록</h3>
+<p>세무사 전달 메모의 문구 버튼은 <b>✎ 문구 관리</b>에서 추가·수정·삭제·순서 변경을 할 수 있어요. 버튼 이름은 한국어, 넣을 문구는 독일어로 적어요.</p>
 <figure><img src="@IMG:memo@" alt="메모·기록 패널"><figcaption>내 메모는 프로그램 안에서만 보이고, 세무사 전달 메모(독일어)만 ZIP에 들어가요. Ctrl+S로 저장해요.</figcaption></figure>
 <figure><img src="@IMG:notice@" alt="안내 팝업"><figcaption>선택이 빠졌을 때 같은 안내는 가운데 팝업으로 떠요. Enter나 확인으로 닫아요.</figcaption></figure>
 </section>
@@ -131,7 +134,8 @@ footer{color:var(--muted);text-align:center;font-size:12px;padding:10px 0 30px}
 <li>나중에 증빙이 더 생기면 <b>추가 제출 ZIP</b>으로 바뀐 것만 보내요.</li>
 </ol>
 <figure><img src="@IMG:zipsel@" alt="제출 범위 선택"><figcaption>제출 범위 선택. 선택한 거래, 그 거래에 연결된 증빙, 그 거래가 들어 있는 명세서만 ZIP에 들어가요.</figcaption></figure>
-<figure><img src="@IMG:zipprev@" alt="ZIP 미리보기"><figcaption>미리보기. 독일어 내용 옆 괄호에 한국어 뜻이 붙어요. ZIP 파일 자체는 독일어만 들어가요.</figcaption></figure>
+<figure><img src="@IMG:zipprev@" alt="ZIP 미리보기"><figcaption>미리보기의 ‘ZIP에 넣을 파일’ 탭. 파일마다 한글 설명을 보고 넣을지 골라요. ‘내보낼 내용’ 탭에는 독일어 옆 괄호에 한국어 뜻이 붙어요.</figcaption></figure>
+<p>미리보기의 <b>ZIP에 넣을 파일</b> 탭에서 파일마다 한글 설명을 보고 넣을지 고를 수 있어요. 내용이 없는 표는 처음부터 빠져 있고, <b>필수</b> 항목(증빙 폴더, 엑셀 대조표, 01_Abgleich.csv)은 뺄 수 없어요. 모든 표는 엑셀 파일 안에 시트로도 들어 있어요.</p>
 <h3>ZIP 안에 들어가는 것</h3>
 <table><tr><th>폴더·파일</th><th>내용</th></tr>
 <tr><td><code>Kontoauszuege/</code></td><td>은행·카드 명세서 원본. PDF 명세서는 거래번호를 찍은 <code>…_nummeriert.pdf</code> 사본도 함께</td></tr>
@@ -161,7 +165,7 @@ footer{color:var(--muted);text-align:center;font-size:12px;padding:10px 0 30px}
 <section id="faq">
 <h2>자주 묻는 질문</h2>
 <h3>편집한 내용은 언제 저장되나요?</h3>
-<p>저장·연결 버튼을 누르는 즉시 <code>%LOCALAPPDATA%\InvoiceRenamer</code>에 저장돼요. 파일 이름만 ‘선택 항목 파일명 변경’을 눌러야 바뀌어요.</p>
+<p>저장·연결 버튼을 누르는 즉시 <code>%LOCALAPPDATA%\InvoiceRenamer</code>에 저장돼요. 파일 이름만 ‘파일명 변경’을 눌러야 바뀌어요.</p>
 <h3>프로그램이 이미 열려 있으면?</h3>
 <p>다시 실행하면 새 창 대신 열려 있는 창이 앞으로 와요.</p>
 <h3>백업은?</h3>

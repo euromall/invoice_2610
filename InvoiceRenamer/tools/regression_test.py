@@ -13,10 +13,10 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 from invoice_renamer import (  # noqa: E402
-    App, EditsFileError, duplicate_groups, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
+    App, EditsFileError, duplicate_groups, move_evidence, write_markdown, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
     read_invoice_details, remember_original_name, reserve_name,
 )
-from monthly_close import MonthlyClose, Transaction, decode_statement, german_import_error, index_pdfs, numbered_statement, read_statement_pdf  # noqa: E402
+from monthly_close import MonthlyClose, package_part, Transaction, decode_statement, german_import_error, index_pdfs, numbered_statement, read_statement_pdf  # noqa: E402
 
 
 UBL = """<?xml version="1.0" encoding="UTF-8"?>
@@ -211,7 +211,26 @@ def run():
         ]
         groups = sorted(([entry[0] for entry in group] for group in duplicate_groups(entries)), key=len)
         check(groups == [["d", "e"], ["b", "c", "a"]], f"Duplicate groups, matched file kept first: {groups}")
-    print("PASS: v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+
+        # 11. v1.5: Markdown summary follows its PDF; the program's own summary is refreshed, not duplicated.
+        moving = root / "moving"
+        (moving / "sub").mkdir(parents=True)
+        pdf = moving / "a.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test")
+        write_markdown(pdf, "# 인보이스\n\n- PDF 파일명: a.pdf\n")
+        write_markdown(pdf, "# 인보이스\n\n- PDF 파일명: a.pdf\n- 업체명: X\n")
+        check(sorted(path.name for path in moving.iterdir() if path.is_file()) == ["a.md", "a.pdf"], "Markdown refreshed in place")
+        (moving / "other.md").write_text("my own notes", encoding="utf-8")
+        target = moving / "sub" / "[611-001]_a.pdf"
+        move_evidence(pdf, target)
+        moved_md = target.with_suffix(".md")
+        check(moved_md.exists() and not (moving / "a.md").exists(), "Markdown moved with the PDF")
+        check("- PDF 파일명: \\[611-001\\]\\_a.pdf" in moved_md.read_text(encoding="utf-8") and "업체명: X" in moved_md.read_text(encoding="utf-8"),
+              "Markdown file name line updated")
+        check(write_markdown(moving / "other.pdf", "# 인보이스\n").name == "other_2.md", "User Markdown never overwritten")
+        check(package_part("Kontoauszuege/01_x_nummeriert.pdf") == "nummeriert" and package_part("Belege/2026-11/a.pdf") == "Belege"
+              and package_part("03_Offene_Posten.csv") == "03_Offene_Posten.csv", "ZIP part names")
+    print("PASS: v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":
