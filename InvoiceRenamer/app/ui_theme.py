@@ -93,7 +93,7 @@ def transaction_tag(status, follow_up=""):
         return "warn"
     if status == "금액 대조 완료":
         return "ok"
-    if status in ("내부이체 확인", "전액 환불 확인") or status.startswith("일부 환불"):
+    if status in ("내부이체 확인", "전액 환불 확인", "계약서 근거 확인") or status.startswith("일부 환불"):
         return "transfer"
     if status in ("증빙 미연결", "연결 PDF 위치 확인"):
         return "bad"
@@ -136,6 +136,10 @@ HELP = {
     "명세서 기간 점검": "명세서끼리 빠진 날짜나 겹치는 기간이 없는지 확인해요.",
     # 3단계
     "증빙 폴더 선택": "인보이스가 있는 증빙 폴더를 골라요. 1단계에서 연 폴더가 있으면 자동으로 써요.",
+    "연결 안 된 증빙": "아직 어떤 거래에도 연결되지 않은 인보이스 목록이에요. 열어 보고, 값을 고치고, 거래에 연결하거나 ‘제외’ 폴더로 보낼 수 있어요.",
+    "+ 증빙 파일 추가": "고른 거래의 인보이스 파일을 골라요. 작업 폴더로 가져오고(환경설정의 복사·이동) 바로 이 거래에 연결해요.",
+    "월세·할부·대출·수수료 (계약서·명세서 근거)": "인보이스가 따로 없는 거래(월세·할부·대출 상환·수수료 등)를 계약서나 명세서 근거로 처리해요. ‘다음부터 자동 적용’을 켜면 같은 상대방 거래에 다음 명세서부터 자동으로 적용돼요.",
+    "자동 적용 규칙 보기·삭제": "월세·할부·대출처럼 매달 자동이체되는 거래에 등록한 규칙을 보고 지워요.",
     "일괄 매칭": "금액·날짜가 1:1로 맞는 거래와 증빙을 모아 보여 줘요. 체크한 것을 한 번에 연결해요.",
     "한 번에 연결하기": "금액·날짜가 1:1로 맞는 후보를 모아 보여 줘요. ‘확실’은 미리 체크돼 있어요.",
     "매칭완료 폴더로 이동": "연결이 끝난 증빙을 ‘매칭완료_월’ 폴더로 옮기고 이름 앞에 [거래번호]를 붙여요. 마크다운도 함께 옮겨요.",
@@ -191,7 +195,7 @@ HELP = {
 
 def help_key(text):
     """Label text without counts, arrows and drop-down marks, for HELP lookups."""
-    text = re.sub(r"\s*\(\d+건\)", "", str(text))
+    text = re.sub(r"\s*\(\d+건?\)", "", str(text))
     text = re.sub(r"\s*[▾→]+\s*$", "", text).strip()
     return re.sub(r"\s+\d+$", "", text)
 
@@ -452,6 +456,74 @@ class InlineDialog(tk.Frame):
             self._close_command()
         else:
             self.destroy()
+
+
+class Busy:
+    """Overlay in the middle of the window while long work runs, e.g.
+        with Busy(root, "증빙을 읽고 있어요") as busy:
+            for index, item in enumerate(items, 1):
+                busy.step(index, len(items), item.name)
+    Clicks are held while it shows; the window keeps repainting."""
+
+    _active = None
+
+    def __init__(self, parent, text):
+        self.root = parent.winfo_toplevel()
+        outer = Busy._active
+        self.nested = outer is not None and outer.frame.winfo_exists()
+        if self.nested:  # work inside other work: reuse the overlay that is already showing
+            self.frame, self.title, self.detail, self.bar = outer.frame, outer.title, outer.detail, outer.bar
+            self.title.configure(text=text)
+            self.root.update()
+            return
+        Busy._active = self
+        self.frame = tk.Frame(self.root, background=COLORS["panel"], highlightthickness=2,
+                              highlightbackground=COLORS["blue"], padx=26, pady=18)
+        self.title = tk.Label(self.frame, text=text, font=FONT_BOLD, background=COLORS["panel"])
+        self.title.pack(anchor="w")
+        self.detail = tk.Label(self.frame, text="잠시만 기다려 주세요…", background=COLORS["panel"],
+                               foreground=COLORS["muted"], width=46, anchor="w")
+        self.detail.pack(anchor="w", pady=(4, 8))
+        self.bar = ttk.Progressbar(self.frame, length=360, mode="indeterminate")
+        self.bar.pack(fill="x")
+        self.frame.place(relx=0.5, rely=0.45, anchor="center")
+        self.frame.lift()
+        try:
+            self.frame.grab_set()
+        except tk.TclError:
+            pass
+        self.root.configure(cursor="watch")
+        self.root.update()
+
+    def step(self, index=None, total=None, text=""):
+        if not self.frame.winfo_exists():
+            return
+        if total:
+            self.bar.configure(mode="determinate", maximum=total, value=index or 0)
+            self.detail.configure(text=f"{index}/{total} · {text}"[:60] if text else f"{index}/{total}")
+        else:
+            self.bar.step(4)
+            if text:
+                self.detail.configure(text=text[:60])
+        self.root.update()
+
+    def close(self):
+        if self.nested:
+            return
+        Busy._active = None
+        try:
+            self.frame.grab_release()
+            self.frame.destroy()
+            self.root.configure(cursor="")
+        except tk.TclError:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 def show_notice(parent, message, title="안내", kind="info", action=None):

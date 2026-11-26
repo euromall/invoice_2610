@@ -18,7 +18,7 @@ import pymupdf
 
 import learned_formats
 from release_info import VERSION, export_diagnostics, record_error
-from ui_theme import COLORS, FONT_BOLD, InlineDialog, show_notice
+from ui_theme import COLORS, FONT_BOLD, Busy, InlineDialog, show_notice
 
 
 DATE = r"(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})"
@@ -961,14 +961,17 @@ def move_across(source, target):
     move_sidecar(source, target)
 
 
-def import_evidence(sources, folder, copy=False):
+def import_evidence(sources, folder, copy=False, progress=None):
     """Move (or copy) picked evidence files into the work folder.
     Returns (history: (original, new, checksum), already there, errors). Undo applies to moves only."""
     folder.mkdir(parents=True, exist_ok=True)
     history, inside, errors, taken = [], 0, [], set()
     root = folder.resolve()
-    for source in sources:
+    sources = list(sources)
+    for position, source in enumerate(sources, 1):
         source = Path(source)
+        if progress:
+            progress(position, len(sources), source.name)
         try:
             if source.is_symlink() or not source.is_file() or source.suffix.lower() not in RENAMER_EXTENSIONS:
                 continue
@@ -1364,7 +1367,8 @@ class App:
         if not self.use_work_folder(load=False):
             return
         copy = import_mode() == "copy"
-        history, inside, errors = import_evidence(files, self.folder, copy=copy)
+        with Busy(self.root, "작업 폴더로 복사하고 있어요" if copy else "작업 폴더로 옮기고 있어요") as busy:
+            history, inside, errors = import_evidence(files, self.folder, copy=copy, progress=busy.step)
         if history and not copy:
             self.last_moves = history
         self.load_folder()
@@ -1487,14 +1491,14 @@ class App:
             return
         self.status.set("PDF를 읽고 있어요…")
         self.root.update_idletasks()
+        busy = Busy(self.root, "증빙을 읽고 있어요") if len(paths) > 3 else None
         for index, path in enumerate(paths):
             if path in scanned:
                 self.rows[str(index)] = scanned[path]
                 self.table.insert("", "end", iid=str(index))
                 continue
-            if index % 5 == 0:
-                self.status.set(f"증빙을 읽고 있어요… {index + 1}/{len(paths)}")
-                self.root.update_idletasks()
+            if busy:
+                busy.step(index + 1, len(paths), path.name)
             info = {}
             try:
                 fields, note, number, _ = read_invoice_details(path, info)
@@ -1508,6 +1512,8 @@ class App:
                 self.parts.pop(path, None)
             self.rows[str(index)] = (path, fields, note, number)
             self.table.insert("", "end", iid=str(index))
+        if busy:
+            busy.close()
         self.refresh()
         groups = duplicate_groups((key, path, fields, number, cached_digest(path))
                                   for key, (path, fields, _, number) in self.rows.items())

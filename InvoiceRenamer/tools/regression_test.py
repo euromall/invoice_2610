@@ -163,6 +163,31 @@ def run():
             text = document[0].get_text()
         check(marked == 2 and "[611-001]" in text and "[611-002]" in text, "Numbered PDF statement")
         check(statement.read_bytes() == original, "Original statement unchanged")
+        with pymupdf.open(stream=data) as document:
+            fills = [drawing.get("fill") for drawing in document[0].get_drawings() if drawing.get("fill")]
+        check(not any(fill[0] > 0.9 and fill[1] > 0.8 and fill[2] < 0.6 for fill in fills), f"v1.9: no yellow band behind numbers {fills}")
+
+        # 6b. v1.9: recurring rule (rent by standing order) is applied to the next statement, not to other payees.
+        from monthly_close import apply_recurring, payee_key
+        rent = "Dauerauftrag | Lager Vermietung GmbH | Miete 09/2026"
+        check(payee_key(rent) == payee_key("Dauerauftrag | Lager Vermietung GmbH | Miete 10/2026"), "v1.9: payee key ignores reference")
+        check(payee_key("Lastschrift Darlehen Bank AG Rate 3/24 MREF 123") == payee_key("Lastschrift Darlehen Bank AG Rate 4/24 MREF 124")
+              and payee_key("Miete Lager A") != payee_key("Miete Lager B"), "v1.9: payee key ignores changing numbers")
+        rule_state = {"records": {"linked": {"links": ["x"]}},
+                      "recurring_rules": [{"payee": payee_key(rent), "amount": "-850.00", "currency": "EUR",
+                                           "reason": "임대료/할부금/대출 상환/리스료 · 계약서 기제출"}]}
+        october = [Transaction("oct", day(2026, 10, 1), rent.replace("09", "10"), Decimal("-850.00"), "EUR"),
+                   Transaction("other", day(2026, 10, 1), "Dauerauftrag | Anderer Vermieter | Miete", Decimal("-850.00"), "EUR"),
+                   Transaction("odd", day(2026, 10, 1), rent, Decimal("-900.00"), "EUR"),
+                   Transaction("linked", day(2026, 10, 1), rent, Decimal("-850.00"), "EUR")]
+        count = apply_recurring(rule_state, october)
+        check(count == 1 and rule_state["records"]["oct"]["statement_evidence"].startswith("임대료")
+              and "other" not in rule_state["records"] and "odd" not in rule_state["records"]
+              and "statement_evidence" not in rule_state["records"]["linked"], f"v1.9: recurring rule applied {rule_state}")
+        from types import SimpleNamespace
+        docs = [SimpleNamespace(key="x"), SimpleNamespace(key="y")]
+        check([doc.key for doc in MonthlyClose.unmatched_documents(SimpleNamespace(state=rule_state, invoices=docs))] == ["y"],
+              "v1.9: unmatched evidence list")
 
         # 7. Extra header sellers without code changes.
         folder = root / "InvoiceRenamer"
@@ -307,7 +332,7 @@ def run():
         parts = split_pdf(combined, info["parts"])
         check([read_invoice_details(path)[0][1:] for path in parts] == [("Shop Eins GmbH", "18.99 EUR"), ("Shop Zwei GmbH", "11.00 EUR")]
               and not combined.exists() and (combined.parent / "제외" / "order__나누기전_원본.pdf").exists(), "Combined PDF split")
-    print("PASS: v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+    print("PASS: v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":
