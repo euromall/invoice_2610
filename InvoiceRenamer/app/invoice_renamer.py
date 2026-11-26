@@ -406,16 +406,105 @@ def export_markdown(path, fields, number):
         return target, incomplete
 
 
+# Names before v1.1.1: 2026-11-25_58.39 EUR_Seller__번호_R1__원본__invoice.pdf
+# They are still recognised so that their original name is kept.
 ORIGINAL_SEPARATOR = "__원본__"
 DUPLICATE_SEPARATOR = "__중복_"
 NUMBER_SEPARATOR = "__번호_"
+# Names from v1.1.1 (same as the advisor ZIP):
+#   58.39_26-11-25_greenist GmbH_Nr_R1044176_invoice.pdf
+#   [611-001]_58.39_26-11-25_greenist GmbH_Nr_R1044176_invoice.pdf   (after matching)
+NR_SEPARATOR = "_Nr_"
 MONTH_FOLDER = r"\d{4}-(?:0[1-9]|1[0-2])"
 FILENAME_DATE = r"\d{4}-\d{2}-\d{2}"
 FILENAME_TOTAL = r"-?\d+(?:\.\d{2})? (?:[A-Z]{3}|\$)"
+TRANSACTION_PREFIX = r"\[\d{3}-\d{3}\]_"
+SHORT_TOTAL = r"-?\d+(?:\.\d{1,2})?(?: [A-Z]{3})?"
+SHORT_DATE = r"\d{2}-\d{2}-\d{2}"
+DUPLICATE_SUFFIX = r" \(\d+\)"
+_DIGESTS = {}
+
+
+def cached_digest(path):
+    path = Path(path)
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    key = (str(path), info.st_size, info.st_mtime_ns)
+    if key not in _DIGESTS:
+        try:
+            _DIGESTS[key] = digest(path)
+        except OSError:
+            return None
+    return _DIGESTS[key]
+
+
+def original_names_path():
+    return user_data_folder() / "original-names.json"
+
+
+def load_original_names():
+    try:
+        data = json.loads(original_names_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def remember_original_name(path, checksum=None):
+    """Keep the name a file had before the first rename, keyed by its content hash."""
+    checksum = checksum or cached_digest(path)
+    if not checksum:
+        return
+    names = load_original_names()
+    if checksum in names:
+        return
+    names[checksum] = original_stem(path)
+    storage = original_names_path()
+    storage.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=storage.parent, mode="w", encoding="utf-8", delete=False) as output:
+            temporary = Path(output.name)
+            json.dump(names, output, ensure_ascii=False, indent=2)
+        temporary.replace(storage)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def short_parts(stem):
+    """Split a v1.1.1 name into (total, yy-mm-dd, rest) without the transaction prefix and duplicate number."""
+    stem = re.sub(rf"^{TRANSACTION_PREFIX}", "", stem)
+    stem = re.sub(rf"{DUPLICATE_SUFFIX}$", "", stem)
+    match = re.fullmatch(rf"({SHORT_TOTAL})_({SHORT_DATE})_(.+)", stem)
+    if not match:
+        return None
+    try:
+        day = date(2000 + int(match[2][:2]), int(match[2][3:5]), int(match[2][6:])).isoformat()
+    except ValueError:
+        return None
+    return match[1], day, match[3]
+
+
+def split_rest(rest, original=None):
+    """Return (seller, original) from 'Seller_Nr_123_original'."""
+    if original and rest.endswith("_" + original) and len(rest) > len(original) + 1:
+        head = rest[:-len(original) - 1]
+        seller = head.split(NR_SEPARATOR, 1)[0] if NR_SEPARATOR in head else head
+        return seller, original
+    if NR_SEPARATOR in rest:
+        seller, _, tail = rest.partition(NR_SEPARATOR)
+        _, _, original = tail.partition("_")
+        return seller, original or tail
+    seller, _, original = rest.partition("_")
+    return seller, original or seller
 
 
 def filename_fields(source):
-    prefix, separator, original = Path(source).stem.partition(ORIGINAL_SEPARATOR)
+    stem = Path(source).stem
+    prefix, separator, original = stem.partition(ORIGINAL_SEPARATOR)
     if separator and original:
         current = re.fullmatch(
             rf"({FILENAME_DATE})_({FILENAME_TOTAL})_(.+?)(?:{NUMBER_SEPARATOR}[^\s]+?)?(?:{DUPLICATE_SEPARATOR}\d+)?", prefix
@@ -425,6 +514,18 @@ def filename_fields(source):
     previous = re.fullmatch(rf"({FILENAME_TOTAL})_(.+?)_({FILENAME_DATE})(?:_.*)?", prefix)
     if previous and normalized_date(previous[3]):
         return previous[3], previous[2], previous[1]
+    parts = short_parts(stem)
+    if parts:
+        total, day, rest = parts
+        known = load_original_names().get(cached_digest(source)) if Path(source).is_file() else None
+        seller, _ = split_rest(rest, known)
+        total = total if " " in total else f"{total} EUR"
+        amount, currency = total.split(" ", 1)
+        if "." not in amount:
+            amount += "" if currency == "KRW" else ".00"
+        elif len(amount.split(".")[1]) == 1:
+            amount += "0"
+        return day, seller, f"{amount} {currency}"
     return None
 
 
@@ -433,6 +534,12 @@ def original_stem(source):
     _, separator, original = stem.partition(ORIGINAL_SEPARATOR)
     if separator and original and filename_fields(source):
         return original
+    parts = short_parts(stem)
+    if parts:
+        known = load_original_names().get(cached_digest(source)) if Path(source).is_file() else None
+        if known:
+            return known
+        return split_rest(parts[2])[1]
     return stem
 
 
@@ -443,6 +550,23 @@ def number_label(number, existing_name):
     return NUMBER_SEPARATOR + safe if safe else ""
 
 
+def short_total(total):
+    amount, _, currency = total.partition(" ")
+    return amount if currency in ("", "EUR") else f"{amount} {currency}"
+
+
+def evidence_stem(issued, seller, total, number, original, transaction_id=""):
+    """58.39_26-11-25_Seller_Nr_123_original, optionally prefixed with [611-001]_."""
+    clean = [re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", value).strip(" .") for value in (seller, original)]
+    seller, original = clean
+    seller = seller.replace(NR_SEPARATOR, "_Nr-")
+    reference = number_label(number, original).replace(NUMBER_SEPARATOR, NR_SEPARATOR)
+    day = date.fromisoformat(issued)
+    label = f"{short_total(total)}_{day:%y-%m-%d}_{seller}{reference}_{original}"
+    label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", label).strip(" .")
+    return (f"[{transaction_id}]_" if transaction_id else "") + label
+
+
 def proposed_name(fields, source=None, number=""):
     if not all(fields):
         return ""
@@ -450,15 +574,19 @@ def proposed_name(fields, source=None, number=""):
     if not all(parts):
         return ""
     issued, seller, total = parts
-    seller = seller.replace(ORIGINAL_SEPARATOR, "_원본_").replace(DUPLICATE_SEPARATOR, "_중복_").replace(NUMBER_SEPARATOR, "_번호_")
-    seller = seller[:110 - len(issued) - len(total) - 2].rstrip(" .")
-    stem = f"{issued}_{total}_{seller}"
-    suffix = Path(source).suffix if source is not None else ".pdf"
-    if source is not None:
-        original = original_stem(source)
-        stem += number_label(number, original) + ORIGINAL_SEPARATOR + original
-        if len(stem.encode("utf-16-le")) // 2 + len(suffix) > 255:
-            return ""
+    try:
+        date.fromisoformat(issued)
+    except ValueError:
+        return ""
+    seller = seller[:90].rstrip(" .")
+    if source is None:
+        return evidence_stem(issued, seller, total, number, "invoice") + ".pdf"
+    suffix = Path(source).suffix
+    prefix = re.match(TRANSACTION_PREFIX, Path(source).name)
+    stem = evidence_stem(issued, seller, total, number, original_stem(source),
+                         prefix.group(0)[1:-2] if prefix else "")
+    if len(stem.encode("utf-16-le")) // 2 + len(suffix) > 255:
+        return ""
     return stem + suffix
 
 
@@ -466,15 +594,15 @@ def reserve_name(folder, name, source, occupied):
     candidate = name
     number = 2
     suffix = Path(name).suffix
-    stem, separator, original = Path(name).stem.partition(ORIGINAL_SEPARATOR)
-    if separator and source.parent == folder and re.fullmatch(
-        rf"{re.escape(stem + DUPLICATE_SEPARATOR)}\d+{re.escape(separator + original + suffix)}", source.name, re.IGNORECASE
+    stem = Path(name).stem
+    if source.parent == folder and re.fullmatch(
+        rf"{re.escape(stem)}{DUPLICATE_SUFFIX}{re.escape(suffix)}", source.name, re.IGNORECASE
     ):
         return source
     while candidate.casefold() in occupied and not (
         source.parent == folder and candidate.casefold() == source.name.casefold()
     ):
-        candidate = f"{stem}{DUPLICATE_SEPARATOR}{number}{separator}{original}{suffix}"
+        candidate = f"{stem} ({number}){suffix}"
         number += 1
     if len(candidate.encode("utf-16-le")) // 2 > 255:
         return None
@@ -553,6 +681,7 @@ def undo_moves(history):
 
 def organize_invoice(source, target, fields, number):
     checksum = digest(source)
+    remember_original_name(source, checksum)
     target.parent.mkdir(exist_ok=True)
     move_without_overwrite(source, target)
     try:
@@ -800,7 +929,7 @@ class App:
         for key, (path, fields, note, number) in self.rows.items():
             source_label = str(path.relative_to(self.folder))
             folder = self.folder / fields[0][:7] if organize and fields[0] else path.parent
-            name = proposed_name(fields, path.name, number)
+            name = proposed_name(fields, path, number)
             keep_name = organize and not self.inbox_mode and bool(fields[0]) and not name
             if keep_name:
                 name = path.name
@@ -907,6 +1036,7 @@ class App:
                         errors.append(f"{path.name}: {warning}")
                 else:
                     checksum = digest(path)
+                    remember_original_name(path, checksum)
                     target.parent.mkdir(exist_ok=True)
                     move_without_overwrite(path, target)
             except OSError as error:

@@ -6,6 +6,7 @@
 
 | 구분 | 내용 |
 |---|---|
+| 파일명 규칙 | 세무사용 ZIP과 같은 형식으로 바꿨습니다. 정리: `58.39_26-11-25_greenist GmbH_Nr_R1044176_invoice.pdf`, 매칭완료 폴더로 이동 후: `[611-001]_58.39_26-11-25_greenist GmbH_Nr_R1044176_invoice.pdf`. 원래 파일 이름은 `original-names.json`에 내용 해시 기준으로 기억하고, 이전 형식(`__원본__`) 파일도 원래 이름을 찾아 새 형식으로 바꿉니다. 같은 이름은 ` (2)`를 붙입니다. |
 | 총액 인식 | 기존 라벨로 총액을 찾지 못할 때만 Gesamtbetrag, Gesamtsumme, Rechnungssumme, Zahlbetrag, zu zahlen, Gesamt, Summe, Total, Amount due 등을 추가로 확인합니다. 기존 라벨로 읽히던 인보이스의 결과는 바뀌지 않습니다. 추가 라벨에서 금액이 여러 개면 기존처럼 '확인 필요'로 둡니다. |
 | 전자 인보이스 | 파일명 변경 화면도 XRechnung `.xml`을 목록에 표시하고, ZUGFeRD/Factur-X PDF는 내장 XML의 발행일·업체명·총액·번호를 먼저 사용합니다. XML 정보가 부족한 PDF는 기존 텍스트·OCR 방식으로 읽습니다. |
 | 가져오기 오류 | 세무사용 `04_Importfehler.csv`의 검산 오류 행에 금액이 빠지던 문제를 고쳤습니다. |

@@ -23,7 +23,7 @@ import pymupdf
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import quote
 
-from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MONEY, MONTH_FOLDER, digest, filename_fields, invoice_edits_path, load_invoice_edits, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, read_pdf_pages, show_source_locations, undo_moves
+from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MONEY, MONTH_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
@@ -1552,7 +1552,9 @@ class MonthlyClose:
             parent = doc.path.parent
             if re.fullmatch(MATCHED_FOLDER, parent.name) and parent != self.folder:
                 parent = parent.parent
-            target = parent / f"매칭완료_{month[2:].replace('-', '')}" / doc.path.name
+            numbers = {self.record(key).get("number", "") for key in self.transactions if link in self.linked(key)}
+            name = package_filename(numbers.pop(), doc) if len(numbers) == 1 else doc.path.name
+            target = parent / f"매칭완료_{month[2:].replace('-', '')}" / name
             if doc.path != target:
                 moves.append((doc, target))
         return moves, skipped
@@ -1574,6 +1576,7 @@ class MonthlyClose:
                     raise OSError("선택한 증빙 폴더 밖으로 이동할 수 없어요.")
                 if digest(doc.path) != doc.key:
                     raise OSError("증빙이 변경됐어요. 증빙 폴더를 다시 불러오세요.")
+                remember_original_name(doc.path, doc.key)
                 target.parent.mkdir(exist_ok=True)
                 move_without_overwrite(doc.path, target)
                 history.append((doc.path, target, doc.key))
@@ -2842,13 +2845,12 @@ class MonthlyClose:
 
 def package_filename(transaction_id, doc):
     original = original_stem(doc.path)
-    reference = number_label(doc.number, original).replace("__번호_", "_Nr_")
     if doc.amount is None or not doc.day or not doc.seller:
-        label = original + reference
-    else:
-        currency = f" {doc.currency}" if doc.currency and doc.currency != "EUR" else ""
-        label = f"{doc.amount}{currency}_{doc.day:%y-%m-%d}_{doc.seller}{reference}_{original}"
-    label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", label).strip(" .")
+        reference = number_label(doc.number, original).replace("__번호_", "_Nr_")
+        label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", original + reference).strip(" .")
+        return f"[{transaction_id}]_{label[:170]}{doc.path.suffix.lower()}"
+    amount = f"{doc.amount:.0f}" if doc.currency == "KRW" and doc.amount == doc.amount.to_integral_value() else f"{doc.amount:.2f}"
+    label = evidence_stem(doc.day.isoformat(), doc.seller, f"{amount} {doc.currency or 'EUR'}", doc.number, original)
     return f"[{transaction_id}]_{label[:170]}{doc.path.suffix.lower()}"
 
 

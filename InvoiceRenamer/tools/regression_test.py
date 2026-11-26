@@ -13,7 +13,8 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 from invoice_renamer import (  # noqa: E402
-    EditsFileError, invoice_fields, load_invoice_edits, proposed_name, read_invoice_details,
+    EditsFileError, filename_fields, invoice_fields, load_invoice_edits, original_stem, proposed_name,
+    read_invoice_details, remember_original_name, reserve_name,
 )
 from monthly_close import decode_statement, german_import_error, index_pdfs  # noqa: E402
 
@@ -97,14 +98,36 @@ def run():
         documents, issues = index_pdfs(root)
         check(not issues and {doc.path.name for doc in documents} == {"rechnung.xml", "zugferd.pdf"}, "Monthly close still reads both")
 
-        # 6. Extra header sellers without code changes.
+        # 6. File names: same layout as the advisor ZIP, original name kept across renames.
+        fields = ("2026-11-25", "greenist GmbH", "58.39 EUR")
+        source = root / "invoice.pdf"
+        source.write_bytes(b"%PDF-1.4 synthetic")
+        name = proposed_name(fields, source, "R1044176")
+        check(name == "58.39_26-11-25_greenist GmbH_Nr_R1044176_invoice.pdf", f"Name before matching: {name}")
+        remember_original_name(source)
+        renamed = root / name
+        source.rename(renamed)
+        check(original_stem(renamed) == "invoice", "Original name from the record")
+        check(filename_fields(renamed) == fields, f"Fields from the new name: {filename_fields(renamed)}")
+        check(proposed_name(fields, renamed, "R1044176") == name, "Renaming again keeps the same name")
+        matched = root / f"[611-001]_{name}"
+        renamed.rename(matched)
+        check(proposed_name(fields, matched, "R1044176") == matched.name, "Transaction prefix kept")
+        check(filename_fields(matched) == fields, "Fields from the matched name")
+        legacy = root / "2026-11-25_58.39 EUR_greenist GmbH__번호_R1044176__원본__Rechnung R1.pdf"
+        legacy.write_bytes(b"%PDF-1.4 legacy")
+        check(proposed_name(fields, legacy, "R1044176") == "58.39_26-11-25_greenist GmbH_Nr_R1044176_Rechnung R1.pdf", "Legacy name converted")
+        check(proposed_name(("2026-11-25", "Shop", "12.50 USD"), root / "a.pdf", "") == "12.50 USD_26-11-25_Shop_a.pdf", "Foreign currency")
+        check(reserve_name(root, "x.pdf", root / "y.pdf", {"x.pdf"}).name == "x (2).pdf", "Duplicate number")
+
+        # 7. Extra header sellers without code changes.
         folder = root / "InvoiceRenamer"
-        folder.mkdir()
+        folder.mkdir(exist_ok=True)
         (folder / "seller-patterns.json").write_text(json.dumps({r"^\s*Kopfzeile Handel\b": "Kopfzeile Handel"}), encoding="utf-8")
         check(invoice_fields(["Kopfzeile Handel\nRechnungsbetrag 10,00 EUR"])[1] == "Kopfzeile Handel", "seller-patterns.json")
         check(invoice_fields(["greenist GmbH\nRechnungsbetrag 10,00 EUR"])[1] == "greenist GmbH", "Built-in header seller kept")
 
-        # 7. A damaged edits file is reported as such.
+        # 8. A damaged edits file is reported as such.
         (folder / "invoice-edits.json").write_text("{broken", encoding="utf-8")
         try:
             load_invoice_edits()
@@ -112,7 +135,7 @@ def run():
             pass
         else:
             raise AssertionError("Damaged edits file")
-    print("PASS: v1.1.1 total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+    print("PASS: v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":
