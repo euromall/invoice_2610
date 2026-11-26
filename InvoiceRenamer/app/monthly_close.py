@@ -372,6 +372,22 @@ def unique_pairs(pairs):
     return [(a, b) for a, b in pairs if left[a] == right[b] == 1]
 
 
+PERIOD_AUTO = "자동 (거래일의 월)"
+
+
+def period_choices(today=None):
+    """Choices for the closing month: automatic, then this month back to 24 months ago, and next month."""
+    today = today or date.today()
+    months = []
+    year, month = today.year, today.month + 1
+    if month == 13:
+        year, month = year + 1, 1
+    for _ in range(26):
+        months.append(f"{year:04d}-{month:02d}")
+        year, month = (year - 1, 12) if month == 1 else (year, month - 1)
+    return [PERIOD_AUTO, *months]
+
+
 def assign_numbers(records, transactions, period=""):
     counts = Counter()
     for record in records.values():
@@ -1391,7 +1407,7 @@ class MonthlyClose:
         form.pack()
         columns = [f"{index + 1}. {name}" for index, name in enumerate(header)]
         choices = []
-        labels = ("거래일 열", "가맹점 열", "금액 열", "통화 열 (선택)", "기본 통화", "연도가 뒤에 오는 날짜", "계좌·카드 별칭", "마감월 YYYY-MM (선택)", "지출이 음수인 명세서")
+        labels = ("거래일 열", "가맹점 열", "금액 열", "통화 열 (선택)", "기본 통화", "연도가 뒤에 오는 날짜", "계좌·카드 별칭", "마감월", "지출이 음수인 명세서")
         hints = (
             r"transaction date|purchase date|kaufdatum|buchungstag|buchungsdatum|umsatzdatum|datum|거래일|이용일|사용일|date",
             r"merchant|händler|empfänger|auftraggeber|beschreibung|verwendungszweck|buchungstext|가맹점|사용처|description",
@@ -1414,10 +1430,12 @@ class MonthlyClose:
             elif index == 5:
                 entry = ttk.Combobox(form, values=["DD/MM/YYYY", "MM/DD/YYYY"], state="readonly", width=39)
                 entry.current(0)
-            elif index in (6, 7):
+            elif index == 6:
                 entry = ttk.Entry(form, width=42)
-                if index == 6:
-                    entry.insert(0, self.state.get("source_accounts", {}).get(source_key, ""))
+                entry.insert(0, self.state.get("source_accounts", {}).get(source_key, ""))
+            elif index == 7:
+                entry = ttk.Combobox(form, values=period_choices(), state="readonly", width=39)
+                entry.current(0)
             else:
                 entry = ttk.Combobox(form, values=["아니요", "예 (금액 부호 반전)"], state="readonly", width=39)
                 entry.current(0)
@@ -1439,8 +1457,7 @@ class MonthlyClose:
             choices[5].set(profile["date_order"])
             choices[8].current(int(profile["flip_sign"]))
             if profile.get("period"):
-                choices[7].delete(0, "end")
-                choices[7].insert(0, profile["period"])
+                choices[7].set(profile["period"])
 
         if initial_spec:
             use_profile(initial_spec)
@@ -1462,7 +1479,7 @@ class MonthlyClose:
                 messagebox.showerror("열 지정 확인", "거래일·가맹점·금액에 서로 다른 열을 고르고 기본 통화를 입력하세요.", parent=dialog)
                 return
             account = choices[6].get().strip()
-            period = choices[7].get().strip()
+            period = "" if choices[7].current() == 0 else choices[7].get().strip()
             if period and not re.fullmatch(MONTH_FOLDER, period):
                 messagebox.showerror("마감월 확인", "YYYY-MM 형식으로 입력하세요.", parent=dialog)
                 return

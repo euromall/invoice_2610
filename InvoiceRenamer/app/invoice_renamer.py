@@ -1260,6 +1260,11 @@ class App:
         self.status.set("오류 진단을 저장했어요. 거래, 메모, 파일 경로는 포함되지 않아요.")
 
     def diagnose(self):
+        if self.folder is not None and not self.practice_folder:
+            try:
+                self.folder.mkdir(parents=True, exist_ok=True)  # the work folder may not exist yet on the first start
+            except OSError:
+                pass
         results = check_installation(self.folder)
         where = str(self.folder) if self.folder else "시스템 임시 폴더"
         messagebox.showinfo("설치·작동 점검", f"쓰기 검사 위치 · {where}\n\n" + "\n".join(
