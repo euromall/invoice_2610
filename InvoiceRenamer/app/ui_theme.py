@@ -136,6 +136,10 @@ HELP = {
     "명세서 기간 점검": "명세서끼리 빠진 날짜나 겹치는 기간이 없는지 확인해요.",
     # 3단계
     "증빙 폴더 선택": "인보이스가 있는 증빙 폴더를 골라요. 1단계에서 연 폴더가 있으면 자동으로 써요.",
+    "사유 관리 (한국어·독일어·추가)": "‘증빙 없이 처리’ 사유를 고쳐요. 세무사에게 가는 독일어 문장, 완료로 볼지 여부, 내 사유 추가·숨기기.",
+    "명세서에서 보기": "고른 거래가 명세서 PDF의 어디에 있는지 그 부분을 보여 줘요. CSV 명세서는 그 행의 모든 칸을 보여 줘요.",
+    "증빙 값 고치기": "오른쪽 목록에서 고른 증빙의 발행일·업체명·총액·번호를 고쳐요. 파일 내용은 바꾸지 않아요.",
+    "증빙 → 제외 폴더": "인보이스가 아니거나 이번 마감과 상관없는 증빙을 ‘제외’ 폴더로 옮겨요. 지우지 않아요.",
     "연결 안 된 증빙": "아직 어떤 거래에도 연결되지 않은 인보이스 목록이에요. 열어 보고, 값을 고치고, 거래에 연결하거나 ‘제외’ 폴더로 보낼 수 있어요.",
     "+ 증빙 파일 추가": "고른 거래의 인보이스 파일을 골라요. 작업 폴더로 가져오고(환경설정의 복사·이동) 바로 이 거래에 연결해요.",
     "월세·할부·대출·수수료 (계약서·명세서 근거)": "인보이스가 따로 없는 거래(월세·할부·대출 상환·수수료 등)를 계약서나 명세서 근거로 처리해요. ‘다음부터 자동 적용’을 켜면 같은 상대방 거래에 다음 명세서부터 자동으로 적용돼요.",
@@ -196,6 +200,7 @@ HELP = {
 def help_key(text):
     """Label text without counts, arrows and drop-down marks, for HELP lookups."""
     text = re.sub(r"\s*\(\d+건?\)", "", str(text))
+    text = re.sub(r"\s*\((?:복사|이동)\)", "", text)
     text = re.sub(r"\s*[▾→]+\s*$", "", text).strip()
     return re.sub(r"\s+\d+$", "", text)
 
@@ -229,9 +234,10 @@ class Tooltip:
         if not text or not self.widget.winfo_exists():
             return
         Tooltip.close_current()
+        # next to the mouse pointer (v1.10): the widget's own position can be far away on scaled Windows screens
         self.tip = show_bubble(self.widget, text,
-                               x if x is not None else self.widget.winfo_rootx() + 8,
-                               y if y is not None else self.widget.winfo_rooty() + self.widget.winfo_height() + 6)
+                               x if x is not None else self.widget.winfo_pointerx() + 14,
+                               y if y is not None else self.widget.winfo_pointery() + 20)
         Tooltip.current = self
 
     def hide(self, _event=None):
@@ -260,9 +266,14 @@ def show_bubble(widget, text, x, y):
     tk.Label(tip, text=text, justify="left", wraplength=320, background="#fffbe6", foreground=COLORS["ink"],
              relief="solid", borderwidth=1, font=FONT_SMALL, padx=8, pady=5).pack()
     tip.update_idletasks()
-    screen = widget.winfo_screenwidth()
-    x = min(x, screen - tip.winfo_reqwidth() - 8)
-    tip.wm_geometry(f"+{max(0, x)}+{y}")
+    window = (widget.master if isinstance(widget, tk.Menu) and widget.master else widget).winfo_toplevel()
+    # keep it inside the program window (also on a second monitor)
+    right = window.winfo_rootx() + window.winfo_width()
+    bottom = window.winfo_rooty() + window.winfo_height()
+    if window.winfo_width() > 200:
+        x = min(x, right - tip.winfo_reqwidth() - 8)
+        y = min(y, bottom - tip.winfo_reqheight() - 8)
+    tip.wm_geometry(f"+{x}+{y}")
     tip.after(8000, lambda: tip.winfo_exists() and tip.destroy())  # never leave a bubble behind
     return tip
 
@@ -304,8 +315,8 @@ def menu_help(menu):
             return
         text = HELP.get(help_key(menu.entrycget(index, "label")))
         if text:
-            x = menu.winfo_rootx() + max(menu.winfo_width(), 160) + 6
-            y = menu.winfo_pointery() - 10
+            x = menu.winfo_pointerx() + 24
+            y = menu.winfo_pointery() + 12
             state["tip"] = show_bubble(menu, text, x, y)
 
     menu.bind("<<MenuSelect>>", selected, add="+")
@@ -342,6 +353,8 @@ class InlineDialog(tk.Frame):
                          highlightbackground="#9aa3ad", highlightcolor="#9aa3ad")
         self._close_command = None
         self._width = None
+        self._centered = None  # (width, height) when the panel floats in the middle
+        self._moved = None  # (x, y) after the user dragged it by its title bar
         self._tag = f"InlineDialog{id(self)}"
         self._previous_focus = root.focus_get()
         header = tk.Frame(self, background=COLORS["navy"], padx=14, pady=9)
@@ -353,11 +366,17 @@ class InlineDialog(tk.Frame):
                          cursor="hand2", font=FONT)
         close.pack(side="right")
         close.bind("<Button-1>", lambda event: self._request_close())
+        self._header = header
+        for handle in (header, self._title):
+            handle.configure(cursor="fleur")
+            handle.bind("<ButtonPress-1>", self._drag_start)
+            handle.bind("<B1-Motion>", self._drag)
         self.configure(background=COLORS["bg"])
         self._area = getattr(root, "dialog_area", None) or root
         self._place()
         self.lift()
         self.bind_class(self._tag, "<Escape>", lambda event: self._request_close())
+        self.bind_class(self._tag, "<ButtonPress>", self._outside_click, add="+")
         self.after(30, self._finish)
 
     # Toplevel-compatible calls ------------------------------------------
@@ -418,7 +437,66 @@ class InlineDialog(tk.Frame):
 
     def _place(self):
         width = min(self._width or 640, self._available_width())
-        self.place(in_=self._area, relx=1.0, x=-6, y=6, anchor="ne", relheight=1.0, height=-12, width=width)
+        if self._moved:
+            self.place_forget()
+            self.place(in_=self._area, x=self._moved[0], y=self._moved[1], anchor="nw",
+                       width=self.winfo_width() or width, height=self.winfo_height() or 400)
+        elif self._centered:
+            area_height = max(300, self._area.winfo_height() - 24)
+            self.place_forget()
+            self.place(in_=self._area, relx=0.5, rely=0.5, anchor="center",
+                       width=min(self._centered[0], self._available_width()), height=min(self._centered[1], area_height))
+        else:
+            self.place(in_=self._area, relx=1.0, x=-6, y=6, anchor="ne", relheight=1.0, height=-12, width=width)
+
+    def center(self, width, height):
+        """Float in the middle of the window instead of filling the right side (the title bar can still drag it)."""
+        self._centered = (width, height)
+        self._width = width
+        self._place()
+
+    # Moving by the title bar ---------------------------------------------
+    def _drag_start(self, event):
+        self._drag_from = (event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty())
+
+    def _drag(self, event):
+        start = getattr(self, "_drag_from", None)
+        if start is None:
+            return
+        width, height = self.winfo_width(), self.winfo_height()
+        area = self._area
+        x = event.x_root - area.winfo_rootx() - start[0]
+        y = event.y_root - area.winfo_rooty() - start[1]
+        x = max(-width + 120, min(x, area.winfo_width() - 120))  # always keep part of the title bar reachable
+        y = max(0, min(y, area.winfo_height() - 40))
+        self._moved = (x, y)
+        self.place_forget()
+        self.place(in_=area, x=x, y=y, anchor="nw", width=width, height=height)
+
+    # A click outside while this panel holds the window -----------------
+    def _outside_click(self, event):
+        try:
+            if self.grab_current() is not self:
+                return None
+            inside = self.winfo_containing(event.x_root, event.y_root)
+        except (tk.TclError, KeyError):
+            return None
+        if inside is not None and str(inside).startswith(str(self)):
+            return None
+        Tooltip.close_current()
+        name = self.title() or "이 창"
+        show_bubble(self, f"‘{name}’ 창이 열려 있어요.\n저장하거나 오른쪽 위 ‘✕ 닫기’로 닫은 뒤 다른 버튼을 누르세요.",
+                    event.x_root + 12, event.y_root + 12)
+        self._flash(4)
+        return "break"
+
+    def _flash(self, times):
+        if times <= 0 or not self.winfo_exists():
+            return
+        color = COLORS["red"] if times % 2 == 0 else COLORS["navy"]
+        for widget in (self._header, self._title):
+            widget.configure(background=color)
+        self.after(180, lambda: self._flash(times - 1))
 
     def _finish(self):
         if not self.winfo_exists():
@@ -583,3 +661,171 @@ def show_notice(parent, message, title="안내", kind="info", action=None):
     except tk.TclError:
         pass
     return card
+
+
+# Tables: sort by header click, alignment and widths the user sets are remembered ---------------
+RIGHT_HEADS = ("금액", "총액", "합계", "차액", "잔액", "Betrag")
+CENTER_HEADS = ("번호", "거래일", "발행일", "날짜", "월", "거래번호", "기간", "건수", "개수")
+ARROWS = (" ▲", " ▼")
+
+
+def _table_settings():
+    try:
+        from invoice_renamer import load_settings
+        return load_settings().get("tables", {})
+    except Exception:  # settings are a convenience; a table must work without them
+        return {}
+
+
+def _save_table_settings(name, entry):
+    try:
+        from invoice_renamer import load_settings, save_settings
+        tables = load_settings().get("tables", {})
+        if entry:
+            tables[name] = entry
+        else:
+            tables.pop(name, None)
+        save_settings({"tables": tables})
+    except Exception:
+        pass
+
+
+def default_anchor(label):
+    label = str(label)
+    if any(head in label for head in RIGHT_HEADS):
+        return "e"
+    if label.strip() in CENTER_HEADS:
+        return "center"
+    return "w"
+
+
+def sort_value(value):
+    """Numbers (also ‘-12.50 EUR’) by size, everything else as text; empty cells last."""
+    text = str(value).strip()
+    if not text:
+        return (2, 0, "")
+    match = re.match(r"^[+-]?\d[\d,]*(?:\.\d+)?(?=\s|$)", text)
+    if match:
+        try:
+            return (0, float(match[0].replace(",", "")), text)
+        except ValueError:
+            pass
+    return (1, 0, text.casefold())
+
+
+def table_tools(tree, name, stretch=None, skip=()):
+    """Header click sorts (again: reverse, third time: original order). Right-click on a header sets the
+    alignment. Column widths and alignment are kept in settings.json under ‘tables’ → name."""
+    tree._tools = {"name": name, "sort": None, "skip": set(skip), "labels": {}}
+    saved = _table_settings().get(name, {})
+    columns = list(tree["columns"])
+    if stretch is None:
+        stretch = max(columns, key=lambda column: int(tree.column(column, "width")))
+    for column in columns:
+        label = str(tree.heading(column, "text")) or column
+        tree._tools["labels"][column] = label
+        if column in tree._tools["skip"]:
+            continue
+        tree.column(column, anchor=saved.get("align", {}).get(column) or default_anchor(label), stretch=column == stretch)
+        width = saved.get("width", {}).get(column)
+        if isinstance(width, int) and width >= 30:
+            tree.column(column, width=width)
+        tree.heading(column, anchor="center", command=lambda c=column: sort_table(tree, c, toggle=True))
+
+    def column_at(x):
+        number = tree.identify_column(x)
+        if not number.startswith("#"):
+            return None
+        shown = tree["displaycolumns"]
+        shown = columns if not shown or tuple(shown) == ("#all",) else list(shown)
+        index = int(number[1:]) - 1
+        return shown[index] if 0 <= index < len(shown) else None
+
+    def press(event):
+        tree._tools["resizing"] = tree.identify_region(event.x, event.y) == "separator"
+
+    def release(_event):
+        if tree._tools.pop("resizing", False):
+            entry = _table_settings().get(name, {})
+            entry["width"] = {column: int(tree.column(column, "width")) for column in columns
+                              if column not in tree._tools["skip"]}
+            _save_table_settings(name, entry)
+
+    def set_anchor(column, anchor):
+        tree.column(column, anchor=anchor)
+        entry = _table_settings().get(name, {})
+        entry.setdefault("align", {})[column] = anchor
+        _save_table_settings(name, entry)
+
+    def reset():
+        _save_table_settings(name, None)
+        for column in columns:
+            if column not in tree._tools["skip"]:
+                tree.column(column, anchor=default_anchor(tree._tools["labels"][column]))
+        sort_table(tree, None)
+
+    def header_menu(event):
+        if tree.identify_region(event.x, event.y) not in ("heading", "separator"):
+            return None
+        column = column_at(event.x)
+        if column is None or column in tree._tools["skip"]:
+            return None
+        menu = tk.Menu(tree, tearoff=False)
+        label = tree._tools["labels"][column]
+        menu.add_command(label=f"‘{label}’ 오름차순 정렬", command=lambda: sort_table(tree, column, descending=False))
+        menu.add_command(label=f"‘{label}’ 내림차순 정렬", command=lambda: sort_table(tree, column, descending=True))
+        menu.add_command(label="원래 순서로", command=lambda: sort_table(tree, None))
+        menu.add_separator()
+        for text, anchor in (("왼쪽 맞춤", "w"), ("가운데 맞춤", "center"), ("오른쪽 맞춤", "e")):
+            menu.add_command(label=("✓ " if str(tree.column(column, "anchor")) == anchor else "   ") + text,
+                             command=lambda a=anchor: set_anchor(column, a))
+        menu.add_separator()
+        menu.add_command(label="이 표의 칸 너비·맞춤 처음대로", command=reset)
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    tree.bind("<ButtonPress-1>", press, add="+")
+    tree.bind("<ButtonRelease-1>", release, add="+")
+    tree.bind("<Button-3>", header_menu, add="+")
+    return tree
+
+
+def sort_table(tree, column, toggle=False, descending=False):
+    """Sort the rows by a column (None: back to the order the screen filled in)."""
+    tools = getattr(tree, "_tools", None)
+    if tools is None:
+        return
+    current = tools["sort"]
+    if toggle:
+        if current and current[0] == column:
+            column, descending = (column, True) if not current[1] else (None, False)
+        else:
+            descending = False
+    tools["sort"] = (column, descending) if column else None
+    for name, label in tools["labels"].items():
+        if name not in tools["skip"]:
+            arrow = ARROWS[1 if descending else 0] if name == column else ""
+            tree.heading(name, text=label + arrow)
+    _apply_sort(tree)
+
+
+def resort(tree):
+    """Call after a screen refilled the table: remember the fill order, then apply the user's sort."""
+    tools = getattr(tree, "_tools", None)
+    if tools:
+        tools["fill_order"] = list(tree.get_children())
+        _apply_sort(tree)
+
+
+def _apply_sort(tree):
+    tools = tree._tools
+    rows = list(tree.get_children())
+    if not tools.get("fill_order") or set(tools["fill_order"]) != set(rows):
+        tools["fill_order"] = rows if tools["sort"] else None
+    if tools["sort"] is None:
+        rows = tools.get("fill_order") or rows
+    else:
+        column, descending = tools["sort"]
+        rows = sorted(rows, key=lambda row: sort_value(tree.set(row, column)), reverse=descending)
+    for index, row in enumerate(rows):
+        tree.move(row, "", index)

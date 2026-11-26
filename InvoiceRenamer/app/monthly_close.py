@@ -23,11 +23,11 @@ import pymupdf
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import quote
 
-from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, import_mode, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
+from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, import_mode, make_copyable, open_file, source_preview, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
-from ui_theme import COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, Busy, InlineDialog, show_notice, transaction_tag
+from ui_theme import COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, Busy, InlineDialog, resort, show_notice, table_tools, transaction_tag
 from workspace_backup import add_attachment, attachment_path, create_backup, restore_workspace
 
 
@@ -855,9 +855,152 @@ NO_EVIDENCE_REASONS = {
 UNLINKED_REASONS = ("", "미결제", "다른 결제수단", "다음 달 확인")
 
 DAUERBELEG_REASONS = {reason for reason in NO_EVIDENCE_REASONS if "기제출" in reason}
+
+
+_REASON_CACHE = []
+
+
+def reason_list(settings=None):
+    """Reasons for ‘증빙 없이 처리’: built-in ones (German text editable, can be hidden) and the user's own.
+
+    [{"ko", "de", "contract", "hidden", "builtin"}]. Kept in settings.json → ‘no_evidence_reasons’.
+    """
+    if settings is None:
+        if _REASON_CACHE:
+            return [dict(entry) for entry in _REASON_CACHE[0]]
+        try:
+            from invoice_renamer import load_settings
+            settings = load_settings()
+        except Exception:
+            settings = {}
+        _REASON_CACHE[:] = [reason_list(settings)]
+        return [dict(entry) for entry in _REASON_CACHE[0]]
+    saved = settings.get("no_evidence_reasons") or {}
+    overrides = saved.get("overrides") or {}
+    reasons = []
+    for korean, german in NO_EVIDENCE_REASONS.items():
+        if not korean:
+            continue
+        change = overrides.get(korean) or {}
+        reasons.append({"ko": korean, "de": change.get("de") or german, "contract": bool(change.get("contract", korean in DAUERBELEG_REASONS)),
+                        "hidden": bool(change.get("hidden")), "builtin": True})
+    for entry in saved.get("custom") or []:
+        if entry.get("ko") and entry["ko"] not in NO_EVIDENCE_REASONS:
+            reasons.append({"ko": entry["ko"], "de": entry.get("de", ""), "contract": bool(entry.get("contract")),
+                            "hidden": bool(entry.get("hidden")), "builtin": False})
+    return reasons
+
+
+def save_reason_list(reasons):
+    from invoice_renamer import save_settings
+    overrides, custom = {}, []
+    for entry in reasons:
+        if entry["builtin"]:
+            default_contract = entry["ko"] in DAUERBELEG_REASONS
+            change = {}
+            if entry["de"] != NO_EVIDENCE_REASONS[entry["ko"]]:
+                change["de"] = entry["de"]
+            if entry["contract"] != default_contract:
+                change["contract"] = entry["contract"]
+            if entry["hidden"]:
+                change["hidden"] = True
+            if change:
+                overrides[entry["ko"]] = change
+        else:
+            custom.append({key: entry[key] for key in ("ko", "de", "contract", "hidden")})
+    save_settings({"no_evidence_reasons": {"overrides": overrides, "custom": custom}})
+    _REASON_CACHE.clear()
+
+
+def reason_german(korean, reasons=None):
+    """German text of a no-evidence reason for the advisor (unknown reason: empty)."""
+    for entry in reasons if reasons is not None else reason_list():
+        if entry["ko"] == korean:
+            return entry["de"]
+    return NO_EVIDENCE_REASONS.get(korean, "")
+
+
+def is_contract_reason(korean, reasons=None):
+    """True for ‘contract already with the advisor’ reasons (rent, instalments …): counted as done."""
+    if not korean:
+        return False
+    for entry in reasons if reasons is not None else reason_list():
+        if entry["ko"] == korean:
+            return entry["contract"]
+    return korean in DAUERBELEG_REASONS
 CONTRACT_STATUS = "계약서 근거 확인"
 DONE_STATES = ("금액 대조 완료", "내부이체 확인", "전액 환불 확인", CONTRACT_STATUS)
 RECURRING_AUTO = ("아니요", "예 · 같은 거래처·같은 금액이면 자동 적용")
+
+
+def whole_page(path, index, rect):
+    """PNG of a full statement page (readable width) with the transaction lines boxed."""
+    with pymupdf.open(path) as document:
+        page = document[index]
+        page.draw_rect(pymupdf.Rect(rect) + (-2, -2, 2, 2), color=(0.9, 0.38, 0.05), width=1.8, overlay=True)
+        scale = 780 / max(1, page.rect.width)
+        return page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).tobytes("png")
+
+
+def page_height(path, index):
+    with pymupdf.open(path) as document:
+        return document[index].rect.height
+
+
+STATEMENT_LINE_START = re.compile(r"^\s*\d{2}\.\d{2}\.?(?:\d{2,4})?\s")
+
+
+def statement_excerpt(path, item, cache=None):
+    """Where a transaction stands in its statement: (page index or None, rect or None, text lines).
+
+    PDF: the line with the transaction's day.month and amount plus the lines that belong to it
+    (Verwendungszweck, reference …) until the next transaction line. CSV: column name: value of the row.
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".pdf":
+        if cache is not None and str(path) in cache:
+            pages = cache[str(path)]
+        else:
+            with pymupdf.open(path) as document:
+                pages = [[(rect, " ".join(words)) for rect, words in statement_lines(page)] for page in document]
+            if cache is not None:
+                cache[str(path)] = pages
+        amount = german_amount(item.amount)
+        day = f"{item.day.day:02d}.{item.day.month:02d}"
+        found = None
+        for wanted in (lambda text: text.lstrip().startswith(day) and amount in text, lambda text: amount in text):
+            found = next(((index, position) for index, lines in enumerate(pages)
+                          for position, (_, text) in enumerate(lines) if wanted(text)), None)
+            if found:
+                break
+        if not found:
+            return None, None, []
+        index, position = found
+        lines = pages[index]
+        rect = pymupdf.Rect(lines[position][0])
+        texts = [lines[position][1]]
+        for following_rect, text in lines[position + 1:position + 8]:
+            if STATEMENT_LINE_START.match(text) or following_rect.y0 - rect.y1 > 18:
+                break
+            rect |= following_rect
+            texts.append(text)
+        return index, tuple(rect), texts
+    header, rows = read_csv(path)
+    for row in rows:
+        days = {normalized_date(cell.strip()) for cell in row if re.fullmatch(DATE, cell.strip())}
+        money = {cell.strip().lstrip("+-").replace(".", "").replace(",", ".") if "," in cell else cell.strip().lstrip("+-")
+                 for cell in row}
+        if item.day.isoformat() in days and format(abs(item.amount), ".2f") in money:
+            return None, None, [f"{name}: {value}" for name, value in zip(header, row) if value.strip()]
+    return None, None, []
+
+
+def split_merchant(merchant):
+    """‘SEPA Lastschrifteinzug von | AMAZON PAYMENTS EUROPE’ → (‘SEPA Lastschrifteinzug von’, ‘AMAZON PAYMENTS EUROPE’)."""
+    parts = [part.strip() for part in merchant.split("|")]
+    if len(parts) > 1 and parts[0] and any(parts[1:]):
+        return parts[0], " | ".join(part for part in parts[1:] if part)
+    return "", merchant
 
 
 def payee_key(merchant):
@@ -902,7 +1045,7 @@ def review_months(state, invoices):
         merchant = record.get("merchant", "")
         if not (links or record.get("transfer") or record.get("refund_group") or record.get("statement_evidence")):
             issues.append((REVIEW_KINDS[0], number, merchant))
-        if (record.get("statement_evidence") and record["statement_evidence"] not in DAUERBELEG_REASONS) \
+        if (record.get("statement_evidence") and not is_contract_reason(record["statement_evidence"])) \
                 or record.get("follow_up") in ("세무사 확인 필요", "증빙 확보 불가"):
             issues.append((REVIEW_KINDS[3], number, merchant))
         texts = [record.get("advisor_note", ""), *(state.get("document_notes", {}).get(key, "") for key in links)]
@@ -988,6 +1131,7 @@ class MonthlyClose:
         self.practice_folder = practice_folder
         self.transactions = {}
         self.statement_sources = {}
+        self.transaction_sources = {}
         self.accounts = {}
         self.session_specs = {}
         self.last_moves = []
@@ -1077,6 +1221,12 @@ class MonthlyClose:
         body = ttk.Panedwindow(container, orient="horizontal")
         body.pack(fill="both", expand=True, padx=18, pady=(2, 6))
         self.body = body
+
+        def keep_sash(_event=None):
+            width = body.winfo_width()
+            if width > 400 and len(body.panes()) > 1:
+                self.sash_ratio = min(0.85, max(0.15, body.sashpos(0) / width))
+        body.bind("<ButtonRelease-1>", keep_sash, add="+")
         upper = tk.Frame(body, background=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"],
                          highlightcolor=COLORS["line"])
         lower = tk.Frame(body, background=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"],
@@ -1101,15 +1251,27 @@ class MonthlyClose:
         more_menu(self.left_footer, "증빙 없이 처리 ▾", [
             ("월세·할부·대출·수수료 (계약서·명세서 근거)", self.mark_statement_evidence),
             ("자동 적용 규칙 보기·삭제", self.manage_recurring),
+            ("사유 관리 (한국어·독일어·추가)", self.manage_reasons),
             ("카드대금·내부이체 후보", self.transfer_candidates), ("결제·환불 연결", self.link_refunds),
         ]).pack(side="left", padx=(0, 6))
         for label, command in (("메모·기록", self.edit_note), ("인보이스 요청 초안", self.draft_invoice_request),
                                ("Gmail 검색", self.search_gmail)):
             ttk.Button(self.left_footer, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 4))
-        self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태", "메모"), (72, 92, 220, 100, 120, 160))
+        self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태", "메모", "구분"),
+                                (72, 92, 220, 100, 120, 160, 120))
+        self.cards.column("가맹점·거래처", minwidth=140)
         self.cards.master.pack_configure(padx=1, pady=(0, 1))
         configure_tags(self.cards)
         self.cards.bind("<<TreeviewSelect>>", lambda event: self.show_invoices())
+        self.detail_strip = tk.Frame(upper, background="#f6f8fa", padx=10, pady=6)
+        detail_buttons = tk.Frame(self.detail_strip, background="#f6f8fa")
+        detail_buttons.pack(side="right", fill="y", padx=(8, 0))
+        ttk.Button(detail_buttons, text="명세서에서 보기", command=self.show_in_statement, style="Small.TButton").pack(fill="x")
+        self.detail_text = tk.Text(self.detail_strip, height=4, wrap="word", font=FONT_SMALL, relief="flat",
+                                   background="#f6f8fa", highlightthickness=0)
+        self.detail_text.pack(side="left", fill="both", expand=True)
+        make_copyable(self.detail_text)
+        self.excerpt_cache = {}
 
         self.pdfs_caption = tk.StringVar(value="거래를 고르세요")
         self.pdfs_header = card_header(lower, "추천 증빙", self.pdfs_caption)
@@ -1120,6 +1282,7 @@ class MonthlyClose:
                                ("열기", self.open_pdf)):
             ttk.Button(right_footer, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 4))
         more_menu(right_footer, "더보기", [
+            ("증빙 값 고치기", self.edit_document_values), ("증빙 → 제외 폴더", self.exclude_document), ("-", None),
             ("배분·차액", self.edit_allocation), ("정정·원본 연결", self.edit_correction), ("접대비 정보", self.edit_hospitality),
             ("보조 자료 첨부", self.edit_attachments), ("증빙 전달 메모 (독일어)", self.edit_document_note),
         ]).pack(side="left")
@@ -1146,6 +1309,7 @@ class MonthlyClose:
         self.pdfs.configure(displaycolumns=("증빙", "발행일", "총액", "추천·상태"))
         configure_tags(self.pdfs)
         self.pdfs.bind("<Double-1>", lambda event: self.open_pdf())
+        self.pdfs.bind("<Button-3>", self.evidence_menu, add="+")
 
         self.next_bar = tk.Frame(container, background=COLORS["panel"], highlightthickness=1, highlightbackground="#b8c2cc",
                                  highlightcolor="#b8c2cc", padx=14, pady=8)
@@ -1198,18 +1362,20 @@ class MonthlyClose:
         panes = self.body.panes()
         if number == 3 and str(self.lower) not in map(str, panes):
             self.body.add(self.lower, weight=5)
+            self.sash_placed = False  # put the divider back where the user left it
         elif number != 3 and str(self.lower) in map(str, panes):
             self.body.forget(self.lower)
-        self.cards.configure(displaycolumns=("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태") if number == 3 else "#all")
+        self.show_card_columns()
         if number == 3:
             if not getattr(self, "sash_placed", False):
                 def place_sash():
                     width = self.body.winfo_width()
                     if width > 400 and len(self.body.panes()) > 1:
-                        self.body.sashpos(0, int(width * 0.5))
+                        self.body.sashpos(0, int(width * getattr(self, "sash_ratio", 0.5)))
                         self.sash_placed = True
                 self.body.after(50, place_sash)
             self.left_footer.pack(side="bottom", fill="x", before=self.cards.master)
+            self.detail_strip.pack(side="bottom", fill="x", before=self.cards.master)
             self.next_bar.pack(fill="x", padx=18, pady=(0, 10))
             self.update_batch_bar()
             if not self.cards.selection() and self.cards.get_children():
@@ -1218,6 +1384,7 @@ class MonthlyClose:
                 self.cards.focus(first)
         else:
             self.left_footer.pack_forget()
+            self.detail_strip.pack_forget()
             self.next_bar.pack_forget()
             self.batch_bar.pack_forget()
 
@@ -1242,11 +1409,14 @@ class MonthlyClose:
         table = ttk.Treeview(frame, columns=columns, show="headings")
         for name, width in zip(columns, widths):
             table.heading(name, text=name)
-            table.column(name, width=width, minwidth=65)
+            table.column(name, width=width, minwidth=40)
         bar = ttk.Scrollbar(frame, command=table.yview)
-        table.configure(yscrollcommand=bar.set)
+        across = ttk.Scrollbar(frame, orient="horizontal", command=table.xview)
+        table.configure(yscrollcommand=bar.set, xscrollcommand=across.set)
         bar.pack(side="right", fill="y")
+        across.pack(side="bottom", fill="x")
         table.pack(fill="both", expand=True)
+        table_tools(table, "|".join(columns))
         return table
 
     def load_practice_statement(self, folder):
@@ -1697,6 +1867,7 @@ class MonthlyClose:
         self.transactions.update((item.key, item) for item in transactions)
         self.accounts.update((item.key, account) for item in transactions)
         self.statement_sources[source_key] = source
+        self.transaction_sources.update((item.key, source) for item in transactions)
         self.errors.extend((f"{source.name}:{line}", error) for line, error in errors)
         if moved_from and self.folder and moved_from.parent.resolve() == self.folder.resolve():
             self.load_pdfs(self.folder)  # the statement had been listed as evidence before the move
@@ -1740,6 +1911,7 @@ class MonthlyClose:
             self.accounts.clear()
             self.session_specs.clear()
             self.statement_sources.clear()
+            self.transaction_sources.clear()
             self.errors.clear()
             self.unresolved.set(True)
             for checksum, (spec, transactions, errors) in prepared.items():
@@ -2074,6 +2246,135 @@ class MonthlyClose:
         table.bind("<Double-1>", open_file)
         fill()
 
+    def manage_reasons(self):
+        """Edit the ‘증빙 없이 처리’ reasons: Korean label, German text for the advisor, counted as done or not."""
+        dialog = InlineDialog(self.root)
+        dialog.title("증빙 없이 처리 사유 관리 (한국어·독일어)")
+        dialog.geometry("980x560")
+        dialog.grab_set()
+        ttk.Label(dialog, wraplength=930, padding=(14, 10, 14, 4), text=(
+            "한국어 사유는 화면에서 고르는 이름, 독일어는 세무사 ZIP·Excel에 들어가는 문장이에요. "
+            "‘완료로 보기’를 켠 사유(계약서를 이미 낸 월세·할부 등)는 ‘계약서 근거 확인’으로 완료 처리되고, "
+            "끈 사유는 4단계에서 세무사 확인 대상으로 남아요. 기본 사유는 독일어·완료 여부만 고치거나 숨길 수 있어요.")).pack(anchor="w")
+        footer = ttk.Frame(dialog, padding=(14, 8))
+        footer.pack(side="bottom", fill="x")
+        table = self.table(dialog, ("한국어 사유", "독일어 (세무사 전달)", "완료로 보기", "목록 표시"), (230, 470, 100, 90))
+        reasons = reason_list()
+
+        def fill():
+            table.delete(*table.get_children())
+            for index, entry in enumerate(reasons):
+                table.insert("", "end", iid=str(index), values=(
+                    entry["ko"] + ("" if entry["builtin"] else "  (추가)"), entry["de"],
+                    "예 · 계약서 근거" if entry["contract"] else "아니요", "숨김" if entry["hidden"] else "보임"))
+            resort(table)
+
+        def store():
+            try:
+                save_reason_list(reasons)
+            except OSError as error:
+                show_notice(dialog, f"저장하지 못했어요: {error}", kind="error")
+                return False
+            fill()
+            self.refresh()
+            return True
+
+        def chosen():
+            selection = table.selection()
+            if len(selection) != 1:
+                show_notice(dialog, "사유 한 개를 고르세요.")
+                return None
+            return reasons[int(selection[0])]
+
+        def form(entry=None):
+            panel = InlineDialog(dialog)
+            panel.title("사유 고치기" if entry else "사유 추가")
+            panel.center(640, 330)
+            panel.grab_set()
+            body = ttk.Frame(panel, padding=16)
+            body.pack(fill="both", expand=True)
+            ttk.Label(body, text="한국어 사유").grid(row=0, column=0, sticky="w", pady=4)
+            korean = ttk.Entry(body, width=56)
+            korean.insert(0, entry["ko"] if entry else "")
+            korean.grid(row=0, column=1, sticky="ew")
+            if entry and entry["builtin"]:
+                korean.configure(state="disabled")
+            ttk.Label(body, text="독일어 (세무사 전달)").grid(row=1, column=0, sticky="w", pady=4)
+            german = ttk.Entry(body, width=56)
+            german.insert(0, entry["de"] if entry else "")
+            german.grid(row=1, column=1, sticky="ew")
+            contract = tk.BooleanVar(value=entry["contract"] if entry else False)
+            ttk.Checkbutton(body, variable=contract, text="완료로 보기 (계약서·보험증권 등을 이미 세무사에게 냄)").grid(
+                row=2, column=1, sticky="w", pady=(8, 0))
+            ttk.Label(body, style="Muted.TLabel", wraplength=440, text=(
+                "예: 한국어 ‘창고 월세 · 계약서 기제출’ → 독일어 ‘Lagermiete – Mietvertrag liegt dem Steuerbüro vor (Dauerbeleg)’"
+            )).grid(row=3, column=1, sticky="w", pady=(8, 0))
+
+            def save():
+                name, text = korean.get().strip(), german.get().strip()
+                if not name or not text:
+                    show_notice(panel, "한국어 사유와 독일어 문장을 모두 적어 주세요.")
+                    return
+                if entry is None and any(other["ko"] == name for other in reasons):
+                    show_notice(panel, "같은 이름의 사유가 이미 있어요.")
+                    return
+                if entry is None:
+                    reasons.append({"ko": name, "de": text, "contract": contract.get(), "hidden": False, "builtin": False})
+                else:
+                    if not entry["builtin"] and name != entry["ko"]:
+                        if self.reason_in_use(entry["ko"]):
+                            show_notice(panel, "이미 거래에 쓴 사유라 이름은 바꿀 수 없어요. 독일어·완료 여부만 고치거나, 새 사유를 추가하세요.")
+                            return
+                        entry["ko"] = name
+                    entry.update(de=text, contract=contract.get())
+                if store():
+                    panel.destroy()
+
+            ttk.Button(body, text="저장", command=save).grid(row=4, column=1, sticky="e", pady=(14, 0))
+
+        def edit():
+            entry = chosen()
+            if entry:
+                form(entry)
+
+        def toggle():
+            entry = chosen()
+            if entry:
+                entry["hidden"] = not entry["hidden"]
+                store()
+
+        def remove():
+            entry = chosen()
+            if not entry:
+                return
+            if entry["builtin"]:
+                show_notice(dialog, "기본 사유는 지울 수 없어요. ‘숨기기·보이기’로 목록에서 감출 수 있어요.")
+                return
+            if self.reason_in_use(entry["ko"]):
+                entry["hidden"] = True
+                store()
+                show_notice(dialog, "이미 거래에 쓴 사유라 지우지 않고 숨겼어요. 독일어 문장은 계속 세무사 자료에 쓰여요.")
+                return
+            reasons.remove(entry)
+            store()
+
+        def restore():
+            entry = chosen()
+            if entry and entry["builtin"]:
+                entry.update(de=NO_EVIDENCE_REASONS[entry["ko"]], contract=entry["ko"] in DAUERBELEG_REASONS, hidden=False)
+                store()
+
+        for label, command in (("+ 사유 추가", lambda: form()), ("고치기", edit), ("숨기기·보이기", toggle), ("지우기", remove),
+                               ("기본값으로", restore)):
+            ttk.Button(footer, text=label, command=command).pack(side="left", padx=(0, 6))
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right")
+        table.bind("<Double-1>", lambda event: edit())
+        fill()
+
+    def reason_in_use(self, korean):
+        return any(record.get("statement_evidence") == korean for record in self.state["records"].values()) \
+            or any(rule.get("reason") == korean for rule in self.state.get("recurring_rules", []))
+
     def manage_recurring(self):
         """Saved rules that mark rent, instalments etc. automatically; wrong ones can be deleted."""
         dialog = InlineDialog(self.root)
@@ -2135,8 +2436,10 @@ class MonthlyClose:
                     for rule in self.state.get("recurring_rules", []))
         self.edit_fields("증빙 없이 처리 · 세무사 확인", self.card_label(item) + (
                              "\n월세·할부·대출처럼 계약서를 이미 세무사에게 냈다면 해당 사유를 고르세요. "
-                             "‘다음부터 자동 적용’을 고르면 같은 거래처·같은 금액 거래는 다음 달부터 자동으로 처리돼요."),
-                         [("증빙 없이 검토하는 사유", record.get("statement_evidence", ""), list(NO_EVIDENCE_REASONS)),
+                             "‘다음부터 자동 적용’을 고르면 같은 거래처·같은 금액 거래는 다음 달부터 자동으로 처리돼요. "
+                             "세무사에게 가는 독일어 문장과 사유 추가는 ‘증빙 없이 처리 ▾ → 사유 관리’에서 해요."),
+                         [("증빙 없이 검토하는 사유", record.get("statement_evidence", ""),
+                           [""] + [entry["ko"] for entry in reason_list() if not entry["hidden"]]),
                           ("다음부터 자동 적용", RECURRING_AUTO[1] if known else RECURRING_AUTO[0], list(RECURRING_AUTO))], commit)
 
     def select_folder(self):
@@ -2419,7 +2722,7 @@ class MonthlyClose:
         links = self.linked(key)
         if not links:
             evidence = self.record(key).get("statement_evidence")
-            if evidence in DAUERBELEG_REASONS:
+            if is_contract_reason(evidence):
                 return CONTRACT_STATUS
             return "명세서 근거 · 세무사 확인" if evidence else "증빙 미연결"
         transactions, invoices = self.group(key)
@@ -2463,9 +2766,12 @@ class MonthlyClose:
                 shown = state
                 if state == "증빙 미연결" and key in candidates:
                     shown = "후보 있음 · 확실" if candidates[key] else "후보 있음 · 거의 일치"
+                kind, payee = split_merchant(item.merchant)
                 self.cards.insert("", "end", iid=key, values=(
-                    record.get("number", ""), item.day, item.merchant, f"{item.amount} {item.currency}", shown, self.note_preview(key),
+                    record.get("number", ""), item.day, payee, f"{item.amount} {item.currency}", shown, self.note_preview(key), kind,
                 ), tags=(tag,))
+        resort(self.cards)
+        self.show_card_columns()
         kept = [key for key in selected if self.cards.exists(key)]
         if selected and not kept and self.cards.get_children():
             kept = [self.cards.get_children()[0]]  # the linked transaction left the list: go on with the next one
@@ -2721,7 +3027,92 @@ class MonthlyClose:
                 doc.path.name, doc.day or "", f"{signed_total(doc)} {doc.currency}" if doc.amount is not None else "",
                 doc.number, " · ".join(labels),
             ))
+        resort(self.pdfs)
         self.update_match_panel(selected, linked, exact)
+        self.update_detail(selected)
+
+    def statement_lines_for(self, item):
+        """(source path, page index, rect, text lines) of a transaction in its statement file."""
+        source = self.transaction_sources.get(item.key)
+        if source is None or not Path(source).exists():
+            return source, None, None, []
+        try:
+            page, rect, lines = statement_excerpt(source, item, self.excerpt_cache)
+        except (OSError, ValueError, RuntimeError, csv.Error):
+            return source, None, None, []
+        return source, page, rect, lines
+
+    def show_card_columns(self):
+        """Step 3 hides the memo column; ‘구분’ (SEPA Lastschrift …) only when the statements have it."""
+        kinds = any(split_merchant(item.merchant)[0] for item in self.transactions.values())
+        columns = ("번호", "거래일") + (("구분",) if kinds else ()) + ("가맹점·거래처", "금액", "증빙 상태")
+        if getattr(self, "step", None) != 3:
+            columns += ("메모",)
+        if tuple(self.cards["displaycolumns"]) != columns:
+            self.cards.configure(displaycolumns=columns)
+
+    def update_detail(self, selected=None):
+        """Full statement text of the chosen transaction, below the list (copyable)."""
+        selected = self.cards.selection() if selected is None else selected
+        text = ""
+        if len(selected) == 1 and selected[0] in self.transactions:
+            item = self.transactions[selected[0]]
+            source, page, _, lines = self.statement_lines_for(item)
+            where = f"{Path(source).name}" + (f" · {page + 1}페이지" if page is not None else "") if source else "명세서 파일 없음"
+            body = "\n".join(lines) if lines else item.merchant
+            text = f"{self.record(item.key).get('number', '')} · {item.day} · {item.amount} {item.currency} · {where}\n{body}"
+        elif len(selected) > 1:
+            text = f"거래 {len(selected)}건을 골랐어요."
+        self.detail_text.configure(state="normal")
+        self.detail_text.delete("1.0", "end")
+        self.detail_text.insert("1.0", text)
+
+    def show_in_statement(self):
+        """Show the statement page part where the chosen transaction stands, with the lines boxed."""
+        item = self.single_card()
+        if item is None:
+            return
+        source, page, rect, lines = self.statement_lines_for(item)
+        if source is None or not Path(source).exists():
+            self.notice("이 거래의 명세서 파일을 찾지 못했어요. 2단계에서 명세서를 다시 불러오면 볼 수 있어요.")
+            return
+        window = InlineDialog(self.root)
+        window.title(f"명세서에서 보기 · {self.record(item.key).get('number', '')}")
+        window.geometry("820x640")
+        window.grab_set()
+        top = ttk.Frame(window, padding=(12, 10))
+        top.pack(fill="x")
+        ttk.Label(top, text=f"{Path(source).name}" + (f" · {page + 1}페이지" if page is not None else ""), font=FONT_BOLD).pack(side="left")
+        ttk.Button(top, text="파일 열기", command=lambda: open_file(source)).pack(side="right")
+        whole = tk.BooleanVar()
+        canvas = tk.Canvas(window, background="#eeeeee", highlightthickness=0)
+        text = tk.Text(window, height=8, wrap="word", font=FONT_SMALL)
+        text.insert("1.0", "\n".join(lines) if lines else "명세서에서 이 거래 줄을 찾지 못했어요. ‘파일 열기’로 확인하세요.")
+        make_copyable(text)
+        text.pack(side="bottom", fill="x", padx=12, pady=(4, 10))
+        if Path(source).suffix.lower() != ".pdf" or page is None:
+            return
+        ttk.Checkbutton(top, text="페이지 전체", variable=whole, command=lambda: draw()).pack(side="right", padx=10)
+        bar = ttk.Scrollbar(window, command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(fill="both", expand=True, padx=(12, 0))
+
+        def draw():
+            try:
+                data = source_preview(Path(source), page, rect) if not whole.get() else whole_page(Path(source), page, rect)
+            except (OSError, ValueError, RuntimeError) as error:
+                canvas.delete("all")
+                canvas.create_text(12, 12, anchor="nw", text=f"미리보기를 만들지 못했어요: {error}")
+                return
+            canvas.delete("all")
+            canvas.image = tk.PhotoImage(data=base64.b64encode(data).decode("ascii"))
+            canvas.create_image(0, 0, image=canvas.image, anchor="nw")
+            canvas.configure(scrollregion=(0, 0, canvas.image.width(), canvas.image.height()))
+            if whole.get():
+                canvas.yview_moveto(max(0.0, rect[1] / max(1.0, page_height(Path(source), page)) - 0.15))
+
+        draw()
 
 
     def save(self, state):
@@ -2890,6 +3281,7 @@ class MonthlyClose:
         self.transactions.clear()
         self.accounts.clear()
         self.statement_sources.clear()
+        self.transaction_sources.clear()
         self.session_specs.clear()
         self.errors.clear()
         self.last_moves.clear()
@@ -2944,6 +3336,7 @@ class MonthlyClose:
         self.transactions.clear()
         self.accounts.clear()
         self.statement_sources.clear()
+        self.transaction_sources.clear()
         self.session_specs.clear()
         self.errors.clear()
         self.last_moves.clear()
@@ -3080,7 +3473,7 @@ class MonthlyClose:
         record = self.record(item.key)
         dialog = InlineDialog(self.root)
         dialog.title("메모·기록")
-        dialog.geometry("900x660")
+        dialog.center(900, 640)  # floats in the middle; drag the title bar to see the list behind it
         dialog.grab_set()
         ttk.Label(dialog, text=self.card_label(item), style="Summary.TLabel", font=FONT_BOLD).pack(fill="x", padx=14, pady=(12, 8))
         columns = ttk.Frame(dialog)
@@ -3605,9 +3998,96 @@ class MonthlyClose:
         linked = {key for record in self.state["records"].values() for key in record.get("links", [])}
         return [doc for doc in self.invoices if doc.key not in linked]
 
+    def chosen_document(self):
+        selection = self.pdfs.selection()
+        if len(selection) != 1 or selection[0] not in self.visible_pdfs:
+            self.notice("오른쪽 증빙 목록에서 증빙 한 개를 고르세요.")
+            return None
+        return self.visible_pdfs[selection[0]]
+
+    def edit_document_values(self, doc=None, after=None):
+        """Fix date, seller, total and number of one evidence file (kept in invoice-edits.json, the file is not changed)."""
+        from invoice_renamer import save_invoice_edit
+        doc = doc or self.chosen_document()
+        if doc is None:
+            return
+        form = InlineDialog(self.root)
+        form.title("증빙 값 고치기")
+        form.grab_set()
+        body = ttk.Frame(form, padding=16)
+        body.pack(fill="x")
+        ttk.Label(body, text=doc.path.name, wraplength=520).grid(row=0, columnspan=2, sticky="w", pady=(0, 8))
+        values = (doc.day.isoformat() if doc.day else "", doc.seller,
+                  f"{doc.amount} {doc.currency}" if doc.amount is not None else "", doc.number)
+        entries = []
+        for row, (label, value) in enumerate(zip(("발행일 (YYYY-MM-DD)", "업체명", "총액 (예: 58.39 EUR)", "인보이스 번호"), values), 1):
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
+            entry = ttk.Entry(body, width=40)
+            entry.insert(0, value)
+            entry.grid(row=row, column=1)
+            entries.append(entry)
+
+        def save():
+            day, seller, total, number = (entry.get().strip() for entry in entries)
+            money = re.fullmatch(MONEY, total, re.IGNORECASE)
+            if not re.fullmatch(DATE, day) or not normalized_date(day) or not seller or not money:
+                show_notice(form, "발행일(2026-07-02), 업체명, 통화가 있는 총액(58.39 EUR)을 적어 주세요.")
+                return
+            try:
+                save_invoice_edit(doc.path, (normalized_date(day), seller, normalized_money(money), number))
+            except (OSError, ValueError) as error:
+                show_notice(form, f"저장하지 못했어요: {error}", kind="error")
+                return
+            form.destroy()
+            self.load_pdfs(self.folder)
+            if after:
+                after()
+
+        ttk.Button(body, text="저장", command=save).grid(row=5, column=1, sticky="e", pady=(10, 0))
+
+    def exclude_document(self, doc=None, parent=None):
+        """Move an evidence file that is not an invoice (or not for this close) to the ‘제외’ folder. Nothing is deleted."""
+        from invoice_renamer import EXCLUDED_FOLDER, free_name
+        doc = doc or self.chosen_document()
+        if doc is None:
+            return False
+        parent = parent or self.root
+        used = [self.record(key).get("number", "") or key[:8] for key, record in self.state["records"].items()
+                if doc.key in record.get("links", [])]
+        if used:
+            show_notice(parent, f"{doc.path.name}\n거래 {', '.join(used)}에 연결된 증빙이에요. 먼저 ‘해제’한 뒤 제외하세요.")
+            return False
+        if not messagebox.askyesno("제외 폴더로", f"{doc.path.name}\n인보이스가 아니거나 이번 마감과 상관없는 파일이면 ‘제외’ 폴더로 옮길까요?\n"
+                                                   "지우지 않아요. 1단계 ‘정리 되돌리기’나 탐색기에서 다시 꺼낼 수 있어요.", parent=parent):
+            return False
+        try:
+            target_folder = doc.path.parent / EXCLUDED_FOLDER
+            target_folder.mkdir(exist_ok=True)
+            move_evidence(doc.path, free_name(target_folder, doc.path.name))
+        except OSError as error:
+            show_notice(parent, f"옮기지 못했어요: {error}", kind="error")
+            return False
+        self.load_pdfs(self.folder)
+        return True
+
+    def evidence_menu(self, event):
+        row = self.pdfs.identify_row(event.y)
+        if not row or self.pdfs.identify_region(event.x, event.y) == "heading":
+            return None
+        self.pdfs.selection_set(row)
+        menu = tk.Menu(self.pdfs, tearoff=False)
+        for label, command in (("열기", self.open_pdf), ("선택 연결", self.link), ("해제", self.unlink), (None, None),
+                               ("값 고치기 (발행일·업체·총액·번호)", self.edit_document_values),
+                               ("제외 폴더로 (인보이스 아님·이번 달 아님)", self.exclude_document)):
+            if label is None:
+                menu.add_separator()
+            else:
+                menu.add_command(label=label, command=lambda c=command: c())
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
     def manage_unmatched(self):
         """Evidence that no transaction uses yet: look, fix the values, set aside, or link to a transaction."""
-        from invoice_renamer import EXCLUDED_FOLDER, free_name, save_invoice_edit
         dialog = InlineDialog(self.root)
         dialog.title("연결 안 된 증빙")
         dialog.geometry("980x600")
@@ -3646,59 +4126,13 @@ class MonthlyClose:
 
         def edit_selected():
             picked = chosen()
-            if not picked:
-                return
-            doc = picked[0]
-            form = InlineDialog(dialog)
-            form.title("증빙 값 고치기")
-            form.grab_set()
-            body = ttk.Frame(form, padding=16)
-            body.pack(fill="x")
-            ttk.Label(body, text=doc.path.name).grid(row=0, columnspan=2, sticky="w", pady=(0, 8))
-            values = (doc.day.isoformat() if doc.day else "", doc.seller,
-                      f"{doc.amount} {doc.currency}" if doc.amount is not None else "", doc.number)
-            entries = []
-            for row, (label, value) in enumerate(zip(("발행일 (YYYY-MM-DD)", "업체명", "총액 (예: 58.39 EUR)", "인보이스 번호"), values), 1):
-                ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
-                entry = ttk.Entry(body, width=40)
-                entry.insert(0, value)
-                entry.grid(row=row, column=1)
-                entries.append(entry)
-
-            def save():
-                day, seller, total, number = (entry.get().strip() for entry in entries)
-                money = re.fullmatch(MONEY, total, re.IGNORECASE)
-                if not re.fullmatch(DATE, day) or not normalized_date(day) or not seller or not money:
-                    show_notice(form, "발행일(2026-07-02), 업체명, 통화가 있는 총액(58.39 EUR)을 적어 주세요.")
-                    return
-                try:
-                    save_invoice_edit(doc.path, (normalized_date(day), seller, normalized_money(money), number))
-                except (OSError, ValueError) as error:
-                    show_notice(form, f"저장하지 못했어요: {error}", kind="error")
-                    return
-                form.destroy()
-                self.load_pdfs(self.folder)
-                fill()
-
-            ttk.Button(body, text="저장", command=save).grid(row=5, column=1, sticky="e", pady=(10, 0))
+            if picked:
+                self.edit_document_values(picked[0], after=fill)
 
         def exclude_selected():
             picked = chosen()
-            if not picked:
-                return
-            doc = picked[0]
-            if not messagebox.askyesno("제외 폴더로", f"{doc.path.name}\n인보이스가 아니거나 이번 마감과 상관없는 파일이면 ‘제외’ 폴더로 옮길까요?\n"
-                                                       "지우지 않아요.", parent=dialog):
-                return
-            try:
-                target_folder = doc.path.parent / EXCLUDED_FOLDER
-                target_folder.mkdir(exist_ok=True)
-                move_evidence(doc.path, free_name(target_folder, doc.path.name))
-            except OSError as error:
-                show_notice(dialog, f"옮기지 못했어요: {error}", kind="error")
-                return
-            self.load_pdfs(self.folder)
-            fill()
+            if picked and self.exclude_document(picked[0], dialog):
+                fill()
 
         def link_selected():
             picked = chosen()
@@ -4109,6 +4543,7 @@ class MonthlyClose:
         """omit: PACKAGE_PARTS ids left out of the ZIP (required parts are always written)."""
         omit = set(omit) - {part for part, *_rest, required in PACKAGE_PARTS if required}
         temporary = None
+        reasons = reason_list()
         try:
             with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
                 temporary = Path(stream.name)
@@ -4238,7 +4673,7 @@ class MonthlyClose:
                            " | ".join(paths), export_value(delivery_text(record.get("advisor_note", ""))), record.get("due", ""),
                            " | ".join(self.record(other).get("number", "") for other in record.get("refund_group", []) if other != key),
                            FOLLOW_UP.get(record.get("follow_up", ""), ""),
-                           NO_EVIDENCE_REASONS.get(record.get("statement_evidence", ""), "")]
+                           reason_german(record.get("statement_evidence", ""), reasons)]
                     reason = DIFFERENCE_REASONS.get(record.get("difference_reason", ""), "")
                     if reason or record.get("allocations"):
                         allocation_writer.writerow([transaction_id, "", "", item.currency, reason,

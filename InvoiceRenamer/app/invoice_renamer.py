@@ -18,7 +18,7 @@ import pymupdf
 
 import learned_formats
 from release_info import VERSION, export_diagnostics, record_error
-from ui_theme import COLORS, FONT_BOLD, Busy, InlineDialog, show_notice
+from ui_theme import COLORS, FONT_BOLD, Busy, InlineDialog, resort, show_notice, table_tools
 
 
 DATE = r"(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})"
@@ -1145,6 +1145,7 @@ class App:
         self.practice_folder = practice_folder
         self.on_change = on_change
         self.on_work_folder = None  # set by the main window to keep steps 2-5 on the same work folder
+        self.on_manage_reasons = None  # set by the main window: ‘증빙 없이 처리’ reasons (step 3)
         if container is None:
             title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
             root.title(f"[연습 모드] {title}" if practice_folder else title)
@@ -1159,8 +1160,11 @@ class App:
             "빨간 행은 필수 누락, 회색 행은 인보이스가 아닌 것 같은 파일이에요.")).pack(anchor="w")
         toolbar = ttk.Frame(container, padding=(18, 8, 18, 4))
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="파일 가져오기", command=self.import_files).pack(side="left")
-        ttk.Button(toolbar, text="폴더 가져오기", command=self.import_folder).pack(side="left", padx=6)
+        self.import_buttons = (ttk.Button(toolbar, text="파일 가져오기", command=self.import_files),
+                               ttk.Button(toolbar, text="폴더 가져오기", command=self.import_folder))
+        self.import_buttons[0].pack(side="left")
+        self.import_buttons[1].pack(side="left", padx=6)
+        self.update_import_labels()
         ttk.Button(toolbar, text="편집", command=self.edit).pack(side="left", padx=6)
         self.apply_button = ttk.Button(toolbar, text="파일명 변경", command=self.apply, style="Primary.TButton")
         self.apply_button.pack(side="left", padx=6)
@@ -1198,6 +1202,10 @@ class App:
             self.table.column(column, width=width, minwidth=38 if column == "check" else 110,
                               stretch=column != "check", anchor="center" if column == "check" else "w")
         self.table.heading("check", command=self.toggle_all)
+        table_tools(self.table, "step1-files", stretch="new", skip=("check",))
+        across = ttk.Scrollbar(frame, orient="horizontal", command=self.table.xview)
+        self.table.configure(xscrollcommand=across.set)
+        across.pack(side="bottom", fill="x")
         configure_tags(self.table)
         bar = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=bar.set)
@@ -1422,6 +1430,7 @@ class App:
                 show_notice(dialog, f"설정을 저장하지 못했어요: {error}", kind="error")
                 return
             self.status.set("가져오기 방식: " + ("복사 (원본 그대로)" if mode.get() == "copy" else "이동"))
+            self.update_import_labels()
 
         for row, (value, label) in enumerate((
                 ("copy", "복사 — 원본 파일은 그대로 두고 작업 폴더에 사본을 만들어요 (추천, 테스트할 때 안전)"),
@@ -1431,6 +1440,16 @@ class App:
         ttk.Label(body, style="Muted.TLabel", wraplength=640, text=(
             "같은 방식이 1단계 ‘파일 가져오기·폴더 가져오기’와 2단계 명세서 불러오기에 함께 적용돼요. "
             "바꾼 설정은 바로 저장돼요.")).grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        if self.on_manage_reasons:
+            ttk.Label(body, text="증빙 없이 처리 사유", font=FONT_BOLD).grid(row=7, column=0, sticky="w", pady=(22, 4))
+            ttk.Button(body, text="사유 관리 (한국어·독일어·추가)",
+                       command=lambda: (dialog.destroy(), self.on_manage_reasons())).grid(row=8, column=0, sticky="w")
+
+    def update_import_labels(self):
+        """‘파일 가져오기 (복사)’ or ‘(이동)’: the button says what happens to the originals."""
+        word = "복사" if import_mode() == "copy" else "이동"
+        for button, label in zip(getattr(self, "import_buttons", ()), ("파일 가져오기", "폴더 가져오기")):
+            button.configure(text=f"{label} ({word})")
 
     def change_work_folder(self):
         selected = filedialog.askdirectory(parent=self.root, title="새 작업 폴더 고르기", initialdir=str(work_folder()))
@@ -1592,6 +1611,7 @@ class App:
         self.table.detach(*self.table.get_children())
         for index, key in enumerate(shown):
             self.table.move(key, "", index)
+        resort(self.table)
         self.summary = counts
         if self.on_change:
             self.on_change()

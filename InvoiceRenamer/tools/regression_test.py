@@ -184,6 +184,34 @@ def run():
         check(count == 1 and rule_state["records"]["oct"]["statement_evidence"].startswith("임대료")
               and "other" not in rule_state["records"] and "odd" not in rule_state["records"]
               and "statement_evidence" not in rule_state["records"]["linked"], f"v1.9: recurring rule applied {rule_state}")
+        # 6c. v1.10: statement text of a transaction, merchant split, table sort values, reason list.
+        from monthly_close import is_contract_reason, reason_german, reason_list, save_reason_list, split_merchant, statement_excerpt
+        greenist = next(item for _, item in entries if "GREENIST" in item.merchant)
+        page, rect, excerpt = statement_excerpt(statement, greenist)
+        check(page == 0 and rect and "GREENIST" in excerpt[0] and any("Kartenzahlung" in line for line in excerpt),
+              f"v1.10: statement excerpt from PDF {excerpt}")
+        csv_statement = root / "excerpt.csv"
+        csv_statement.write_text("Buchungstag;Empfänger;Verwendungszweck;Betrag\n01.10.2026;Lager GmbH;Miete 10/2026 Halle 3;-850,00\n",
+                                 encoding="utf-8")
+        _, _, row_text = statement_excerpt(csv_statement, Transaction("c", day(2026, 10, 1), "Lager GmbH", Decimal("-850.00"), "EUR"))
+        check("Verwendungszweck: Miete 10/2026 Halle 3" in row_text, f"v1.10: statement excerpt from CSV {row_text}")
+        check(split_merchant("SEPA Lastschrifteinzug von | AMAZON PAYMENTS EUROPE S.C.A.") == ("SEPA Lastschrifteinzug von", "AMAZON PAYMENTS EUROPE S.C.A.")
+              and split_merchant("AMAZON EU   BADEN") == ("", "AMAZON EU   BADEN"), "v1.10: merchant split")
+        from ui_theme import help_key, sort_value
+        check(sorted(["-5176.50 EUR", "40.51 EUR", "", "9.46 EUR", "800.00 EUR"], key=sort_value)
+              == ["-5176.50 EUR", "9.46 EUR", "40.51 EUR", "800.00 EUR", ""], "v1.10: amounts sort by value")
+        check(help_key("파일 가져오기 (복사)") == "파일 가져오기" and help_key("연결 안 된 증빙 (234)") == "연결 안 된 증빙", "v1.10: help keys")
+        reasons = reason_list({})
+        rent_reason = next(entry for entry in reasons if entry["ko"].startswith("임대료"))
+        check(rent_reason["contract"] and not next(entry for entry in reasons if entry["ko"] == "은행 수수료")["contract"],
+              "v1.10: built-in contract reasons")
+        rent_reason["de"] = "Lagermiete – Vertrag liegt vor"
+        reasons.append({"ko": "창고 관리비 · 계약서 기제출", "de": "Lagernebenkosten – Vertrag liegt vor", "contract": True,
+                        "hidden": False, "builtin": False})
+        save_reason_list(reasons)
+        check(reason_german(rent_reason["ko"]) == "Lagermiete – Vertrag liegt vor" and is_contract_reason("창고 관리비 · 계약서 기제출")
+              and reason_german("창고 관리비 · 계약서 기제출") == "Lagernebenkosten – Vertrag liegt vor", "v1.10: reasons saved and used")
+
         from types import SimpleNamespace
         docs = [SimpleNamespace(key="x"), SimpleNamespace(key="y")]
         check([doc.key for doc in MonthlyClose.unmatched_documents(SimpleNamespace(state=rule_state, invoices=docs))] == ["y"],
@@ -332,7 +360,7 @@ def run():
         parts = split_pdf(combined, info["parts"])
         check([read_invoice_details(path)[0][1:] for path in parts] == [("Shop Eins GmbH", "18.99 EUR"), ("Shop Zwei GmbH", "11.00 EUR")]
               and not combined.exists() and (combined.parent / "제외" / "order__나누기전_원본.pdf").exists(), "Combined PDF split")
-    print("PASS: v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+    print("PASS: v1.10 statement text, sort, reasons, v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":

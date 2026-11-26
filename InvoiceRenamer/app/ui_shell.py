@@ -112,6 +112,7 @@ class Shell:
             if not practice_folder and self.close.folder is None and self.app.folder is not None:
                 self.close.folder = self.app.folder  # statements are filed into the work folder; PDFs are read in step 3
             self.app.on_work_folder = self.work_folder_changed
+            self.app.on_manage_reasons = self.close.manage_reasons
         except RuntimeError:
             self.close = None
         self.build_sidebar()
