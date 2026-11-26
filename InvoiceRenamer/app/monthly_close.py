@@ -52,17 +52,48 @@ class Invoice:
     tax_fields: dict | None = None
 
 
-def read_csv(path):
-    data = path.read_bytes()
-    encodings = ("utf-16",) if data.startswith((b"\xff\xfe", b"\xfe\xff")) else ("utf-8-sig", "cp949", "cp1252")
-    for encoding in encodings:
-        try:
-            content = data.decode(encoding)
-            break
-        except UnicodeError:
-            continue
-    else:
+WESTERN_CHARACTERS = set("äöüÄÖÜßéèêëàâáçñóòôõúùûíìîïÉÈÀÁÇÑÓÚ€£°§´’‘“”„–—…·µ×\u00a0")
+
+
+def decode_statement(data, legacy=False):
+    """Decode bank exports. German Latin-1/cp1252 is preferred over cp949 when it reads cleanly.
+
+    legacy=True keeps the pre-1.1.1 order for files that were already imported, because
+    transaction keys include the merchant text and must stay the same.
+    """
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    if legacy:
+        for encoding in ("utf-8-sig", "cp949", "cp1252"):
+            try:
+                return data.decode(encoding)
+            except UnicodeError:
+                continue
         raise ValueError("CSV 문자 인코딩을 읽을 수 없어요.")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeError:
+        pass
+    western = None
+    try:
+        western = data.decode("cp1252")
+    except UnicodeError:
+        pass
+    if western is not None:
+        special = [char for char in western if ord(char) > 127]
+        if special and sum(char in WESTERN_CHARACTERS for char in special) / len(special) >= 0.9:
+            return western
+    try:
+        return data.decode("cp949")
+    except UnicodeError:
+        pass
+    if western is not None:
+        return western
+    raise ValueError("CSV 문자 인코딩을 읽을 수 없어요.")
+
+
+def read_csv(path, legacy=False):
+    content = decode_statement(path.read_bytes(), legacy)
     try:
         dialect = csv.Sniffer().sniff(content[:8192], delimiters=",;\t|")
     except csv.Error:
@@ -477,7 +508,7 @@ def german_input(value):
 
 def german_import_error(value):
     if "검산" in value or "원본 합계" in value:
-        return "Summenabgleich prüfen · " + " / ".join(re.findall(r"-?\\d+\\.\\d{2}", value))
+        return "Summenabgleich prüfen · " + " / ".join(re.findall(r"-?\d+\.\d{2}", value))
     if "겹쳐" in value or "중복" in value:
         return "Mögliche doppelte Transaktionen prüfen"
     if "날짜" in value:
@@ -958,8 +989,12 @@ class MonthlyClose:
 
     def read_import(self, source):
         is_pdf = source.suffix.lower() == ".pdf"
-        header, rows = read_statement_pdf(source) if is_pdf else read_csv(source)
-        return digest(source), header, rows, statement_layout(source, header)
+        key = digest(source)
+        header, rows = read_statement_pdf(source) if is_pdf else read_csv(source, self.imported_before(key))
+        return key, header, rows, statement_layout(source, header)
+
+    def imported_before(self, source_key):
+        return source_key in self.state.get("source_resolutions", {}) or source_key in self.state.get("statement_paths", {})
 
     def preview_import(self, source, rows, spec):
         transactions, errors = self.parse_spec(rows, spec)
@@ -1202,7 +1237,7 @@ class MonthlyClose:
                 if digest(path) != checksum:
                     raise ValueError("명세서 내용이 변경됐어요.")
                 pdf = path.suffix.lower() == ".pdf"
-                _, rows = read_statement_pdf(path) if pdf else read_csv(path)
+                _, rows = read_statement_pdf(path) if pdf else read_csv(path, self.imported_before(checksum))
                 transactions, errors = self.parse_spec(rows, spec)
                 if pdf:
                     check, discrepancy = statement_check(path, transactions)

@@ -1,5 +1,26 @@
 # InvoiceRenamer 개발자용 통합본
 
+독일 세무 월마감용 프로그램입니다. 은행·카드 명세서 거래에 인보이스를 연결하고, 세무사에게 전달할 독일어 ZIP과 Excel 대조표를 만듭니다.
+
+## v1.1.1 변경 사항 (2026-11-26)
+
+| 구분 | 내용 |
+|---|---|
+| 총액 인식 | 기존 라벨로 총액을 찾지 못할 때만 Gesamtbetrag, Gesamtsumme, Rechnungssumme, Zahlbetrag, zu zahlen, Gesamt, Summe, Total, Amount due 등을 추가로 확인합니다. 기존 라벨로 읽히던 인보이스의 결과는 바뀌지 않습니다. 추가 라벨에서 금액이 여러 개면 기존처럼 '확인 필요'로 둡니다. |
+| 전자 인보이스 | 파일명 변경 화면도 XRechnung `.xml`을 목록에 표시하고, ZUGFeRD/Factur-X PDF는 내장 XML의 발행일·업체명·총액·번호를 먼저 사용합니다. XML 정보가 부족한 PDF는 기존 텍스트·OCR 방식으로 읽습니다. |
+| 가져오기 오류 | 세무사용 `04_Importfehler.csv`의 검산 오류 행에 금액이 빠지던 문제를 고쳤습니다. |
+| CSV 인코딩 | 새로 불러오는 CSV는 UTF-8 다음에 독일식 cp1252를 먼저 판단하고, 읽은 문자가 독일·서유럽 문자가 아니면 cp949로 읽습니다. 이미 불러온 적 있는 명세서 파일은 거래번호와 연결이 바뀌지 않도록 이전 방식으로 읽습니다. |
+| 업체 인식 | 문서 머리글로 업체를 알아보는 규칙을 `%LOCALAPPDATA%\InvoiceRenamer\seller-patterns.json`에 추가할 수 있습니다. 예: `{"^\\s*Muster GmbH\\b": "Muster GmbH"}`. 기존 내장 규칙은 그대로 동작합니다. |
+| 수정값 파일 | `invoice-edits.json`이 손상되면 모든 파일을 'PDF 읽기 실패'로 표시하던 대신, 손상된 파일 위치를 알려 줍니다. |
+| 이전 버전 복원 | 복원할 때 새 버전에만 있던 파일을 지우고, 실행 중인 복원 스크립트 자신은 덮어쓰지 않습니다. |
+| EXE | Windows용 단일 실행 파일(`InvoiceRenamer.exe`)을 만들 수 있습니다. 독일어·영어 OCR 파일과 예시 자료가 포함되며, 작업 기록은 설치판과 같은 `%LOCALAPPDATA%\InvoiceRenamer`를 사용합니다. |
+
+알려진 제한: 거래번호 형식(`611-001`, 연도 끝자리+월)은 기존 기록과의 호환을 위해 유지했습니다. 정리 되돌리기는 창을 연 동안만 가능합니다.
+
+## EXE 만들기
+
+GitHub Actions의 `invoice-renamer-exe` 워크플로가 Windows에서 테스트 후 `InvoiceRenamer.exe`, 설치용 CMD, Windows ZIP을 만들어 Artifact로 올립니다. 직접 만들려면 Windows에서 `tools\build_exe.bat`을 실행합니다. 서명되지 않은 EXE라 처음 실행할 때 Windows SmartScreen 경고가 나올 수 있습니다.
+
 현재 배포판의 전체 앱 소스, 예시 자료, 배포 도구를 묶었습니다. 앱은 Python과 Tkinter를 사용합니다.
 
 ## 개발 환경
@@ -41,6 +62,7 @@ Windows의 사용자 데이터는 LOCALAPPDATA/InvoiceRenamer 아래에 있습�
 ## 빌드와 검증
 
     python tools/smoke_test.py
+    python tools/regression_test.py
     python tools/build_release.py
 
 dist 폴더에 invoice-renamer-monthly-close-windows.zip과 InvoiceRenamer-Setup.cmd가 만들어집니다. 새 앱 파일을 배포할 때는 tools/build_release.py의 APP_FILES 목록을 갱신합니다. 의존성을 바꾸면 requirements.txt와 app/Start.bat의 버전도 함께 바꿉니다. 설치 템플릿이 다운로드하는 Python의 버전을 바꿀 때는 공식 설치 파일의 경로와 서명 확인도 검증합니다.

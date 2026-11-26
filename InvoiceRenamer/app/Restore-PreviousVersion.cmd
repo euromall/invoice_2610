@@ -36,7 +36,14 @@ try {
         $record = Join-Path $root $name
         if (Test-Path -LiteralPath $record) { Copy-Item -LiteralPath $record -Destination $savedData }
     }
+    # Remove files that only exist in the newer version, then copy the backup.
+    # This script itself is never replaced while it is running.
+    $keep = @('.venv', 'tessdata', '__pycache__', 'Restore-PreviousVersion.cmd')
+    Get-ChildItem -LiteralPath $app -Force |
+        Where-Object { $_.Name -notin $keep } |
+        Remove-Item -Recurse -Force
     Get-ChildItem -LiteralPath (Join-Path $backup.FullName 'app') -Force |
+        Where-Object { $_.Name -ne 'Restore-PreviousVersion.cmd' } |
         Copy-Item -Destination $app -Recurse -Force
     if ($choice -eq 'B') {
         foreach ($name in @('monthly-close.json', 'invoice-edits.json')) {

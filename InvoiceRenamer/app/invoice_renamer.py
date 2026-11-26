@@ -26,10 +26,24 @@ TOTAL_LABEL = (
     r"Rechnungsbetrag(?:\s+brutto)?|Endbetrag|Grand Total|Invoice Total|"
     r"Total incl\.? (?:VAT|tax)|청구\s*총액|합계\s*금액|총\s*청구\s*금액"
 )
+# Used only when none of the labels above yields an amount, so invoices that
+# were recognised before v1.1.1 keep the same result.
+TOTAL_LABEL_FALLBACK = (
+    r"Gesamtbetrag(?:\s+brutto)?|Gesamtsumme(?:\s+brutto)?|Bruttosumme|Rechnungssumme|Endsumme|"
+    r"Zahlbetrag|Zahlungsbetrag|zu\s+zahlender\s+Betrag|zu\s+zahlen|Gesamt|Summe(?:\s+brutto)?|"
+    r"Total\s+(?:due|amount)|Amount\s+due|Balance\s+due|Total"
+)
 CURRENCY = r"EUR|USD|GBP|KRW|CHF|€|\$|£|₩|원"
 NUMBER = r"-?\d+(?:[.,'’\u00a0 ]\d{3})*(?:[.,]\d{2})?"
 MONEY = rf"(?:(?P<before>{CURRENCY})[ \t]*(?P<first>{NUMBER})|(?P<last>{NUMBER})[ \t]*(?P<after>{CURRENCY}))(?![\w.,])"
 VENDOR_LABEL = r"Lieferant|Verkäufer|Rechnungssteller|Supplier|Seller|공급자|업체명"
+# Sellers recognised by the first lines of the document (pattern, seller name).
+# Add more without changing code in %LOCALAPPDATA%\InvoiceRenamer\seller-patterns.json,
+# for example {"^\\s*Muster GmbH\\b": "Muster GmbH"}.
+HEADER_SELLERS = (
+    (r"^\s*greenist GmbH\b", "greenist GmbH"),
+    (r"^\s*Jejo Media\s+Jeff Mittner\b", "Jejo Media"),
+)
 
 
 def unique(values):
@@ -62,9 +76,33 @@ def normalized_money(match):
     return f"{amount:.2f} {currency}"
 
 
+def user_data_folder():
+    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "InvoiceRenamer"
+
+
+def header_sellers():
+    patterns = list(HEADER_SELLERS)
+    path = user_data_folder() / "seller-patterns.json"
+    try:
+        extra = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError):
+        return patterns
+    if isinstance(extra, dict):
+        for pattern, name in extra.items():
+            if isinstance(pattern, str) and isinstance(name, str) and name.strip():
+                try:
+                    re.compile(pattern)
+                except re.error:
+                    continue
+                patterns.append((pattern, name.strip()))
+    return patterns
+
+
 def invoice_fields(layouts):
     dates = []
     amounts = []
+    fallback_amounts = []
+    known_sellers = header_sellers()
     sellers = []
     alternate_dates = []
     for layout in layouts:
@@ -75,23 +113,26 @@ def invoice_fields(layouts):
                 alternate_dates.append(fallback[1])
         for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL})\b[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
             amounts.append(normalized_money(match))
+        for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL_FALLBACK})\b[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
+            fallback_amounts.append(normalized_money(match))
         sellers.extend(re.findall(rf"(?im)^\s*(?:{VENDOR_LABEL})\s*[:：][ \t]*([^\n]+)", layout))
         header = "\n".join(line for line in layout.splitlines() if line.strip())
         header = "\n".join(header.splitlines()[:12])
-        if re.search(r"(?im)^\s*greenist GmbH\b", header):
-            sellers.append("greenist GmbH")
-        if re.search(r"(?im)^\s*Jejo Media\s+Jeff Mittner\b", header):
-            sellers.append("Jejo Media")
+        for pattern, name in known_sellers:
+            if re.search(f"(?im){pattern}", header):
+                sellers.append(name)
     return (
         unique(filter(None, map(normalized_date, dates or alternate_dates))),
         unique(" ".join(seller.split()) for seller in sellers),
-        unique(amounts),
+        unique(amounts) if amounts else unique(fallback_amounts),
     )
 
 
 def tessdata_folder():
     candidates = [
         Path(__file__).resolve().parent / "tessdata",
+        Path(getattr(sys, "_MEIPASS", "")) / "tessdata" if getattr(sys, "frozen", False) else None,
+        user_data_folder() / "tessdata",
         os.environ.get("TESSDATA_PREFIX"),
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tessdata",
         Path("/usr/share/tesseract-ocr/5/tessdata"),
@@ -106,6 +147,33 @@ def tessdata_folder():
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 EVIDENCE_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
+# The renaming screen also lists XRechnung XML files. Monthly close keeps its own list.
+RENAMER_EXTENSIONS = EVIDENCE_EXTENSIONS | {".xml"}
+
+
+def structured_fields(path):
+    """Return (fields, number, credit) from XRechnung/ZUGFeRD data, or None."""
+    from tax_documents import read_structured
+    from xml.etree.ElementTree import ParseError
+
+    if path.suffix.lower() not in (".pdf", ".xml"):
+        return None
+    try:
+        meta = read_structured(path)
+    except (OSError, RuntimeError, ValueError, ParseError):
+        return None
+    if not meta:
+        return None
+    total = ""
+    currency = meta.get("currency", "").upper()
+    try:
+        amount = Decimal(meta.get("amount", ""))
+    except ArithmeticError:
+        amount = None
+    if amount is not None and re.fullmatch(r"[A-Z]{3}", currency):
+        total = f"{amount:.0f} {currency}" if currency == "KRW" and amount == amount.to_integral_value() else f"{amount:.2f} {currency}"
+    seller = " ".join(meta.get("seller", "").split())
+    return (meta.get("day", ""), seller, total), meta.get("number", ""), bool(meta.get("credit"))
 
 
 def open_evidence(path):
@@ -116,6 +184,8 @@ def open_evidence(path):
 
 
 def read_pdf_pages(path):
+    if Path(path).suffix.lower() == ".xml":
+        return
     with open_evidence(path) as document:
         for page in document:
             text = page.get_text()
@@ -138,6 +208,17 @@ def read_pdf_pages(path):
 
 
 def read_invoice_details(path):
+    structured = structured_fields(Path(path))
+    if structured and (all(structured[0]) or Path(path).suffix.lower() == ".xml"):
+        fields, number, correction = structured
+        override = load_invoice_edits().get(digest(path))
+        if override:
+            fields = tuple(override[:3])
+            if len(override) > 3:
+                number = override[3]
+        return fields, "", number, correction
+    if Path(path).suffix.lower() == ".xml":
+        return ("", "", ""), "XML 인보이스 형식 확인", "", False
     pages = list(read_pdf_pages(path))
     layouts = ["\n".join(page[index] for page in pages) for index in (0, 1)]
     scan_note = next((note for _, _, note in pages if note), "")
@@ -179,6 +260,8 @@ def source_search_terms(value, kind):
 
 
 def source_locations(path, value, kind):
+    if Path(path).suffix.lower() == ".xml":
+        return []
     terms = source_search_terms(value, kind)
     hits = []
     with open_evidence(path) as doc:
@@ -288,6 +371,9 @@ def markdown_value(value):
 def export_markdown(path, fields, number):
     issued, seller, total = fields
     lines = ["# 인보이스", "", "- PDF 파일명: " + markdown_value(path.name)]
+    if path.suffix.lower() == ".xml":
+        lines[2] = "- 원본 파일명: " + markdown_value(path.name)
+        lines.append("- 원본 형식: XRechnung XML (전자 인보이스 원본, 페이지 본문 없음)")
     for label, value in (("업체명", seller), ("발행일", issued), ("총액", total), ("인보이스 번호", number)):
         if value:
             lines.append(f"- {label}: {markdown_value(value)}")
@@ -420,11 +506,18 @@ def invoice_edits_path():
     return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "InvoiceRenamer" / "invoice-edits.json"
 
 
+class EditsFileError(ValueError):
+    pass
+
+
 def load_invoice_edits():
     path = invoice_edits_path()
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise EditsFileError(f"수정값 파일이 손상됐어요. 백업에서 복원하거나 파일을 확인하세요: {path} ({error})") from error
 
 
 def save_invoice_edit(path, fields):
@@ -585,7 +678,8 @@ class App:
 
     def open_practice(self):
         try:
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--practice"])
+            command = [sys.executable, "--practice"] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve()), "--practice"]
+            subprocess.Popen(command)
         except OSError as error:
             record_error("gui", error)
             messagebox.showerror("연습 모드 실행 실패", str(error), parent=self.root)
@@ -666,11 +760,17 @@ class App:
                 candidates = self.folder.rglob("*") if self.include_subfolders.get() else self.folder.iterdir()
             paths = sorted(
                 path for path in candidates
-                if path.suffix.lower() in EVIDENCE_EXTENSIONS and not path.is_symlink() and path.is_file()
+                if path.suffix.lower() in RENAMER_EXTENSIONS and not path.is_symlink() and path.is_file()
                 and path.resolve().is_relative_to(root)
             )
         except OSError as error:
             self.status.set(str(error))
+            return
+        try:
+            load_invoice_edits()
+        except EditsFileError as error:
+            messagebox.showerror("수정값 파일 오류", str(error), parent=self.root)
+            self.status.set("수정값 파일 오류 · 파일을 확인한 뒤 폴더를 다시 여세요.")
             return
         self.status.set("PDF를 읽고 있어요…")
         self.root.update_idletasks()
