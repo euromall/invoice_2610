@@ -267,7 +267,8 @@ def numbered_statement(path, entries):
     """Return (pdf bytes, marked count) for a copy of a PDF statement with transaction numbers.
 
     entries: [(number, Transaction)]. A line is marked when it starts with the transaction's
-    day.month and contains its amount. The original file is not changed.
+    day.month and contains its amount. The number goes right of the amount (the end of the line),
+    or left of the line or above it when the page margin is too narrow. The original file is not changed.
     """
     remaining = sorted(entries, key=lambda entry: (entry[1].day, entry[0]))
     marked = 0
@@ -289,10 +290,10 @@ def numbered_statement(path, entries):
                     label = f"[{number}]"
                     size = 7
                     width = pymupdf.get_text_length(label, fontname="helv", fontsize=size)
-                    if rect.x0 - page.rect.x0 >= width + 6:
+                    if page.rect.x1 - rect.x1 >= width + 6:  # right after the amount
+                        x = rect.x1 + 4
+                    elif rect.x0 - page.rect.x0 >= width + 6:
                         x = rect.x0 - width - 3
-                    elif page.rect.x1 - rect.x1 >= width + 6:
-                        x = rect.x1 + 3
                     else:
                         x = max(page.rect.x0 + 2, rect.x0)
                         page.draw_rect(pymupdf.Rect(x - 1, rect.y0 - 8, x + width + 1, rect.y0), color=None,
