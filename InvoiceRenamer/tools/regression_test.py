@@ -16,7 +16,7 @@ from invoice_renamer import (  # noqa: E402
     App, EditsFileError, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
     read_invoice_details, remember_original_name, reserve_name,
 )
-from monthly_close import decode_statement, german_import_error, index_pdfs  # noqa: E402
+from monthly_close import Transaction, decode_statement, german_import_error, index_pdfs, numbered_statement, read_statement_pdf  # noqa: E402
 
 
 UBL = """<?xml version="1.0" encoding="UTF-8"?>
@@ -133,6 +133,28 @@ def run():
         check(proposed_name(("2026-11-25", "Shop", "12.50 USD"), root / "a.pdf", "") == "12.50 USD_26-11-25_Shop_a.pdf", "Foreign currency")
         check(reserve_name(root, "x.pdf", root / "y.pdf", {"x.pdf"}).name == "x (2).pdf", "Duplicate number")
 
+        # 6b. v1.2.2: PDF statement copy with transaction numbers.
+        statement = root / "db.pdf"
+        with pymupdf.open() as document:
+            page = document.new_page()
+            lines = ["Deutsche Bank AG", "Alter Saldo per 31.10.2026        1.000,00",
+                     "25.11. 25.11.   GREENIST GMBH BERLIN                 - 58,39", "2026   2026     Kartenzahlung",
+                     "27.11. 27.11.   DKB Kreditkarte Ausgleich            - 1.204,55", "2026   2026     Ueberweisung"]
+            for row, line in enumerate(lines):
+                page.insert_text((40, 60 + 14 * row), line, fontname="cour", fontsize=9)
+            document.save(statement)
+        original = statement.read_bytes()
+        _, rows = read_statement_pdf(statement)
+        from datetime import date as day
+        from decimal import Decimal
+        entries = [(f"611-{index:03d}", Transaction(str(index), day.fromisoformat(row[0]), row[1],
+                    Decimal(row[2].replace(".", "").replace(",", ".")), "EUR")) for index, row in enumerate(rows, 1)]
+        data, marked = numbered_statement(statement, entries)
+        with pymupdf.open(stream=data) as document:
+            text = document[0].get_text()
+        check(marked == 2 and "[611-001]" in text and "[611-002]" in text, "Numbered PDF statement")
+        check(statement.read_bytes() == original, "Original statement unchanged")
+
         # 7. Extra header sellers without code changes.
         folder = root / "InvoiceRenamer"
         folder.mkdir(exist_ok=True)
@@ -148,7 +170,7 @@ def run():
             pass
         else:
             raise AssertionError("Damaged edits file")
-    print("PASS: v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+    print("PASS: v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":

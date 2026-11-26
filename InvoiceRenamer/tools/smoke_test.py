@@ -74,6 +74,23 @@ def run():
             book = load_workbook(io.BytesIO(result.read("Abgleich.xlsx")))
             check(book["Abgleich"]["F2"].data_type == "n" and book["Abgleich"]["I2"].hyperlink, "Excel amounts and file links")
 
+        import pymupdf
+        statement = root / "Auszug.pdf"
+        with pymupdf.open() as pdf:
+            pdf.new_page().insert_text((40, 80), "25.11. 25.11.   MUSTER GMBH RE-TEST-001   - 58,39", fontname="cour", fontsize=9)
+            pdf.save(statement)
+        app.statement_sources[digest(statement)] = statement
+        app.state["transaction_sources"] = {transaction.key: {digest(statement): statement.name}}
+        numbered_package = root / "Monatsabschluss-pdf.zip"
+        app.write_package(numbered_package)
+        with ZipFile(numbered_package) as result:
+            names = result.namelist()
+            check(any(name.endswith("_Auszug.pdf") for name in names), "Original PDF statement in ZIP")
+            check(any(name.endswith("_Auszug_nummeriert.pdf") for name in names), "Numbered PDF statement in ZIP")
+            load_workbook(io.BytesIO(result.read("Abgleich.xlsx")))
+        del app.statement_sources[digest(statement)]
+        del app.state["transaction_sources"]
+
         app.state["session"] = {
             "folder": str(folder), "sources": {digest(source): {"path": str(source)}},
         }

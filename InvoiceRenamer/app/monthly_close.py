@@ -240,6 +240,80 @@ def read_deutsche_bank_statement(document, first):
     return ["Buchungsdatum", "Beschreibung", "Betrag", "Währung", "Valuta"], rows
 
 
+def german_amount(value):
+    """58.39 -> '58,39', 1204.55 -> '1.204,55' (sign dropped)."""
+    return format(abs(value), ",.2f").translate(str.maketrans(",.", ".,"))
+
+
+def statement_lines(page):
+    """Words of a PDF page grouped into visual lines: [(rect, [words])]."""
+    lines = []
+    for word in sorted(page.get_text("words"), key=lambda w: ((w[1] + w[3]) / 2, w[0])):
+        middle = (word[1] + word[3]) / 2
+        if lines and abs(lines[-1][2] - middle) <= 2.5:
+            lines[-1][1].append(word)
+        else:
+            lines.append([None, [word], middle])
+    result = []
+    for _, words, _ in lines:
+        words.sort(key=lambda w: w[0])
+        rect = pymupdf.Rect(min(w[0] for w in words), min(w[1] for w in words),
+                            max(w[2] for w in words), max(w[3] for w in words))
+        result.append((rect, [w[4] for w in words]))
+    return result
+
+
+def numbered_statement(path, entries):
+    """Return (pdf bytes, marked count) for a copy of a PDF statement with transaction numbers.
+
+    entries: [(number, Transaction)]. A line is marked when it starts with the transaction's
+    day.month and contains its amount. The original file is not changed.
+    """
+    remaining = sorted(entries, key=lambda entry: (entry[1].day, entry[0]))
+    marked = 0
+    red = (0.78, 0.19, 0.19)
+    with pymupdf.open(path) as document:
+        for page in document:
+            for rect, words in statement_lines(page):
+                if not words:
+                    continue
+                first = words[0]
+                for position, (number, item) in enumerate(remaining):
+                    amount = german_amount(item.amount)
+                    if not first.startswith(item.day.strftime("%d.%m")):
+                        continue
+                    if not any(word.lstrip("+-") == amount or word.lstrip("+-").rstrip("SH") == amount for word in words):
+                        continue
+                    band = pymupdf.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
+                    page.draw_rect(band, color=None, fill=(1, 0.93, 0.55), fill_opacity=0.35, overlay=True)
+                    label = f"[{number}]"
+                    size = 7
+                    width = pymupdf.get_text_length(label, fontname="helv", fontsize=size)
+                    if rect.x0 - page.rect.x0 >= width + 6:
+                        x = rect.x0 - width - 3
+                    elif page.rect.x1 - rect.x1 >= width + 6:
+                        x = rect.x1 + 3
+                    else:
+                        x = max(page.rect.x0 + 2, rect.x0)
+                        page.draw_rect(pymupdf.Rect(x - 1, rect.y0 - 8, x + width + 1, rect.y0), color=None,
+                                       fill=(1, 1, 1), overlay=True)
+                        page.insert_text((x, rect.y0 - 1.5), label, fontsize=size, fontname="helv", color=red)
+                        marked += 1
+                        del remaining[position]
+                        break
+                    page.insert_text((x, rect.y1 - 1.5), label, fontsize=size, fontname="helv", color=red)
+                    marked += 1
+                    del remaining[position]
+                    break
+        if len(document):
+            first_page = document[0]
+            note = f"Kopie mit Belegnummern ({marked} von {len(entries)} markiert) - Original unverändert im ZIP"
+            first_page.insert_text((first_page.rect.x0 + 12, first_page.rect.y0 + 10), note, fontsize=6.5,
+                                   fontname="helv", color=red)
+        data = document.tobytes(garbage=3, deflate=True)
+    return data, marked
+
+
 def statement_check(path, transactions):
     with pymupdf.open(path) as document:
         pages = [page.get_text(sort=True) for page in document]
@@ -834,7 +908,8 @@ class MonthlyClose:
         self.bar_area.pack(fill="x")
         steps = {
             2: [("은행·카드 명세서 추가", self.open_csv, "Primary.TButton"), ("여러 명세서 한 번에 추가", self.open_batch, None),
-                ("이어서 작업", self.resume, None), ("명세서 기간 점검", self.show_statement_periods, None)],
+                ("이어서 작업", self.resume, None), ("명세서 기간 점검", self.show_statement_periods, None),
+                ("번호 표시 PDF 명세서 보기", self.open_numbered_statements, None)],
             3: [("증빙 폴더 선택", self.select_folder, None), ("일괄 매칭 후보", self.batch_candidates, None),
                 ("카드대금·내부이체 후보", self.transfer_candidates, None), ("결제·환불 연결", self.link_refunds, None),
                 ("매칭완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
@@ -2634,6 +2709,30 @@ class MonthlyClose:
             return
         self.open_evidence_file(self.visible_pdfs[selected[0]].path)
 
+    def open_numbered_statements(self):
+        """Open copies of the imported PDF statements with the transaction numbers marked."""
+        sources = [(key, path) for key, path in self.statement_sources.items() if path.suffix.lower() == ".pdf"]
+        if not sources:
+            self.notice("PDF로 불러온 명세서가 없어요. CSV 명세서는 거래번호가 대조표에 들어가요.")
+            return
+        folder = Path(tempfile.mkdtemp(prefix="invoice-numbered-"))
+        summary = []
+        for source_key, path in sources:
+            entries = [(self.record(key)["number"], item) for key, item in self.transactions.items()
+                       if source_key in self.state.get("transaction_sources", {}).get(key, {})]
+            try:
+                data, marked = numbered_statement(path, entries)
+                target = folder / f"{path.stem}_nummeriert.pdf"
+                target.write_bytes(data)
+            except (OSError, RuntimeError, ValueError) as error:
+                record_error("statement", error)
+                messagebox.showerror("번호 표시 실패", f"{path.name}: {error}", parent=self.root)
+                continue
+            summary.append(f"{path.name}: {marked}/{len(entries)}건 표시")
+            self.open_evidence_file(target)
+        if summary:
+            self.status.set(" · ".join(summary) + " · 세무사 ZIP에도 같은 사본이 들어가요.")
+
     def open_evidence_file(self, path):
         try:
             if os.name == "nt":
@@ -2834,6 +2933,15 @@ class MonthlyClose:
                         raise ValueError(f"명세서가 변경됐어요. 다시 불러오세요. {source.name}")
                     archive.writestr(arcname, data)
                     source_writer.writerow([arcname, export_value(source.name), checksum])
+                    if source.suffix.lower() == ".pdf":
+                        entries = [(self.record(key)["number"], item) for key, item in self.transactions.items()
+                                   if checksum in self.state.get("transaction_sources", {}).get(key, {})]
+                        if entries:
+                            copy, marked = numbered_statement(source, entries)
+                            numbered = f"Kontoauszuege/{index:02d}_{source.stem}_nummeriert.pdf"
+                            archive.writestr(numbered, copy)
+                            source_writer.writerow([numbered, f"Kopie mit Belegnummern ({marked}/{len(entries)})",
+                                                    hashlib.sha256(copy).hexdigest()])
                 for key in self.transactions if keys is None else keys:
                     item = self.transactions[key]
                     record = self.record(key)
