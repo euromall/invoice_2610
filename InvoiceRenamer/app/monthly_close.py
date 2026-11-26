@@ -27,7 +27,7 @@ from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, import_mode, make_copyabl
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
-from ui_theme import COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, Busy, InlineDialog, resort, show_notice, table_tools, transaction_tag
+from ui_theme import COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, Busy, InlineDialog, configure_tags, resort, show_notice, table_tools, transaction_tag
 from workspace_backup import add_attachment, attachment_path, create_backup, restore_workspace
 
 
@@ -593,6 +593,7 @@ PACKAGE_PARTS = [
     ("08_Betragszuordnung.csv", "08_Betragszuordnung.csv", "한 증빙을 여러 거래에 나눈 금액과 차액 사유.", False),
     ("09_Rechnungskorrekturen.csv", "09_Rechnungskorrekturen.csv", "수정 인보이스(Gutschrift·Storno)와 원래 인보이스 연결.", False),
     ("10_Anlagen.csv", "10_Anlagen.csv", "보조 자료 목록.", False),
+    ("11_Endkontrolle.csv", "11_Endkontrolle.csv", "최종 검수 기록: 검수한 거래의 결과(검수 완료·다시 확인)와 날짜.", False),
     ("Hinweise.txt", "Hinweise.txt", "세무사에게 드리는 짧은 독일어 안내문 (파일 구성 설명).", False),
 ]
 
@@ -995,6 +996,35 @@ def statement_excerpt(path, item, cache=None):
     return None, None, []
 
 
+REVIEW_STATES = {"ok": "검수 완료", "recheck": "다시 확인"}
+REVIEW_GERMAN = {"ok": "Geprüft", "recheck": "Erneut prüfen", "changed": "Nach Prüfung geändert"}
+
+
+def review_signature(record):
+    """What a final check approved: a later change of links or reasons makes the check stale."""
+    return json.dumps([sorted(record.get("links", [])), record.get("statement_evidence", ""), record.get("transfer", ""),
+                       sorted(record.get("refund_group", [])), record.get("allocations", {})], ensure_ascii=False, sort_keys=True)
+
+
+def review_state(state, key):
+    """'ok', 'recheck', 'changed' (checked, then changed) or '' (not checked)."""
+    entry = state.get("final_review", {}).get(key)
+    if not entry:
+        return ""
+    if entry.get("signature") != review_signature(state["records"].get(key, {})):
+        return "changed"
+    return entry.get("status", "")
+
+
+def evidence_image(path, width):
+    """PNG of the first page of an evidence file, scaled to a width (PDF or photo)."""
+    from invoice_renamer import open_evidence
+    with open_evidence(path) as document:
+        page = document[0]
+        scale = max(0.3, min(3.0, width / max(1, page.rect.width)))
+        return page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).tobytes("png"), len(document)
+
+
 def split_merchant(merchant):
     """‘SEPA Lastschrifteinzug von | AMAZON PAYMENTS EUROPE’ → (‘SEPA Lastschrifteinzug von’, ‘AMAZON PAYMENTS EUROPE’)."""
     parts = [part.strip() for part in merchant.split("|")]
@@ -1174,7 +1204,7 @@ class MonthlyClose:
                 ("이어서 작업", self.resume, None), ("지난 달 열기", self.open_past_month, None)],
             3: [("증빙 폴더 선택", self.select_folder, None), ("일괄 매칭", self.batch_candidates, None),
                 ("매칭완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
-            4: [("월별 누락 점검표", self.monthly_review, "Primary.TButton"), ("미연결 증빙", self.show_unlinked_invoices, None),
+            4: [("최종 검수", self.final_review, "Primary.TButton"), ("월별 누락 점검표", self.monthly_review, None), ("미연결 증빙", self.show_unlinked_invoices, None),
                 ("후속 목록", self.followup_list, None), ("명세서 기간 점검", self.show_statement_periods, None),
                 ("전체 월 검색", self.search_all_months, None)],
             5: [("세무사용 ZIP 만들기", self.export_zip, "Primary.TButton"),
@@ -3067,9 +3097,9 @@ class MonthlyClose:
         self.detail_text.delete("1.0", "end")
         self.detail_text.insert("1.0", text)
 
-    def show_in_statement(self):
+    def show_in_statement(self, item=None):
         """Show the statement page part where the chosen transaction stands, with the lines boxed."""
-        item = self.single_card()
+        item = item or self.single_card()
         if item is None:
             return
         source, page, rect, lines = self.statement_lines_for(item)
@@ -3202,6 +3232,251 @@ class MonthlyClose:
         self.buttons(bar, [("파일 첨부", add), ("선택 첨부 해제", remove), ("첨부 열기", open_file)])
         table.bind("<Double-1>", open_file)
         refresh()
+
+    # Final check -------------------------------------------------------
+    def final_checks(self, key, link_counts=None):
+        """Automatic warnings a person should look at before the ZIP goes out (Korean, short)."""
+        item, record = self.transactions[key], self.record(key)
+        links = record.get("links", [])
+        warnings = []
+        if not links:
+            if record.get("transfer") or record.get("refund_group"):
+                return warnings
+            evidence = record.get("statement_evidence")
+            if not evidence:
+                return ["증빙 없음"]
+            if not is_contract_reason(evidence):
+                warnings.append("증빙 없이 처리 · 세무사 확인")
+            return warnings
+        documents = [self.by_key.get(link) for link in links]
+        if not all(documents):
+            warnings.append("증빙 파일을 찾지 못함")
+        documents = [doc for doc in documents if doc]
+        if link_counts is None:
+            link_counts = Counter(link for other in self.state["records"].values() for link in other.get("links", []))
+        if any(link_counts[doc.key] > 1 for doc in documents) and not record.get("allocations"):
+            warnings.append("같은 증빙이 다른 거래에도 연결")
+        if any(doc.currency and doc.currency != item.currency for doc in documents):
+            warnings.append("통화 다름")
+        totals = [signed_total(doc) for doc in documents if doc.amount is not None and doc.currency == item.currency]
+        if len(totals) == len(documents) and documents and not record.get("allocations") and not record.get("difference_reason"):
+            gap = abs(sum(totals)) - abs(item.amount)
+            if abs(gap) >= Decimal("0.01"):
+                warnings.append(f"금액 차이 {gap:+.2f} {item.currency}")
+        known = self.state["aliases"].get(merchant_key(item.merchant), [])
+        merchant = merchant_key(item.merchant)
+        for doc in documents:
+            seller = merchant_key(doc.seller)
+            words = [word for word in re.split(r"\W+", doc.seller.casefold()) if len(word) >= 4
+                     and word not in ("gmbh", "kommanditgesellschaft", "europe", "germany", "deutschland", "services", "s.a.r.l")]
+            if seller and not (seller in known or seller in merchant or merchant in seller
+                               or any(merchant_key(word) in merchant for word in words) or matching_reference(item.merchant, doc)):
+                warnings.append(f"업체명 다름 ({doc.seller[:24]})")
+            if doc.day and abs((doc.day - item.day).days) > 7:
+                warnings.append(f"날짜 {abs((doc.day - item.day).days)}일 차이")
+        return warnings
+
+    def final_review(self):
+        """Go through the month's transactions one by one: statement text and invoice side by side, mark as checked."""
+        month = self.month_filter.get()
+        keys = [key for key in self.transactions if month in ("전체", self.record(key).get("period"))]
+        if not keys:
+            self.notice("검수할 거래가 없어요. 먼저 명세서를 불러오세요.")
+            return
+        dialog = InlineDialog(self.root)
+        dialog.title("최종 검수")
+        dialog.center(1500, 980)
+        dialog.grab_set()
+        top = ttk.Frame(dialog, padding=(14, 10, 14, 4))
+        top.pack(fill="x")
+        progress = tk.StringVar()
+        ttk.Label(top, textvariable=progress, font=FONT_BOLD).pack(side="left")
+        order = tk.StringVar(value="확인할 것 먼저")
+        ttk.Combobox(top, textvariable=order, state="readonly", width=16,
+                     values=("확인할 것 먼저", "검수 안 한 것", "다시 확인", "전체")).pack(side="right")
+        ttk.Label(top, text="보기").pack(side="right", padx=6)
+        ttk.Label(dialog, style="Muted.TLabel", padding=(14, 0, 14, 6), wraplength=1400, text=(
+            "왼쪽에서 거래를 고르면 명세서 원문과 인보이스가 나란히 보여요. 맞으면 Enter(검수 완료), 다시 봐야 하면 R(다시 확인). "
+            "다음 거래로 자동으로 넘어가요. 프로그램이 찾은 주의할 점은 ‘자동 점검’ 칸과 오른쪽 위 빨간 글씨로 보여요.")).pack(anchor="w")
+        layout = ttk.Panedwindow(dialog, orient="horizontal")
+        layout.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        left = ttk.Frame(layout)
+        right = tk.Frame(layout, background=COLORS["panel"])
+        layout.add(left, weight=2)
+        layout.add(right, weight=3)
+        table = self.table(left, ("번호", "가맹점·거래처", "금액", "자동 점검", "검수", "거래일"), (66, 150, 92, 150, 76, 86))
+        configure_tags(table)
+        title = tk.StringVar()
+        warning = tk.StringVar()
+        tk.Label(right, textvariable=title, font=FONT_BOLD, background=COLORS["panel"], anchor="w").pack(fill="x", padx=12, pady=(8, 0))
+        tk.Label(right, textvariable=warning, font=FONT_BOLD, background=COLORS["panel"], foreground=COLORS["red"],
+                 anchor="w", justify="left", wraplength=780).pack(fill="x", padx=12)
+        statement = tk.Text(right, height=5, wrap="word", font=FONT_SMALL, relief="flat", background="#f6f8fa")
+        statement.pack(fill="x", padx=12, pady=6)
+        make_copyable(statement)
+        chooser_row = tk.Frame(right, background=COLORS["panel"])
+        chooser_row.pack(fill="x", padx=12)
+        chooser = ttk.Combobox(chooser_row, state="readonly", width=70)
+        chooser.pack(side="left")
+        doc_caption = tk.StringVar()
+        tk.Label(right, textvariable=doc_caption, font=FONT_SMALL, background=COLORS["panel"], foreground=COLORS["muted"],
+                 anchor="w").pack(fill="x", padx=12, pady=(4, 0))
+        extras = tk.Frame(right, background="#fafbfc", padx=10, pady=4)
+        extras.pack(side="bottom", fill="x")
+        buttons = tk.Frame(right, background="#fafbfc", padx=10, pady=8)
+        buttons.pack(side="bottom", fill="x")
+        note = ttk.Entry(extras, width=40)
+        canvas_frame = tk.Frame(right, background="#eeeeee")
+        canvas_frame.pack(fill="both", expand=True, padx=12, pady=6)
+        canvas = tk.Canvas(canvas_frame, background="#eeeeee", highlightthickness=0)
+        bar = ttk.Scrollbar(canvas_frame, command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(fill="both", expand=True)
+        canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
+        current = {"key": None, "docs": []}
+
+        def label_for(key):
+            checked = review_state(self.state, key)
+            return {"ok": "✓ 완료", "recheck": "! 다시 확인", "changed": "변경됨 · 다시"}.get(checked, "")
+
+        def fill(keep=None):
+            link_counts = Counter(link for other in self.state["records"].values() for link in other.get("links", []))
+            rows = []
+            for key in keys:
+                found = self.final_checks(key, link_counts)
+                checked = review_state(self.state, key)
+                rows.append((key, found, checked))
+            view = order.get()
+            if view == "검수 안 한 것":
+                rows = [row for row in rows if row[2] not in ("ok",)]
+            elif view == "다시 확인":
+                rows = [row for row in rows if row[2] in ("recheck", "changed")]
+            elif view == "확인할 것 먼저":
+                rows.sort(key=lambda row: (row[2] == "ok", not row[1], self.record(row[0]).get("number", "")))
+            table.delete(*table.get_children())
+            for key, found, checked in rows:
+                item = self.transactions[key]
+                tag = "ok" if checked == "ok" else "bad" if checked in ("recheck", "changed") else "warn" if found else ""
+                table.insert("", "end", iid=key, tags=(tag,) if tag else (), values=(
+                    self.record(key).get("number", ""), split_merchant(item.merchant)[1],
+                    f"{item.amount} {item.currency}", " · ".join(found) or "문제 없음", label_for(key), item.day))
+            resort(table)
+            done = sum(1 for key in keys if review_state(self.state, key) == "ok")
+            again = sum(1 for key in keys if review_state(self.state, key) in ("recheck", "changed"))
+            flagged = sum(1 for key, found, checked in rows if found and checked != "ok")
+            progress.set(f"{'전체 월' if month == '전체' else month} · 검수 완료 {done}/{len(keys)}건 · 다시 확인 {again}건 · "
+                         f"자동 점검에서 볼 것 {flagged}건")
+            target = keep if keep and table.exists(keep) else (table.get_children() or [None])[0]
+            if target:
+                table.selection_set(target)
+                table.focus(target)
+                table.see(target)
+
+        def show(_event=None):
+            selection = table.selection()
+            if len(selection) != 1:
+                return
+            key = selection[0]
+            item, record = self.transactions[key], self.record(key)
+            current["key"] = key
+            title.set(f"{record.get('number', '')} · {item.day} · {item.amount} {item.currency} · {split_merchant(item.merchant)[1]}")
+            found = self.final_checks(key)
+            warning.set(("주의: " + " · ".join(found)) if found else "")
+            source, page, _, lines = self.statement_lines_for(item)
+            statement.configure(state="normal")
+            statement.delete("1.0", "end")
+            where = Path(source).name + (f" · {page + 1}페이지" if page is not None else "") if source else "명세서 파일 없음"
+            statement.insert("1.0", f"[명세서 · {where}]\n" + ("\n".join(lines) if lines else item.merchant))
+            entry = self.state.get("final_review", {}).get(key, {})
+            note.delete(0, "end")
+            note.insert(0, entry.get("note", ""))
+            docs = [self.by_key[link] for link in record.get("links", []) if link in self.by_key]
+            current["docs"] = docs
+            if docs:
+                chooser.configure(values=[f"{index}. {doc.path.name}" for index, doc in enumerate(docs, 1)])
+                chooser.current(0)
+            else:
+                evidence = record.get("statement_evidence")
+                chooser.configure(values=[])
+                chooser.set(f"증빙 없이 처리: {evidence} → {reason_german(evidence)}" if evidence else
+                            "내부이체·환불 연결" if record.get("transfer") or record.get("refund_group") else "연결된 증빙 없음")
+            draw()
+
+        def draw(_event=None):
+            canvas.delete("all")
+            canvas.image = None
+            docs = current["docs"]
+            if not docs:
+                doc_caption.set("")
+                return
+            doc = docs[max(0, chooser.current())]
+            doc_caption.set(f"발행일 {doc.day or '없음'} · {doc.seller or '업체명 없음'} · "
+                            f"{signed_total(doc) if doc.amount is not None else '총액 없음'} {doc.currency} · 번호 {doc.number or '없음'}")
+            if doc.path.suffix.lower() == ".xml":
+                canvas.create_text(12, 12, anchor="nw", text="XRechnung/ZUGFeRD XML이에요. ‘인보이스 열기’로 원본을 보세요.")
+                return
+            width = max(300, canvas.winfo_width() - 8)
+            try:
+                data, pages = evidence_image(doc.path, width)
+            except (OSError, ValueError, RuntimeError) as error:
+                canvas.create_text(12, 12, anchor="nw", text=f"미리보기를 만들지 못했어요: {error}")
+                return
+            canvas.image = tk.PhotoImage(data=base64.b64encode(data).decode("ascii"))
+            canvas.create_image(0, 0, image=canvas.image, anchor="nw")
+            if pages > 1:
+                canvas.create_text(8, canvas.image.height() + 6, anchor="nw",
+                                   text=f"1/{pages}페이지만 보여요. 나머지는 ‘인보이스 열기’로 보세요.")
+            canvas.configure(scrollregion=(0, 0, canvas.image.width(), canvas.image.height() + 30))
+
+        def mark(status):
+            key = current["key"]
+            if not key:
+                return "break"
+            state = deepcopy(self.state)
+            reviews = state.setdefault("final_review", {})
+            if status:
+                reviews[key] = {"status": status, "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                "user": getpass.getuser(), "note": note.get().strip(),
+                                "signature": review_signature(state["records"].get(key, {}))}
+            else:
+                reviews.pop(key, None)
+            if not self.save(state):
+                return "break"
+            rows = list(table.get_children())
+            following = rows[rows.index(key) + 1] if key in rows and rows.index(key) + 1 < len(rows) else key
+            if order.get() != "전체" and status:
+                fill(following)  # the checked row may leave the list; go on with the next one
+            else:
+                table.set(key, "검수", label_for(key))
+                table.item(key, tags=("ok",) if status == "ok" else ("bad",) if status else ())
+                fill(following if status else key)
+            return "break"
+
+        def key_mark(event, status):
+            if isinstance(event.widget, (ttk.Entry, tk.Entry, tk.Text)) and status == "recheck":
+                return None
+            return mark(status)
+
+        ttk.Button(buttons, text="✓ 검수 완료 (Enter)", style="Success.TButton", command=lambda: mark("ok")).pack(side="left")
+        ttk.Button(buttons, text="다시 확인 (R)", command=lambda: mark("recheck")).pack(side="left", padx=6)
+        ttk.Button(buttons, text="검수 취소", command=lambda: mark(None)).pack(side="left")
+        ttk.Button(buttons, text="인보이스 열기",
+                   command=lambda: current["docs"] and open_file(current["docs"][max(0, chooser.current())].path)).pack(side="right")
+        ttk.Button(extras, text="명세서에서 보기",
+                   command=lambda: current["key"] and self.show_in_statement(self.transactions[current["key"]])).pack(side="right", padx=(6, 0))
+        ttk.Label(extras, text="검수 메모 (내부용)", background="#fafbfc").pack(side="left", padx=(0, 4))
+        note.pack(side="left", fill="x", expand=True)
+        table.bind("<<TreeviewSelect>>", show)
+        chooser.bind("<<ComboboxSelected>>", draw)
+        canvas.bind("<Configure>", lambda event: dialog.after_idle(draw) if current["docs"] else None)
+        order.trace_add("write", lambda *_: fill(current["key"]))
+        dialog.bind("<Return>", lambda event: key_mark(event, "ok"))
+        dialog.bind("<r>", lambda event: key_mark(event, "recheck"))
+        dialog.bind("<R>", lambda event: key_mark(event, "recheck"))
+        fill()
+        table.focus_set()
+        dialog.after(120, lambda: layout.winfo_width() > 400 and layout.sashpos(0, int(layout.winfo_width() * 0.42)))
 
     def monthly_review(self):
         rows = review_months(self.state, self.invoices)
@@ -4705,12 +4980,23 @@ class MonthlyClose:
                     error_writer.writerow([export_value(location), german_import_error(error)])
                 for name in self.read_issues if baselines is None else []:
                     error_writer.writerow([export_value(name), "Beleg konnte nicht vollständig gelesen werden"])
+                review_log = io.StringIO(newline="")
+                review_writer = csv.writer(review_log, delimiter=";")
+                review_writer.writerow(["Belegnummer", "Buchungsdatum", "Betrag", "Währung", "Endkontrolle", "Geprüft am", "Geprüft von"])
+                for key in (self.transactions if keys is None else keys):
+                    checked = review_state(self.state, key)
+                    if key not in self.transactions or not checked:
+                        continue
+                    item, entry = self.transactions[key], self.state["final_review"][key]
+                    review_writer.writerow([self.record(key).get("number", ""), item.day.isoformat(), str(item.amount), item.currency,
+                                            REVIEW_GERMAN[checked], entry.get("at", "")[:10], export_value(entry.get("user", ""))])
                 tables = {name: localized_csv(stream.getvalue()) for name, stream in (
                     ("01_Abgleich.csv", overview), ("02_Belegdetails.csv", details),
                     ("03_Offene_Posten.csv", unmatched), ("04_Importfehler.csv", errors),
                     ("05_Kontoauszuege.csv", source_list), ("06_Nachreichungen.csv", changes),
                     ("07_Bewirtung.csv", hospitality), ("08_Betragszuordnung.csv", allocation),
                     ("09_Rechnungskorrekturen.csv", corrections), ("10_Anlagen.csv", attachment_list),
+                    ("11_Endkontrolle.csv", review_log),
                 )}
                 for name, contents in tables.items():
                     if name not in omit:

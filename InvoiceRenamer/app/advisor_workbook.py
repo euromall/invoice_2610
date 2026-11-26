@@ -18,6 +18,7 @@ SHEET_NAMES = {
     "06_Nachreichungen.csv": "Nachreichungen",
     "02_Belegdetails.csv": "Belege",
     "10_Anlagen.csv": "Anlagen",
+    "11_Endkontrolle.csv": "Endkontrolle",
 }
 
 

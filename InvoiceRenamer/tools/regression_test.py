@@ -212,7 +212,30 @@ def run():
         check(reason_german(rent_reason["ko"]) == "Lagermiete – Vertrag liegt vor" and is_contract_reason("창고 관리비 · 계약서 기제출")
               and reason_german("창고 관리비 · 계약서 기제출") == "Lagernebenkosten – Vertrag liegt vor", "v1.10: reasons saved and used")
 
+        # 6d. v1.11: final check warnings and stale checks.
         from types import SimpleNamespace
+        from monthly_close import Invoice, review_signature, review_state
+        invoice = Invoice("doc", root / "x.pdf", day(2026, 11, 20), "Muster Energie GmbH", Decimal("84.20"), "EUR", "R1", False)
+        other = Invoice("doc2", root / "y.pdf", day(2026, 10, 1), "Ganz Anderer Laden", Decimal("50.00"), "EUR", "R2", False)
+        review_records = {"t1": {"links": ["doc"], "number": "611-001"}, "t2": {"links": ["doc2"], "number": "611-002"},
+                          "t3": {"links": ["doc2"], "number": "611-003"}, "t4": {"number": "611-004"}}
+        stub = SimpleNamespace(
+            transactions={"t1": Transaction("t1", day(2026, 11, 18), "SEPA Lastschrifteinzug von | Muster Energie GmbH", Decimal("-84.20"), "EUR"),
+                          "t2": Transaction("t2", day(2026, 11, 18), "Kartenzahlung Buerobedarf", Decimal("-55.00"), "EUR"),
+                          "t3": Transaction("t3", day(2026, 11, 18), "Kartenzahlung Buerobedarf", Decimal("-50.00"), "EUR"),
+                          "t4": Transaction("t4", day(2026, 11, 18), "Miete", Decimal("-800.00"), "EUR")},
+            state={"records": review_records, "aliases": {}}, by_key={"doc": invoice, "doc2": other})
+        stub.record = lambda key: review_records[key]
+        found = {key: MonthlyClose.final_checks(stub, key) for key in stub.transactions}
+        check(found["t1"] == [] and "증빙 없음" in found["t4"] and any(w.startswith("금액 차이") for w in found["t2"])
+              and any("업체명 다름" in w for w in found["t2"]) and any("날짜" in w for w in found["t2"])
+              and "같은 증빙이 다른 거래에도 연결" in found["t3"], f"v1.11: final check warnings {found}")
+        review_records["t1"]["links"] = ["doc"]
+        checked_state = {"records": review_records, "final_review": {"t1": {"status": "ok", "signature": review_signature(review_records["t1"])}}}
+        before = review_state(checked_state, "t1")
+        review_records["t1"]["links"] = ["doc", "doc2"]
+        check(before == "ok" and review_state(checked_state, "t1") == "changed" and review_state(checked_state, "t2") == "",
+              "v1.11: a check goes stale when the links change")
         docs = [SimpleNamespace(key="x"), SimpleNamespace(key="y")]
         check([doc.key for doc in MonthlyClose.unmatched_documents(SimpleNamespace(state=rule_state, invoices=docs))] == ["y"],
               "v1.9: unmatched evidence list")
@@ -360,7 +383,7 @@ def run():
         parts = split_pdf(combined, info["parts"])
         check([read_invoice_details(path)[0][1:] for path in parts] == [("Shop Eins GmbH", "18.99 EUR"), ("Shop Zwei GmbH", "11.00 EUR")]
               and not combined.exists() and (combined.parent / "제외" / "order__나누기전_원본.pdf").exists(), "Combined PDF split")
-    print("PASS: v1.10 statement text, sort, reasons, v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+    print("PASS: v1.11 final check, v1.10 statement text, sort, reasons, v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":
