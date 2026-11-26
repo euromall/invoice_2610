@@ -224,6 +224,15 @@ def read_pdf_pages(path):
             yield text, sorted_text, note
 
 
+def date_from_filename(path):
+    """Issue date taken from a leading 20260702 / 2026-07-02 in the file name, or ''."""
+    match = re.match(r"(20\d{2})-?(0[1-9]|1[0-2])-?(0[1-9]|[12]\d|3[01])(?=[_\- .])", Path(path).name)
+    if not match:
+        return ""
+    value = "-".join(match.groups())
+    return value if normalized_date(value) == value else ""
+
+
 def read_invoice_details(path, info=None):
     """info (optional dict) receives 'invoice_like': False when the content does not look like an invoice."""
     info = info if info is not None else {}
@@ -257,6 +266,8 @@ def read_invoice_details(path, info=None):
         correction |= bool(re.search(r"(?im)^\s*(?:Gutschrift|Stornorechnung|Credit Note)\b", layout))
     override = load_invoice_edits().get(digest(path))
     number = unique(numbers)
+    if not fields[0]:
+        fields = (date_from_filename(path), *fields[1:])
     if override:
         fields, scan_note = tuple(override[:3]), ""
         info["invoice_like"] = True
@@ -1342,10 +1353,68 @@ class App:
         if errors:
             messagebox.showerror("이동 실패", "\n".join(errors[:8]), parent=self.root)
 
+    def edit_many(self, selection):
+        """Fill the same issue date, seller or currency into several files at once (empty fields stay as read)."""
+        dialog = InlineDialog(self.root)
+        dialog.title(f"여러 파일 한 번에 입력 · {len(selection)}개")
+        dialog.grab_set()
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="x")
+        ttk.Label(body, text="적은 칸만 고른 파일 모두에 들어가요. 비운 칸은 파일마다 읽은 값을 그대로 둬요.\n"
+                             "예: Amazon 인보이스를 모두 고르고 업체명에 ‘Amazon EU S.à r.l.’을 적으세요.",
+                  wraplength=520).grid(row=0, columnspan=2, sticky="w", pady=(0, 10))
+        entries = []
+        for index, label in enumerate(("업체명", "발행일 (YYYY-MM-DD)", "통화 (총액이 숫자만 있을 때, 예: EUR)"), 1):
+            ttk.Label(body, text=label).grid(row=index, column=0, sticky="w", padx=(0, 12), pady=4)
+            entry = ttk.Entry(body, width=36)
+            entry.grid(row=index, column=1, sticky="w")
+            entries.append(entry)
+
+        def save():
+            seller, day, currency = (entry.get().strip() for entry in entries)
+            if not (seller or day or currency):
+                show_notice(dialog, "한 칸 이상 적어 주세요.")
+                return
+            if day and normalized_date(day) != day:
+                show_notice(dialog, "발행일은 2026-07-02처럼 적어 주세요.")
+                return
+            if currency and not re.fullmatch(r"[A-Za-z]{3}", currency):
+                show_notice(dialog, "통화는 EUR처럼 세 글자로 적어 주세요.")
+                return
+            done, failed = 0, []
+            for key in selection:
+                path, fields, note, number = self.rows[key]
+                total = fields[2]
+                if currency and total and not re.search(r"[A-Za-z]{3}$", total):
+                    total = f"{total} {currency.upper()}"
+                edited = (day or fields[0], seller or fields[1], total)
+                try:
+                    save_invoice_edit(path, (*edited, number))
+                except (OSError, ValueError) as error:
+                    failed.append(f"{path.name}: {error}")
+                    continue
+                self.rows[key] = (path, edited, "" if all(edited) else note, number)
+                done += 1
+            dialog.destroy()
+            self.refresh()
+            missing = sum(1 for key in selection if self.row_check(*self.rows[key])[1] == "bad")
+            extra = f"\n아직 필수 항목이 빈 파일 {missing}개는 ‘필수 누락’ 보기에서 확인하세요." if missing else ""
+            self.notice(f"{done}개 파일에 입력했어요.{extra}", title="한 번에 입력 완료")
+            if failed:
+                messagebox.showerror("저장 실패", "\n".join(failed[:8]), parent=self.root)
+
+        footer = ttk.Frame(dialog, padding=(16, 0, 16, 14))
+        footer.pack(fill="x")
+        ttk.Button(footer, text="고른 파일에 적용", command=save).pack(side="right")
+        entries[0].focus_set()
+
     def edit(self):
-        selection = self.table.selection()
+        selection = [key for key in self.table.selection() if key in self.rows]
+        if len(selection) > 1:
+            self.edit_many(selection)
+            return
         if len(selection) != 1:
-            self.notice("편집할 PDF 한 개를 선택하세요.")
+            self.notice("편집할 파일을 고르세요. 여러 개를 고르면 업체명 등을 한 번에 넣을 수 있어요.")
             return
         key = selection[0]
         path, fields, _, number = self.rows[key]
