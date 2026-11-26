@@ -108,6 +108,7 @@ class Shell:
         try:
             self.close = MonthlyClose(root, self.app.folder, practice_folder, container=self.page2,
                                       on_change=self.update_overview)
+            self.close.navigate = self.show
         except RuntimeError:
             self.close = None
         self.build_sidebar()
@@ -232,6 +233,7 @@ class Shell:
         else:
             if number == 3 and self.close.folder is None and self.app.folder is not None:
                 self.close.load_pdfs(self.app.folder)
+                self.close.file_loaded_statements()
             self.close.show_step(number)
             self.page2.pack(fill="both", expand=True)
             self.status_bar.configure(textvariable=self.close.status)

@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from invoice_renamer import EVIDENCE_EXTENSIONS, digest
+from invoice_renamer import EVIDENCE_EXTENSIONS, STATEMENT_FOLDER, digest
 
 
 ATTACHMENT_EXTENSIONS = {".pdf", ".xml", ".png", ".jpg", ".jpeg", ".eml", ".txt", ".csv"}
@@ -65,7 +65,7 @@ def create_backup(target, state, evidence_folder, attachments, edits):
         root = evidence_folder.resolve()
         for path in evidence_folder.rglob("*"):
             if path.suffix.lower() in EVIDENCE_EXTENSIONS | {".md", ".xml"} and path.is_file() and not path.is_symlink():
-                if path.resolve().is_relative_to(root):
+                if path.resolve().is_relative_to(root) and path.relative_to(evidence_folder).parts[0] != STATEMENT_FOLDER:
                     include(path, f"Belege/{path.relative_to(evidence_folder).as_posix()}")
     else:
         missing.append("Belege/ (증빙 폴더를 열지 않음)")

@@ -16,7 +16,7 @@ from invoice_renamer import (  # noqa: E402
     App, EditsFileError, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
     read_invoice_details, remember_original_name, reserve_name,
 )
-from monthly_close import Transaction, decode_statement, german_import_error, index_pdfs, numbered_statement, read_statement_pdf  # noqa: E402
+from monthly_close import MonthlyClose, Transaction, decode_statement, german_import_error, index_pdfs, numbered_statement, read_statement_pdf  # noqa: E402
 
 
 UBL = """<?xml version="1.0" encoding="UTF-8"?>
@@ -170,7 +170,35 @@ def run():
             pass
         else:
             raise AssertionError("Damaged edits file")
-    print("PASS: v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+
+        # 9. v1.4: an imported statement is moved unchanged into 명세서/YYYY-MM of the evidence folder.
+        evidence = root / "Belege-Ordner"
+        (evidence / "명세서" / "2026-11").mkdir(parents=True)
+        (evidence / "명세서" / "2026-11" / "Auszug.pdf").write_bytes(b"older file with the same name")
+        downloaded = root / "Downloads"
+        downloaded.mkdir()
+        incoming = downloaded / "Auszug.pdf"
+        incoming.write_bytes(original)
+
+        class Status:
+            def set(self, _text):
+                pass
+
+        close = MonthlyClose.__new__(MonthlyClose)
+        close.folder, close.practice_folder, close.status = evidence, None, Status()
+        spec, moved_from = close.file_statement({"path": str(incoming), "period": ""}, [entry for _, entry in entries])
+        target = Path(spec["path"])
+        check(moved_from == incoming and not incoming.exists(), "Statement moved out of the download folder")
+        check(target == evidence / "명세서" / "2026-11" / "Auszug (2).pdf", "Statement month folder without overwrite")
+        check(target.read_bytes() == original and spec["original_path"] == str(incoming), "Moved statement unchanged")
+        check(close.file_statement(spec, [])[1] is None, "Statement already filed stays put")
+        close.practice_folder = root
+        practice_file = downloaded / "Practice.pdf"
+        practice_file.write_bytes(original)
+        check(close.file_statement({"path": str(practice_file), "period": "2026-11"}, [])[1] is None, "Practice mode does not move")
+        (folder / "invoice-edits.json").write_text("{}", encoding="utf-8")
+        check(not any("명세서" in document.path.parts for document in index_pdfs(evidence)[0]), "Statement folder not indexed as evidence")
+    print("PASS: v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":

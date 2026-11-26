@@ -23,7 +23,7 @@ import pymupdf
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import quote
 
-from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MONEY, MONTH_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
+from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
@@ -594,6 +594,31 @@ def german_import_error(value):
     return "Importzeile anhand des Originalauszugs prüfen"
 
 
+GERMAN_TO_KOREAN = {
+    "Abgeglichen": "금액 대조 완료", "Beleg fehlt": "증빙 없음",
+    "Auszug als Nachweis · steuerlich prüfen": "명세서 근거 · 세무사 확인",
+    "Verknüpfte Datei fehlt": "연결 파일 없음", "Rechnungsbetrag prüfen": "인보이스 총액 확인",
+    "Währung prüfen": "통화 확인", "Gegenkontoauszug fehlt": "이체 상대 명세서 필요",
+    "Auszug zur Erstattung fehlt": "환불 상대 명세서 필요",
+    "Vollständig erstattet · Belegprüfung offen": "전액 환불 · 증빙 확인 필요",
+    "Übersetzung der Notiz ausstehend.": "메모 번역 대기",
+    "Enthalten": "포함", "Bereits übermittelt": "이미 전달함", "Zuordnung aufgehoben": "연결 해제됨",
+}
+GERMAN_PREFIXES = (("Interner Transfer zu", "내부이체"), ("Differenz", "차액"),
+                   ("Teilerstattung · Restbetrag", "일부 환불 · 잔액"), ("Bereits übermittelt: ", "이미 전달: "))
+
+
+def german_with_korean(text):
+    """Show a German export value with its Korean meaning, e.g. 'Beleg fehlt (증빙 없음)'."""
+    korean = GERMAN_TO_KOREAN.get(text)
+    if korean is None:
+        for german, meaning in GERMAN_PREFIXES:
+            if text.startswith(german):
+                korean = meaning + text[len(german):]
+                break
+    return f"{text} ({korean})" if korean else text
+
+
 def delivery_text(value):
     try:
         return german_input(value)
@@ -911,7 +936,6 @@ class MonthlyClose:
             2: [("은행·카드 명세서 추가", self.open_csv, "Primary.TButton"), ("여러 명세서 한 번에 추가", self.open_batch, None),
                 ("이어서 작업", self.resume, None), ("지난 달 열기", self.open_past_month, None)],
             3: [("증빙 폴더 선택", self.select_folder, None), ("일괄 매칭 후보", self.batch_candidates, None),
-                ("카드대금·내부이체 후보", self.transfer_candidates, None), ("결제·환불 연결", self.link_refunds, None),
                 ("매칭완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
             4: [("월별 누락 점검표", self.monthly_review, "Primary.TButton"), ("미연결 증빙", self.show_unlinked_invoices, None),
                 ("후속 목록", self.followup_list, None), ("명세서 기간 점검", self.show_statement_periods, None),
@@ -938,45 +962,105 @@ class MonthlyClose:
             self.step_bars[number] = frame
         chips = ttk.Frame(container, padding=(18, 4, 18, 4))
         chips.pack(fill="x")
-        for label in ("전체", "확인 필요", "증빙 없음", "대조 완료"):
-            ttk.Radiobutton(chips, text=label, value=label, variable=self.view, command=self.refresh,
-                            style="Chip.TRadiobutton").pack(side="left", padx=(0, 6))
+        self.chip_buttons = {}
+        for label in ("확인 필요", "전체", "증빙 없음", "대조 완료"):
+            chip = ttk.Radiobutton(chips, text=label, value=label, variable=self.view, command=self.refresh,
+                                   style="Chip.TRadiobutton")
+            chip.pack(side="left", padx=(0, 6))
+            self.chip_buttons[label] = chip
         self.status = tk.StringVar(value="은행·카드 명세서와 증빙 폴더를 선택하세요.")
         ttk.Label(chips, textvariable=self.status, style="Muted.TLabel").pack(side="right")
 
-        body = ttk.Panedwindow(container, orient="vertical")
-        body.pack(fill="both", expand=True, padx=18, pady=(2, 10))
+        body = ttk.Panedwindow(container, orient="horizontal")
+        body.pack(fill="both", expand=True, padx=18, pady=(2, 6))
         self.body = body
-        upper, lower = ttk.Frame(body), ttk.Frame(body)
-        self.lower = lower
-        body.add(upper, weight=3)
-        body.add(lower, weight=2)
-        self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태", "메모"), (85, 100, 260, 120, 230, 200))
+        upper = tk.Frame(body, background=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"],
+                         highlightcolor=COLORS["line"])
+        lower = tk.Frame(body, background=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"],
+                         highlightcolor=COLORS["line"])
+        self.upper, self.lower = upper, lower
+        body.add(upper, weight=6)
+        body.add(lower, weight=5)
+
+        def card_header(parent, title, variable):
+            head = tk.Frame(parent, background=COLORS["panel"], padx=12, pady=8)
+            head.pack(fill="x")
+            tk.Label(head, text=title, font=FONT_BOLD, background=COLORS["panel"]).pack(side="left")
+            tk.Label(head, textvariable=variable, font=FONT_SMALL, background=COLORS["panel"],
+                     foreground=COLORS["muted"]).pack(side="left", padx=10)
+            tk.Frame(parent, height=1, background=COLORS["line"]).pack(fill="x")
+            return head
+
+        self.cards_caption = tk.StringVar()
+        card_header(upper, "은행·카드 거래", self.cards_caption)
+        self.left_footer = tk.Frame(upper, background="#fafbfc", padx=10, pady=8)
+        self.left_footer.pack(side="bottom", fill="x")
+        more_menu(self.left_footer, "증빙 없이 처리 ▾", [
+            ("명세서 근거로 처리 (수수료 등)", self.mark_statement_evidence),
+            ("카드대금·내부이체 후보", self.transfer_candidates), ("결제·환불 연결", self.link_refunds),
+        ]).pack(side="left", padx=(0, 6))
+        for label, command in (("메모·기록", self.edit_note), ("인보이스 요청 초안", self.draft_invoice_request),
+                               ("Gmail 검색", self.search_gmail)):
+            ttk.Button(self.left_footer, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 4))
+        self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태", "메모"), (72, 92, 220, 100, 120, 160))
+        self.cards.master.pack_configure(padx=1, pady=(0, 1))
         configure_tags(self.cards)
         self.cards.bind("<<TreeviewSelect>>", lambda event: self.show_invoices())
-        controls = ttk.Frame(lower, padding=(0, 6))
-        controls.pack(fill="x")
-        ttk.Button(controls, text="선택 연결", command=self.link, style="Success.TButton").pack(side="left", padx=(0, 6))
-        self.buttons(controls, [
-            ("연결 해제", self.unlink), ("나란히 보기", self.compare_documents), ("증빙 열기", self.open_pdf),
-            ("메모·기록", self.edit_note), ("인보이스 요청 초안", self.draft_invoice_request), ("Gmail 검색", self.search_gmail),
-        ])
-        more_menu(controls, "더보기 ▾", [
+
+        self.pdfs_caption = tk.StringVar(value="거래를 고르세요")
+        self.pdfs_header = card_header(lower, "추천 증빙", self.pdfs_caption)
+        right_footer = tk.Frame(lower, background="#fafbfc", padx=10, pady=8)
+        right_footer.pack(side="bottom", fill="x")
+        ttk.Button(right_footer, text="선택 연결", command=self.link, style="Success.TButton").pack(side="left", padx=(0, 6))
+        for label, command in (("해제", self.unlink), ("나란히 보기", self.compare_documents), ("열기", self.open_pdf)):
+            ttk.Button(right_footer, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 4))
+        more_menu(right_footer, "더보기", [
             ("배분·차액", self.edit_allocation), ("정정·원본 연결", self.edit_correction), ("접대비 정보", self.edit_hospitality),
             ("보조 자료 첨부", self.edit_attachments), ("증빙 전달 메모 (독일어)", self.edit_document_note),
         ]).pack(side="left")
         self.all_pdfs = tk.BooleanVar()
-        ttk.Checkbutton(controls, text="전체 증빙 표시", variable=self.all_pdfs, command=self.show_invoices).pack(side="left", padx=8)
-        self.pdfs = self.table(lower, ("증빙", "발행일", "총액", "인보이스 번호", "추천·상태"), (420, 100, 110, 130, 220))
+        ttk.Checkbutton(self.pdfs_header, text="전체 증빙에서 고르기", variable=self.all_pdfs, command=self.show_invoices,
+                        style="Panel.TCheckbutton").pack(side="right", padx=(0, 10))
+        self.best_card = tk.Frame(lower, background="#f3fbf6", highlightthickness=0)
+        stripe = tk.Frame(self.best_card, background=COLORS["green"], width=4)
+        stripe.pack(side="left", fill="y")
+        best_body = tk.Frame(self.best_card, background="#f3fbf6", padx=12, pady=10)
+        best_body.pack(side="left", fill="both", expand=True)
+        self.best_title = tk.StringVar()
+        self.best_file = tk.StringVar()
+        self.best_reason = tk.StringVar()
+        tk.Label(best_body, textvariable=self.best_title, font=FONT_BOLD, background="#f3fbf6", anchor="w").pack(fill="x")
+        tk.Label(best_body, textvariable=self.best_file, font=("Consolas", 9), background="#f3fbf6",
+                 foreground=COLORS["muted"], anchor="w", justify="left", wraplength=420).pack(fill="x")
+        tk.Label(best_body, textvariable=self.best_reason, font=FONT_SMALL, background="#f3fbf6",
+                 foreground=COLORS["green"], anchor="w").pack(fill="x", pady=(2, 0))
+        ttk.Button(self.best_card, text="연결", style="Success.TButton", command=self.link_best).pack(side="right", padx=12)
+        self.best_doc = None
+        self.pdfs = self.table(lower, ("증빙", "발행일", "총액", "번호", "추천·상태"), (210, 90, 90, 95, 150))
+        self.pdfs.master.pack_configure(padx=1, pady=(0, 1))
+        self.pdfs.configure(displaycolumns=("증빙", "발행일", "총액", "추천·상태"))
         configure_tags(self.pdfs)
         self.pdfs.bind("<Double-1>", lambda event: self.open_pdf())
+
+        self.next_bar = tk.Frame(container, background=COLORS["panel"], highlightthickness=1, highlightbackground="#b8c2cc",
+                                 highlightcolor="#b8c2cc", padx=14, pady=8)
+        self.next_text = tk.StringVar()
+        self.next_name = tk.StringVar()
+        ttk.Button(self.next_bar, text="다음 단계: 누락 점검 →", style="Primary.TButton",
+                   command=lambda: self.navigate and self.navigate(4)).pack(side="right")
+        texts = tk.Frame(self.next_bar, background=COLORS["panel"])
+        texts.pack(side="left", fill="x", expand=True)
+        tk.Label(texts, textvariable=self.next_text, font=FONT_BOLD, background=COLORS["panel"], anchor="w").pack(fill="x")
+        tk.Label(texts, textvariable=self.next_name, font=("Consolas", 9), background="#f6f8fa",
+                 foreground=COLORS["ink"], padx=6, pady=2, anchor="w").pack(anchor="w", pady=(3, 0))
+        self.navigate = None
         self.show_step(3)
         if folder:
             self.load_pdfs(folder)
 
     STEP_TEXT = {
         2: ("2. 명세서 불러오기", "Amex·DKB·Deutsche Bank PDF 또는 은행·카드 CSV를 불러와요. 같은 파일을 다시 열면 거래번호가 유지돼요."),
-        3: ("3. 증빙 매칭", "거래를 고르면 금액이 같은 증빙이 아래에 추천 순서로 나와요. 초록 행이 가장 유력한 후보예요."),
+        3: ("3. 증빙 매칭", "거래를 고르면 금액이 같은 증빙이 오른쪽에 추천 순서로 나와요. 초록 카드가 가장 유력한 후보예요."),
         4: ("4. 누락 점검", "증빙 없는 거래, 거래 없는 증빙, 번역 대기, 명세서 기간 공백을 확인해요."),
         5: ("5. 세무사 제출", "독일어 ZIP·Excel 대조표를 만들고 전달 상태를 기록해요. 내부 메모는 들어가지 않아요."),
     }
@@ -996,9 +1080,23 @@ class MonthlyClose:
         self.hint_var.set(hint)
         panes = self.body.panes()
         if number == 3 and str(self.lower) not in map(str, panes):
-            self.body.add(self.lower, weight=2)
+            self.body.add(self.lower, weight=5)
         elif number != 3 and str(self.lower) in map(str, panes):
             self.body.forget(self.lower)
+        self.cards.configure(displaycolumns=("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태") if number == 3 else "#all")
+        if number == 3:
+            if not getattr(self, "sash_placed", False):
+                def place_sash():
+                    width = self.body.winfo_width()
+                    if width > 400 and len(self.body.panes()) > 1:
+                        self.body.sashpos(0, int(width * 0.5))
+                        self.sash_placed = True
+                self.body.after(50, place_sash)
+            self.left_footer.pack(side="bottom", fill="x", before=self.cards.master)
+            self.next_bar.pack(fill="x", padx=18, pady=(0, 10))
+        else:
+            self.left_footer.pack_forget()
+            self.next_bar.pack_forget()
 
     def summary(self):
         counts = Counter()
@@ -1338,7 +1436,75 @@ class MonthlyClose:
         return parse_transactions(rows, spec["columns"], spec["currency"], spec["date_order"],
                                   spec["account"], spec["flip_sign"])
 
+    def statement_home(self, spec, transactions):
+        """Folder inside the evidence folder where an imported statement is kept, or None."""
+        if self.practice_folder or not self.folder:
+            return None
+        month = spec.get("period") or ""
+        if not re.fullmatch(MONTH_FOLDER, month):
+            months = Counter(item.day.strftime("%Y-%m") for item in transactions)
+            month = months.most_common(1)[0][0] if months else date.today().strftime("%Y-%m")
+        return self.folder / STATEMENT_FOLDER / month
+
+    def file_statement(self, spec, transactions):
+        """Move an imported statement into 명세서/YYYY-MM of the evidence folder without changing its content.
+
+        Returns (spec, moved_from). The file is left where it is when there is no evidence folder,
+        it is already inside the statement folder, or the move fails."""
+        home = self.statement_home(spec, transactions)
+        source = Path(spec["path"])
+        if home is None or not source.is_file() or source.is_symlink():
+            return spec, None
+        try:
+            if source.resolve().is_relative_to((self.folder / STATEMENT_FOLDER).resolve()):
+                return spec, None
+            home.mkdir(parents=True, exist_ok=True)
+            target, counter = home / source.name, 2
+            while target.exists():
+                target = home / f"{source.stem} ({counter}){source.suffix}"
+                counter += 1
+            move_without_overwrite(source, target)
+        except OSError as error:
+            record_error("statement-move", error)
+            self.status.set(f"명세서를 작업 폴더로 옮기지 못해 원래 위치에 두었어요 · {error}")
+            return spec, None
+        return {**spec, "path": str(target), "original_path": str(source)}, source
+
+    def file_loaded_statements(self):
+        """Move statements that were read before the evidence folder was chosen."""
+        if not self.session_specs or not self.statement_home({}, []):
+            return 0
+        state, moved = deepcopy(self.state), []
+        for source_key, spec in list(self.session_specs.items()):
+            items = [item for key, item in self.transactions.items()
+                     if source_key in self.state.get("transaction_sources", {}).get(key, {})]
+            filed, original = self.file_statement(spec, items)
+            if original is None:
+                continue
+            moved.append((source_key, Path(spec["path"]), Path(filed["path"])))
+            self.session_specs[source_key] = filed
+            self.statement_sources[source_key] = Path(filed["path"])
+            state.setdefault("statement_paths", {})[source_key] = filed["path"]
+            state.setdefault("source_specs", {})[source_key] = filed
+        if not moved:
+            return 0
+        state["session"] = {"sources": dict(self.session_specs), "folder": str(self.folder)}
+        if not self.save(state):
+            for source_key, original, target in reversed(moved):
+                try:
+                    move_without_overwrite(target, original)
+                except OSError as error:
+                    record_error("statement-move", error)
+            return 0
+        self.refresh()
+        show_notice(self.root, f"명세서 {len(moved)}개를 증빙 폴더 안 ‘{STATEMENT_FOLDER}/월’ 폴더로 옮겼어요.\n"
+                    "내용은 바꾸지 않았고, 원래 위치도 기록해 두었어요.")
+        return len(moved)
+
     def add_statement(self, source_key, spec, transactions, errors, remember=True):
+        moved_from = None
+        if remember:
+            spec, moved_from = self.file_statement(spec, transactions)
         state = deepcopy(self.state)
         resolutions = spec.get("resolutions", state.get("source_resolutions", {}).get(source_key, {}))
         originals = {resolutions.get(item.key, item.key): item.key for item in transactions}
@@ -1369,13 +1535,22 @@ class MonthlyClose:
         if remember:
             state["session"] = {"sources": specs, "folder": str(self.folder) if self.folder else ""}
         if not self.save(state):
+            if moved_from:
+                try:
+                    move_without_overwrite(source, moved_from)
+                except OSError as error:
+                    record_error("statement-move", error)
             return False
         self.session_specs = specs
         self.transactions.update((item.key, item) for item in transactions)
         self.accounts.update((item.key, account) for item in transactions)
         self.statement_sources[source_key] = source
         self.errors.extend((f"{source.name}:{line}", error) for line, error in errors)
+        if moved_from and self.folder and moved_from.parent.resolve() == self.folder.resolve():
+            self.load_pdfs(self.folder)  # the statement had been listed as evidence before the move
         self.refresh()
+        if moved_from:
+            self.status.set(f"명세서를 ‘{source.parent.relative_to(self.folder).as_posix()}’ 폴더로 옮겼어요 · {source.name}")
         return True
 
     def resume(self):
@@ -1771,7 +1946,7 @@ class MonthlyClose:
         folder = filedialog.askdirectory(parent=self.root, initialdir=self.folder)
         if folder:
             self.load_pdfs(Path(folder))
-            if self.session_specs and self.folder == Path(folder):
+            if self.session_specs and self.folder == Path(folder) and not self.file_loaded_statements():
                 state = deepcopy(self.state)
                 state["session"] = {"sources": self.session_specs, "folder": str(self.folder)}
                 self.save(state)
@@ -1997,6 +2172,7 @@ class MonthlyClose:
         counts = Counter()
         view = self.view.get()
         month = self.month_filter.get()
+        chip_counts = Counter()
         for key, item in self.transactions.items():
             state = self.status_for(key)
             counts[state] += 1
@@ -2006,12 +2182,17 @@ class MonthlyClose:
             follow = record.get("follow_up")
             tag = transaction_tag(state, follow or "")
             unresolved = follow in ("요청 중", "세무사 확인 필요", "증빙 확보 불가") or state not in ("금액 대조 완료", "내부이체 확인", "전액 환불 확인")
-            if (view == "전체" or (view == "확인 필요" and unresolved) or (view == "증빙 없음" and state == "증빙 미연결")
-                    or (view == "대조 완료" and tag in ("ok", "transfer"))):
+            matches = {"전체": True, "확인 필요": unresolved, "증빙 없음": state == "증빙 미연결",
+                       "대조 완료": tag in ("ok", "transfer")}
+            chip_counts.update(name for name, hit in matches.items() if hit)
+            if matches.get(view, True):
                 self.cards.insert("", "end", iid=key, values=(
                     record.get("number", ""), item.day, item.merchant, f"{item.amount} {item.currency}", state, self.note_preview(key),
                 ), tags=(tag,))
         self.cards.selection_set([key for key in selected if self.cards.exists(key)])
+        for name, chip in self.chip_buttons.items():
+            chip.configure(text=f"{name} {chip_counts[name]}")
+        self.cards_caption.set(f"{'전체 월' if month == '전체' else month} · {view} {len(self.cards.get_children())}건")
         self.show_invoices()
         self.status.set(
             f"거래 {len(self.transactions)}건 · 확인 완료 {counts['금액 대조 완료']}건 · "
@@ -2020,6 +2201,61 @@ class MonthlyClose:
         )
         if self.on_change:
             self.on_change()
+
+    def match_reason(self, item, doc):
+        """Short Korean reason why a document fits a transaction."""
+        parts = ["금액"]
+        if doc.seller and (merchant_key(doc.seller) == merchant_key(item.merchant)
+                           or merchant_key(doc.seller) in self.state["aliases"].get(merchant_key(item.merchant), [])
+                           or merchant_key(doc.seller) in merchant_key(item.merchant)):
+            parts.append("업체명")
+        if matching_reference(item.merchant, doc):
+            parts.append("번호")
+        gap = abs((doc.day - item.day).days) if doc.day else None
+        if gap is not None and gap <= 7:
+            parts.append("날짜")
+        text = "✓ " + " · ".join(parts) + " 일치"
+        if gap is not None and gap > 7:
+            text += f" · 날짜 {gap}일 차이"
+        return text
+
+    def update_match_panel(self, selected, linked, exact):
+        """Best-candidate card on the right and the file-name preview at the bottom (step 3)."""
+        self.best_doc = None
+        self.best_card.pack_forget()
+        if len(selected) != 1:
+            self.pdfs_caption.set("거래 한 건을 고르세요" if not selected else f"거래 {len(selected)}건 선택")
+            self.next_text.set("거래를 고르면 매칭완료 후 파일 이름을 미리 보여 줘요.")
+            self.next_name.set("")
+            return
+        key = selected[0]
+        item = self.transactions[key]
+        number = self.record(key).get("number", "")
+        self.pdfs_caption.set(f"{german_amount(item.amount)} {item.currency} · {item.day:%d.%m.%Y}")
+        doc = None
+        if linked:
+            doc = next((self.by_key[link] for link in sorted(linked) if link in self.by_key), None)
+            self.next_text.set("✅ 연결됨 · 매칭완료 폴더로 옮기면 이 이름이 돼요")
+        elif exact:
+            doc = exact[0]
+            self.best_doc = doc
+            self.best_title.set(f"추천 1순위 · {doc.seller or doc.path.stem} · {doc.day or '날짜 없음'}")
+            self.best_file.set(doc.path.name)
+            self.best_reason.set(self.match_reason(item, doc))
+            self.best_card.pack(fill="x", before=self.pdfs.master)
+            self.next_text.set("연결하고 매칭완료 폴더로 옮기면 이 이름이 돼요")
+        else:
+            self.next_text.set("금액이 같은 증빙이 없어요 · ‘전체 증빙에서 고르기’나 ‘증빙 없이 처리’를 쓰세요")
+        self.next_name.set(package_filename(number, doc) if doc else "")
+
+    def link_best(self):
+        if self.best_doc is None:
+            return
+        for iid, doc in self.visible_pdfs.items():
+            if doc.key == self.best_doc.key:
+                self.pdfs.selection_set(iid)
+                break
+        self.link()
 
     def show_invoices(self):
         self.pdfs.delete(*self.pdfs.get_children())
@@ -2066,6 +2302,8 @@ class MonthlyClose:
                 doc.path.name, doc.day or "", f"{signed_total(doc)} {doc.currency}" if doc.amount is not None else "",
                 doc.number, " · ".join(labels),
             ))
+        self.update_match_panel(selected, linked, exact)
+
 
     def save(self, state):
         locked = affected_locked_month(self.state, state)
@@ -3011,6 +3249,21 @@ class MonthlyClose:
         self.choose_package(keys, lambda chosen: self.preview_package(chosen, supplemental, previous, current),
                             supplemental)
 
+    def german_status(self, key):
+        """German reconciliation text written to the advisor files for one transaction."""
+        status, record = self.status_for(key), self.record(key)
+        return {
+            "금액 대조 완료": "Abgeglichen", "증빙 미연결": "Beleg fehlt",
+            "명세서 근거 · 세무사 확인": "Auszug als Nachweis · steuerlich prüfen",
+            "연결 PDF 위치 확인": "Verknüpfte Datei fehlt",
+            "연결됨 · PDF 총액 확인": "Rechnungsbetrag prüfen",
+            "연결됨 · 통화 확인": "Währung prüfen",
+            "내부이체 확인": f"Interner Transfer zu {self.record(record.get('transfer', '')).get('number', '')}",
+            "이체 상대 명세서 필요": "Gegenkontoauszug fehlt",
+            "환불 상대 명세서 필요": "Auszug zur Erstattung fehlt",
+            "전액 환불 확인": "Vollständig erstattet · Belegprüfung offen",
+        }.get(status, status.replace("연결됨 · 차액", "Differenz").replace("일부 환불 · 잔액", "Teilerstattung · Restbetrag"))
+
     def package_sources(self, keys):
         """Statement files that hold at least one of the given transactions."""
         wanted = set(keys)
@@ -3023,7 +3276,7 @@ class MonthlyClose:
     def choose_package(self, keys, proceed, supplemental=False):
         """Let the user pick months, statements and transactions before the ZIP is built."""
         dialog = InlineDialog(self.root)
-        dialog.title("추가 제출 범위 선택" if supplemental else "세무사 제출 범위 선택")
+        dialog.title("추가 제출 범위 선택 · Umfang der Nachreichung" if supplemental else "세무사 제출 범위 선택 · Umfang der Übermittlung")
         dialog.geometry("1000x640")
         dialog.grab_set()
         links = self.state.get("transaction_sources", {})
@@ -3033,18 +3286,20 @@ class MonthlyClose:
         month_vars = {month: tk.BooleanVar(value=chosen_month in ("전체", month)) for month in months}
         source_vars = {checksum: tk.BooleanVar(value=True) for checksum in names}
         picked = {key: True for key in keys}
-        ttk.Label(dialog, text="월과 명세서를 고른 뒤, 빼고 싶은 거래는 체크를 눌러 해제하세요. 선택한 거래에 연결된 증빙과 그 거래가 들어 있는 명세서만 ZIP에 들어가요.",
+        ttk.Label(dialog, text="월과 명세서를 고른 뒤, 빼고 싶은 거래는 체크를 눌러 해제하세요. 선택한 거래에 연결된 증빙과 그 거래가 들어 있는 명세서만 ZIP에 들어가요.\n"
+                       "Monate und Auszüge wählen, nicht gewünschte Buchungen abwählen. Nur zugehörige Belege und Auszüge kommen in die ZIP-Datei.",
                   wraplength=940, padding=(14, 10, 14, 4)).pack(anchor="w")
         filters = tk.Frame(dialog, background=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"],
                            highlightcolor=COLORS["line"], padx=12, pady=8)
         filters.pack(fill="x", padx=14, pady=(4, 8))
-        tk.Label(filters, text="월", font=FONT_BOLD, background=COLORS["panel"]).grid(row=0, column=0, sticky="nw", padx=(0, 10))
+        tk.Label(filters, text="월 · Monat", font=FONT_BOLD, background=COLORS["panel"]).grid(row=0, column=0, sticky="nw", padx=(0, 10))
         month_row = tk.Frame(filters, background=COLORS["panel"])
         month_row.grid(row=0, column=1, sticky="w")
-        tk.Label(filters, text="명세서", font=FONT_BOLD, background=COLORS["panel"]).grid(row=1, column=0, sticky="nw", padx=(0, 10), pady=(6, 0))
+        tk.Label(filters, text="명세서 · Auszug", font=FONT_BOLD, background=COLORS["panel"]).grid(row=1, column=0, sticky="nw", padx=(0, 10), pady=(6, 0))
         source_row = tk.Frame(filters, background=COLORS["panel"])
         source_row.grid(row=1, column=1, sticky="w", pady=(6, 0))
-        table = self.table(dialog, ("선택", "번호", "월", "거래일", "가맹점·거래처", "금액", "상태"), (50, 80, 70, 90, 330, 110, 200))
+        table = self.table(dialog, ("선택", "번호 · Belegnr.", "월 · Monat", "거래일 · Datum", "가맹점 · Buchungstext", "금액 · Betrag", "상태 · Abgleich"),
+                           (50, 125, 95, 120, 220, 110, 280))
         table.tag_configure("off", foreground=COLORS["muted"])
         summary = tk.StringVar()
 
@@ -3064,9 +3319,10 @@ class MonthlyClose:
                 item, record = self.transactions[key], self.record(key)
                 table.insert("", "end", iid=key, tags=() if picked[key] else ("off",), values=(
                     "☑" if picked[key] else "☐", record.get("number", ""), record["period"], item.day.isoformat(),
-                    item.merchant, f"{item.amount:.2f} {item.currency}", self.status_for(key)))
+                    item.merchant, f"{item.amount:.2f} {item.currency}", f"{self.german_status(key)} ({self.status_for(key)})"))
             count = len(selected())
-            summary.set(f"선택 {count}건 · 명세서 {len(self.package_sources(selected()))}개")
+            statements = len(self.package_sources(selected()))
+            summary.set(f"선택 {count}건 · 명세서 {statements}개   ({count} Buchungen · {statements} Auszüge)")
 
         def selected():
             return [key for key in keys if picked[key] and visible(key)]
@@ -3092,17 +3348,17 @@ class MonthlyClose:
         def go():
             chosen = selected()
             if not chosen:
-                messagebox.showerror("제출 범위", "ZIP에 넣을 거래를 한 건 이상 선택하세요.", parent=dialog)
+                messagebox.showerror("제출 범위 · Umfang", "ZIP에 넣을 거래를 한 건 이상 선택하세요.\nBitte mindestens eine Buchung wählen.", parent=dialog)
                 return
             dialog.destroy()
             proceed(chosen)
 
         footer = tk.Frame(dialog, background=COLORS["bg"])
         footer.pack(fill="x", padx=14, pady=(0, 12))
-        ttk.Button(footer, text="전체 선택", command=lambda: set_all(True)).pack(side="left")
-        ttk.Button(footer, text="전체 해제", command=lambda: set_all(False)).pack(side="left", padx=(6, 0))
+        ttk.Button(footer, text="전체 선택 · Alle", command=lambda: set_all(True)).pack(side="left")
+        ttk.Button(footer, text="전체 해제 · Keine", command=lambda: set_all(False)).pack(side="left", padx=(6, 0))
         tk.Label(footer, textvariable=summary, background=COLORS["bg"], foreground=COLORS["muted"]).pack(side="left", padx=12)
-        ttk.Button(footer, text="선택한 거래로 미리보기 →", style="Primary.TButton", command=go).pack(side="right")
+        ttk.Button(footer, text="미리보기 · Vorschau →", style="Primary.TButton", command=go).pack(side="right")
         fill()
 
     def preview_package(self, keys, supplemental, previous, current):
@@ -3133,23 +3389,26 @@ class MonthlyClose:
                 return
             translation_count = sum(note == "Übersetzung der Notiz ausstehend." for _, note in notes)
             dialog = InlineDialog(self.root)
-            dialog.title("추가 제출 미리보기" if supplemental else "세무사용 ZIP 미리보기")
+            dialog.title("추가 제출 미리보기 · Vorschau Nachreichung" if supplemental else "세무사용 ZIP 미리보기 · Vorschau für Steuerberatung")
             dialog.geometry("950x540")
             dialog.transient(self.root)
             dialog.grab_set()
-            ttk.Label(dialog, text=f"거래 {len(summary)}건 · 증빙 파일 {evidence_count}개 · 첨부 {attachment_count}개 · 미해결 {len(unresolved)}건 · 번역 대기 메모 {translation_count}개", padding=10).pack(anchor="w")
-            table = self.table(dialog, ("거래번호", "구분", "내보낼 내용"), (100, 145, 660))
+            ttk.Label(dialog, text=f"{filename}\n"
+                      f"거래 {len(summary)}건 · 증빙 파일 {evidence_count}개 · 첨부 {attachment_count}개 · 미해결 {len(unresolved)}건 · 번역 대기 메모 {translation_count}개\n"
+                      f"{len(summary)} Buchungen · {evidence_count} Belege · {attachment_count} Anlagen · {len(unresolved)} offene Posten · {translation_count} Notizen ohne Übersetzung",
+                      padding=10).pack(anchor="w")
+            table = self.table(dialog, ("거래번호 · Belegnr.", "구분 · Art", "내보낼 내용 · Inhalt"), (145, 230, 535))
             for number, note in notes:
-                table.insert("", "end", values=(number, "독일어 전달 메모", note.replace("\n", " / ")))
+                table.insert("", "end", values=(number, "Notiz (전달 메모)", german_with_korean(note.replace("\n", " / "))))
             for row in unresolved:
-                table.insert("", "end", values=(row["Belegnummer"], "미해결 거래", row["Abgleich"]))
+                table.insert("", "end", values=(row["Belegnummer"], "Offener Posten (미해결 거래)", german_with_korean(row["Abgleich"])))
             for row in details:
                 path = row["Datei im ZIP"]
-                kind = "이전 전달 증빙" if path.startswith("Bereits übermittelt: ") else "증빙 파일"
-                table.insert("", "end", values=(row["Belegnummer"], kind, path))
+                kind = "Bereits übermittelt (이전 전달 증빙)" if path.startswith("Bereits übermittelt: ") else "Beleg (증빙 파일)"
+                table.insert("", "end", values=(row["Belegnummer"], kind, german_with_korean(path)))
 
             for row in attachment_rows:
-                table.insert("", "end", values=(row["Belegnummer"], "보조 자료", f'{row["Quelldatei"]} · {row["Status"]}'))
+                table.insert("", "end", values=(row["Belegnummer"], "Anlage (보조 자료)", f'{row["Quelldatei"]} · {german_with_korean(row["Status"])}'))
 
             def save_zip():
                 path = filedialog.asksaveasfilename(parent=dialog, defaultextension=".zip", initialfile=filename, filetypes=[("ZIP", "*.zip")])
@@ -3181,7 +3440,7 @@ class MonthlyClose:
                     self.status.set(f"ZIP 저장 완료 · 이력 저장 실패 · {path}")
                 dialog.destroy()
 
-            ttk.Button(dialog, text="이 내용으로 ZIP 저장", command=save_zip).pack(anchor="e", padx=10, pady=8)
+            ttk.Button(dialog, text="이 내용으로 ZIP 저장 · ZIP speichern", command=save_zip).pack(anchor="e", padx=10, pady=8)
             self.root.wait_window(dialog)
 
     def write_package(self, target, keys=None, baselines=None):
@@ -3307,17 +3566,7 @@ class MonthlyClose:
                             hospitality_writer.writerow([transaction_id, arcname, *map(export_value, inputs),
                                                          "" if all(inputs) else "Angaben ergänzen"])
                     status = self.status_for(key)
-                    german_status = {
-                        "금액 대조 완료": "Abgeglichen", "증빙 미연결": "Beleg fehlt",
-                        "명세서 근거 · 세무사 확인": "Auszug als Nachweis · steuerlich prüfen",
-                        "연결 PDF 위치 확인": "Verknüpfte Datei fehlt",
-                        "연결됨 · PDF 총액 확인": "Rechnungsbetrag prüfen",
-                        "연결됨 · 통화 확인": "Währung prüfen",
-                        "내부이체 확인": f"Interner Transfer zu {self.record(record.get('transfer', '')).get('number', '')}",
-                        "이체 상대 명세서 필요": "Gegenkontoauszug fehlt",
-                        "환불 상대 명세서 필요": "Auszug zur Erstattung fehlt",
-                        "전액 환불 확인": "Vollständig erstattet · Belegprüfung offen",
-                    }.get(status, status.replace("연결됨 · 차액", "Differenz").replace("일부 환불 · 잔액", "Teilerstattung · Restbetrag"))
+                    german_status = self.german_status(key)
                     row = [transaction_id, record["period"], item.day, export_value(self.accounts.get(key, "")),
                            export_value(item.merchant), item.amount, item.currency, german_status,
                            " | ".join(paths), export_value(delivery_text(record.get("advisor_note", ""))), record.get("due", ""),

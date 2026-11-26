@@ -61,6 +61,7 @@ def apply_style(root):
         style.map(f"{name}.TButton", background=[("active", COLORS[color]), ("disabled", COLORS["line"])],
                   foreground=[("disabled", COLORS["muted"])])
     style.configure("TMenubutton", padding=(10, 5), background=COLORS["panel"])
+    style.configure("Small.TButton", padding=(7, 4), width=-4, background=COLORS["panel"], bordercolor=COLORS["line"])
     style.configure("Chip.TRadiobutton", padding=(10, 3), background=COLORS["bg"])
     style.configure("Treeview", rowheight=26, background=COLORS["panel"], fieldbackground=COLORS["panel"],
                     bordercolor=COLORS["line"])

@@ -17,7 +17,7 @@ from zipfile import ZipFile
 import pymupdf
 
 from release_info import VERSION, export_diagnostics, record_error
-from ui_theme import InlineDialog, show_notice
+from ui_theme import COLORS, FONT_BOLD, InlineDialog, show_notice
 
 
 DATE = r"(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})"
@@ -149,6 +149,7 @@ def tessdata_folder():
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 EVIDENCE_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
 EXCLUDED_FOLDER = "제외"
+STATEMENT_FOLDER = "명세서"  # imported bank/card statements, kept apart from evidence
 INVOICE_WORDS = (
     "rechnung", "rechnungsnummer", "invoice", "receipt", "quittung", "beleg", "kassenbon", "ust", "mwst",
     "umsatzsteuer", "steuernummer", "vat", "netto", "brutto", "gesamt", "betrag", "summe", "total", "iban",
@@ -392,6 +393,12 @@ def markdown_value(value):
 
 
 def export_markdown(path, fields, number):
+    content, incomplete = markdown_text(path, fields, number)
+    return write_markdown(path, content), incomplete
+
+
+def markdown_text(path, fields, number):
+    """Markdown summary and page text of an evidence file: (content, incomplete)."""
     issued, seller, total = fields
     lines = ["# 인보이스", "", "- PDF 파일명: " + markdown_value(path.name)]
     if path.suffix.lower() == ".xml":
@@ -410,7 +417,10 @@ def export_markdown(path, fields, number):
         if text.strip():
             fence = "~" * max(3, 1 + max((len(run) for run in re.findall(r"~+", text)), default=0))
             lines.extend((fence, text.rstrip(), fence))
-    content = "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", incomplete
+
+
+def write_markdown(path, content):
     target = path.with_suffix(".md")
     index = 2
     while True:
@@ -426,7 +436,7 @@ def export_markdown(path, fields, number):
         except OSError:
             target.unlink(missing_ok=True)
             raise
-        return target, incomplete
+        return target
 
 
 # Names before v1.1.1: 2026-11-25_58.39 EUR_Seller__번호_R1__원본__invoice.pdf
@@ -804,6 +814,7 @@ class App:
         ttk.Button(toolbar, text="선택 항목 편집", command=self.edit).pack(side="left", padx=6)
         self.apply_button = ttk.Button(toolbar, text="선택 항목 파일명 변경", command=self.apply, style="Primary.TButton")
         self.apply_button.pack(side="left", padx=6)
+        ttk.Button(toolbar, text="원본·내용 나란히 보기", command=self.view_contents).pack(side="left", padx=6)
         more_menu(toolbar, "더보기 ▾", [
             ("인보이스 아닌 파일 → 제외 폴더", self.exclude_selected),
             ("마크다운 저장", self.save_markdown),
@@ -824,10 +835,13 @@ class App:
             ttk.Label(root, textvariable=self.status, style="Status.TLabel").pack(fill="x", side="bottom")
         frame = ttk.Frame(container, padding=(18, 0, 18, 8))
         frame.pack(fill="both", expand=True)
-        self.table = ttk.Treeview(frame, columns=("old", "new", "status"), show="headings")
-        for column, label, width in zip(self.table["columns"], ("현재 파일명", "변경할 파일명", "읽기 결과·상태"), (320, 470, 260)):
+        self.table = ttk.Treeview(frame, columns=("check", "old", "new", "status"), show="headings")
+        for column, label, width in zip(self.table["columns"], ("☐", "현재 파일명", "변경할 파일명", "읽기 결과·상태"),
+                                        (38, 320, 470, 260)):
             self.table.heading(column, text=label)
-            self.table.column(column, width=width, minwidth=110)
+            self.table.column(column, width=width, minwidth=38 if column == "check" else 110,
+                              stretch=column != "check", anchor="center" if column == "check" else "w")
+        self.table.heading("check", command=self.toggle_all)
         configure_tags(self.table)
         bar = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=bar.set)
@@ -835,12 +849,42 @@ class App:
         self.table.pack(fill="both", expand=True)
         self.table.bind("<Double-1>", lambda event: self.edit())
         self.table.bind("<Control-a>", lambda event: self.table.selection_set(self.table.get_children()))
+        self.table.bind("<<TreeviewSelect>>", lambda event: self.show_checks())
+        self.table.bind("<Button-1>", self.click_check, add=True)
         if practice_folder:
             self.folder = practice_folder / "Belege"
             self.load_folder()
             self.status.set("연습 모드 · 예시 증빙을 열었어요. 왼쪽 ‘2. 명세서 불러오기’에서 예시 명세서도 불러올 수 있어요.")
         else:
             self.root.after_idle(self.first_check)
+
+    def show_checks(self):
+        """Mirror the row selection in the check-box column."""
+        chosen = set(self.table.selection())
+        rows = self.table.get_children()
+        for row in rows:
+            self.table.set(row, "check", "☑" if row in chosen else "☐")
+        self.table.heading("check", text="☑" if rows and len(chosen) >= len(rows) else "☐")
+
+    def click_check(self, event):
+        """A click in the check-box column adds or removes that row without clearing the others."""
+        if self.table.identify_region(event.x, event.y) != "cell" or self.table.identify_column(event.x) != "#1":
+            return None
+        row = self.table.identify_row(event.y)
+        if not row:
+            return None
+        if row in self.table.selection():
+            self.table.selection_remove(row)
+        else:
+            self.table.selection_add(row)
+        return "break"
+
+    def toggle_all(self):
+        rows = self.table.get_children()
+        if rows and len(self.table.selection()) >= len(rows):
+            self.table.selection_remove(*rows)
+        else:
+            self.table.selection_set(rows)
 
     def notice(self, message, kind="info"):
         """Show a guidance message as a pop-up inside the window and keep it in the status line."""
@@ -938,7 +982,8 @@ class App:
             paths = sorted(
                 path for path in candidates
                 if path.suffix.lower() in RENAMER_EXTENSIONS and not path.is_symlink() and path.is_file()
-                and path.resolve().is_relative_to(root) and EXCLUDED_FOLDER not in path.relative_to(self.folder).parts[:-1]
+                and path.resolve().is_relative_to(root)
+                and not {EXCLUDED_FOLDER, STATEMENT_FOLDER} & set(path.relative_to(self.folder).parts[:-1])
             )
         except OSError as error:
             self.status.set(str(error))
@@ -1034,7 +1079,8 @@ class App:
                     status = f"{check} · {done}" if check else done
             elif not check:
                 status, tag = "확인 필요 · 파일명이 너무 김", "bad"
-            self.table.item(key, values=(source_label, target_label, status), tags=(tag,))
+            self.table.item(key, values=("☑" if key in self.table.selection() else "☐", source_label, target_label, status),
+                            tags=(tag,))
             visible = (view == "전체" or (view == "필수 누락" and tag == "bad")
                        or (view == "인보이스 아님 의심" and tag == "muted") or (view == "변경 가능" and key in self.targets))
             if visible:
@@ -1205,6 +1251,96 @@ class App:
             self.close_window.lift()
             return
         self.close_window = MonthlyClose(self.root, self.folder, self.practice_folder).root
+
+    def view_contents(self):
+        """Show the original page and its Markdown text side by side inside the window."""
+        selection = list(self.table.selection())
+        if not selection:
+            self.notice("볼 파일을 한 개 이상 선택하세요.")
+            return
+        dialog = InlineDialog(self.root)
+        dialog.title("원본·내용 나란히 보기")
+        dialog.geometry("1200x700")
+        dialog.grab_set()
+        top = tk.Frame(dialog, background=COLORS["bg"], padx=14, pady=8)
+        top.pack(fill="x")
+        name = tk.StringVar()
+        tk.Label(top, textvariable=name, font=FONT_BOLD, background=COLORS["bg"], anchor="w").pack(side="left")
+        footer = tk.Frame(dialog, background=COLORS["bg"], padx=14, pady=10)
+        footer.pack(side="bottom", fill="x")
+        panes = ttk.Panedwindow(dialog, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=14)
+        left = tk.Frame(panes, background="#e9edf2")
+        right = tk.Frame(panes, background=COLORS["panel"])
+        panes.add(left, weight=1)
+        panes.add(right, weight=1)
+        canvas = tk.Canvas(left, background="#e9edf2", highlightthickness=0)
+        scroll = ttk.Scrollbar(left, command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(fill="both", expand=True)
+        text = tk.Text(right, wrap="word", font=("Consolas", 10))
+        text.pack(fill="both", expand=True)
+        page_info = tk.StringVar()
+        state = {"file": 0, "page": 0, "image": None, "content": ""}
+
+        def render():
+            canvas.delete("all")
+            path, fields, _, number = self.rows[selection[state["file"]]]
+            name.set(f"{state['file'] + 1}/{len(selection)} · {path.name}")
+            try:
+                if path.suffix.lower() == ".xml":
+                    canvas.create_text(20, 20, anchor="nw", text="XRechnung XML은 그림 원본이 없어요. 오른쪽 내용을 확인하세요.")
+                    pages = 0
+                else:
+                    with pymupdf.open(path) as document:
+                        pages = len(document)
+                        state["page"] = max(0, min(state["page"], pages - 1))
+                        page = document[state["page"]]
+                        width = max(320, canvas.winfo_width() - 20)
+                        zoom = min(2.5, width / max(1, page.rect.width))
+                        png = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).tobytes("png")
+                    state["image"] = tk.PhotoImage(data=base64.b64encode(png).decode("ascii"))
+                    canvas.create_image(10, 10, anchor="nw", image=state["image"])
+                    canvas.configure(scrollregion=(0, 0, state["image"].width() + 20, state["image"].height() + 20))
+                page_info.set(f"{state['page'] + 1} / {pages} 페이지" if pages else "")
+                content, incomplete = markdown_text(path, fields, number)
+            except (OSError, RuntimeError, ValueError) as error:
+                record_error("markdown", error)
+                content, incomplete = f"읽지 못했어요: {error}", True
+            state["content"] = content
+            text.configure(state="normal")
+            text.delete("1.0", "end")
+            text.insert("1.0", content)
+            text.configure(state="disabled")
+            hint.set("본문 일부를 읽지 못했어요 · 원본을 확인하세요" if incomplete else "")
+
+        def move(kind, step):
+            state[kind] += step
+            if kind == "file":
+                state["file"] %= len(selection)
+                state["page"] = 0
+            render()
+
+        def save():
+            path = self.rows[selection[state["file"]]][0]
+            try:
+                target = write_markdown(path, state["content"])
+            except OSError as error:
+                messagebox.showerror("마크다운 저장 실패", str(error), parent=dialog)
+                return
+            self.status.set(f"마크다운 저장 · {target.name}")
+            hint.set(f"저장했어요: {target.name}")
+
+        hint = tk.StringVar()
+        ttk.Button(top, text="◀ 이전 파일", command=lambda: move("file", -1), style="Small.TButton").pack(side="right")
+        ttk.Button(top, text="다음 파일 ▶", command=lambda: move("file", 1), style="Small.TButton").pack(side="right", padx=4)
+        ttk.Button(footer, text="◀", command=lambda: move("page", -1), style="Small.TButton").pack(side="left")
+        tk.Label(footer, textvariable=page_info, background=COLORS["bg"]).pack(side="left", padx=6)
+        ttk.Button(footer, text="▶", command=lambda: move("page", 1), style="Small.TButton").pack(side="left")
+        tk.Label(footer, textvariable=hint, background=COLORS["bg"], foreground=COLORS["amber"]).pack(side="left", padx=12)
+        ttk.Button(footer, text="마크다운 파일로 저장", style="Primary.TButton", command=save).pack(side="right")
+        dialog.after(120, render)
 
     def save_markdown(self):
         selection = self.table.selection()
