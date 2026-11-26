@@ -925,6 +925,11 @@ def work_folder():
     return Path(saved) if isinstance(saved, str) and saved.strip() else default_work_folder()
 
 
+def import_mode():
+    """‘copy’ (default: originals stay where they are) or ‘move’."""
+    return "move" if load_settings().get("import_mode") == "move" else "copy"
+
+
 def free_name(folder, name, taken=()):
     """name, or ‘name (2).pdf’ etc. when that name is already used in folder."""
     candidate = Path(name)
@@ -956,8 +961,9 @@ def move_across(source, target):
     move_sidecar(source, target)
 
 
-def import_evidence(sources, folder):
-    """Move picked evidence files into the work folder. Returns (history for undo, already there, errors)."""
+def import_evidence(sources, folder, copy=False):
+    """Move (or copy) picked evidence files into the work folder.
+    Returns (history: (original, new, checksum), already there, errors). Undo applies to moves only."""
     folder.mkdir(parents=True, exist_ok=True)
     history, inside, errors, taken = [], 0, [], set()
     root = folder.resolve()
@@ -972,7 +978,13 @@ def import_evidence(sources, folder):
             target = free_name(folder, source.name, taken)
             taken.add(target.name.casefold())
             checksum = digest(source)
-            move_across(source, target)
+            if copy:
+                shutil.copy2(source, target)
+                if digest(target) != checksum:
+                    target.unlink(missing_ok=True)
+                    raise OSError("복사한 파일 내용이 원본과 달라요.")
+            else:
+                move_across(source, target)
         except OSError as error:
             errors.append(f"{source.name}: {error}")
             continue
@@ -1140,7 +1152,7 @@ class App:
         head.pack(fill="x")
         ttk.Label(head, text="1. 증빙 모으기·정리", style="Title.TLabel", font=FONT_TITLE).pack(anchor="w")
         ttk.Label(head, style="Muted.TLabel", text=(
-            "가져온 파일은 작업 폴더로 옮겨 발행일·업체명·총액·번호를 읽어요. "
+            "가져온 파일은 작업 폴더에 모아 발행일·업체명·총액·번호를 읽어요. "
             "빨간 행은 필수 누락, 회색 행은 인보이스가 아닌 것 같은 파일이에요.")).pack(anchor="w")
         toolbar = ttk.Frame(container, padding=(18, 8, 18, 4))
         toolbar.pack(fill="x")
@@ -1153,7 +1165,7 @@ class App:
         ttk.Button(toolbar, text="중복 정리", command=self.clean_duplicates).pack(side="left", padx=6)
         more_menu(toolbar, "더보기 ▾", [
             ("작업 폴더 열기 (탐색기)", self.reveal_work_folder),
-            ("작업 폴더 바꾸기", self.change_work_folder),
+            ("환경설정 (작업 폴더·복사/이동)", self.open_settings),
             ("다른 폴더 열기 (옮기지 않고 보기)", self.choose),
             ("새 인보이스 (미분류)", self.open_inbox),
             ("배운 인보이스 양식", self.manage_learned),
@@ -1351,17 +1363,20 @@ class App:
     def finish_import(self, files):
         if not self.use_work_folder(load=False):
             return
-        history, inside, errors = import_evidence(files, self.folder)
-        if history:
+        copy = import_mode() == "copy"
+        history, inside, errors = import_evidence(files, self.folder, copy=copy)
+        if history and not copy:
             self.last_moves = history
         self.load_folder()
-        lines = [f"{len(history)}개를 작업 폴더로 옮겼어요.\n{self.folder}"]
+        lines = [f"{len(history)}개를 작업 폴더로 {'복사했어요. 원본은 그대로 있어요' if copy else '옮겼어요'}.\n{self.folder}"]
         if inside:
             lines.append(f"이미 작업 폴더 안에 있는 파일 {inside}개는 그대로 뒀어요.")
         if errors:
             lines.append(f"옮기지 못한 파일 {len(errors)}개: " + " / ".join(errors[:3]))
         if history:
-            lines.append("빨간 행은 편집에서 고치고, 체크한 뒤 ‘파일명 변경’을 누르세요.\n원래 자리로 돌리려면 더보기 → ‘정리 되돌리기’.")
+            lines.append("빨간 행은 편집에서 고치고, 체크한 뒤 ‘파일명 변경’을 누르세요.")
+            lines.append("가져오기 방식(복사·이동)은 도구 → ‘환경설정’에서 바꿔요." if copy
+                         else "원래 자리로 돌리려면 더보기 → ‘정리 되돌리기’.")
         self.notice("\n".join(lines), kind="warn" if errors else "info", title="가져오기 완료")
         if self.on_change:
             self.on_change()
@@ -1376,6 +1391,42 @@ class App:
                 subprocess.Popen(["xdg-open", str(self.folder)])
         except OSError as error:
             self.notice(f"탐색기를 열지 못했어요: {error}\n{self.folder}", kind="warn")
+
+    def open_settings(self):
+        """Settings panel: work folder and how files are brought in."""
+        dialog = InlineDialog(self.root)
+        dialog.title("환경설정")
+        dialog.geometry("720x420")
+        dialog.grab_set()
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="작업 폴더", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
+        folder_text = tk.StringVar(value=str(work_folder()))
+        ttk.Label(body, textvariable=folder_text, wraplength=640).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        buttons = ttk.Frame(body)
+        buttons.grid(row=2, column=0, columnspan=3, sticky="w")
+        ttk.Button(buttons, text="작업 폴더 바꾸기", command=lambda: (self.change_work_folder(), folder_text.set(str(work_folder())))
+                   ).pack(side="left")
+        ttk.Button(buttons, text="탐색기로 열기", command=self.reveal_work_folder).pack(side="left", padx=8)
+        ttk.Label(body, text="인보이스·명세서 가져오기 방식", font=FONT_BOLD).grid(row=3, column=0, sticky="w", pady=(22, 4))
+        mode = tk.StringVar(value=import_mode())
+
+        def save_mode():
+            try:
+                save_settings({"import_mode": mode.get()})
+            except OSError as error:
+                show_notice(dialog, f"설정을 저장하지 못했어요: {error}", kind="error")
+                return
+            self.status.set("가져오기 방식: " + ("복사 (원본 그대로)" if mode.get() == "copy" else "이동"))
+
+        for row, (value, label) in enumerate((
+                ("copy", "복사 — 원본 파일은 그대로 두고 작업 폴더에 사본을 만들어요 (추천, 테스트할 때 안전)"),
+                ("move", "이동 — 원본 파일을 작업 폴더로 옮겨요 (파일이 한 곳에만 남아요, 정리 되돌리기 가능)")), 4):
+            ttk.Radiobutton(body, text=label, value=value, variable=mode, command=save_mode).grid(
+                row=row, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Label(body, style="Muted.TLabel", wraplength=640, text=(
+            "같은 방식이 1단계 ‘파일 가져오기·폴더 가져오기’와 2단계 명세서 불러오기에 함께 적용돼요. "
+            "바꾼 설정은 바로 저장돼요.")).grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
     def change_work_folder(self):
         selected = filedialog.askdirectory(parent=self.root, title="새 작업 폴더 고르기", initialdir=str(work_folder()))

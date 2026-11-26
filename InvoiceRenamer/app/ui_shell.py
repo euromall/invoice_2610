@@ -192,7 +192,8 @@ class Shell:
                  ("전체 작업 백업", lambda: self.close and self.close.export_workspace_backup()),
                  ("전체 작업 복원", lambda: self.close and self.close.restore_workspace_backup()),
                  ("설치·작동 점검", self.app.diagnose), ("오류 진단 저장", self.app.save_diagnostics),
-                 ("사용법 열기", self.open_manual)]
+                 ("사용법 열기", self.open_manual),
+                 ("환경설정", self.app.open_settings)]
         if not self.practice_folder:
             tools.insert(5, ("연습 모드 열기", self.app.open_practice))
         for label, command in tools:

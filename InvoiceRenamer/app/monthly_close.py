@@ -23,7 +23,7 @@ import pymupdf
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import quote
 
-from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
+from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, import_mode, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
@@ -1559,6 +1559,9 @@ class MonthlyClose:
             while target.exists():
                 target = home / f"{source.stem} ({counter}){source.suffix}"
                 counter += 1
+            if import_mode() == "copy":
+                shutil.copy2(source, target)
+                return {**spec, "path": str(target), "original_path": str(source), "copied": True}, None
             move_without_overwrite(source, target)
         except OSError as error:
             record_error("statement-move", error)
@@ -1631,6 +1634,8 @@ class MonthlyClose:
         if remember:
             state["session"] = {"sources": specs, "folder": str(self.folder) if self.folder else ""}
         if not self.save(state):
+            if spec.get("copied"):
+                Path(spec["path"]).unlink(missing_ok=True)
             if moved_from:
                 try:
                     move_without_overwrite(source, moved_from)
@@ -2333,6 +2338,9 @@ class MonthlyClose:
         view = self.view.get()
         month = self.month_filter.get()
         chip_counts = Counter()
+        candidates = {}
+        if getattr(self, "step", None) == 3 and self.invoices:
+            candidates = {key: clear for key, _, clear in self.batch_pairs()}
         for key, item in self.transactions.items():
             state = self.status_for(key)
             counts[state] += 1
@@ -2346,8 +2354,11 @@ class MonthlyClose:
                        "대조 완료": tag in ("ok", "transfer")}
             chip_counts.update(name for name, hit in matches.items() if hit)
             if matches.get(view, True):
+                shown = state
+                if state == "증빙 미연결" and key in candidates:
+                    shown = "후보 있음 · 확실" if candidates[key] else "후보 있음 · 거의 일치"
                 self.cards.insert("", "end", iid=key, values=(
-                    record.get("number", ""), item.day, item.merchant, f"{item.amount} {item.currency}", state, self.note_preview(key),
+                    record.get("number", ""), item.day, item.merchant, f"{item.amount} {item.currency}", shown, self.note_preview(key),
                 ), tags=(tag,))
         kept = [key for key in selected if self.cards.exists(key)]
         if selected and not kept and self.cards.get_children():
@@ -2487,6 +2498,10 @@ class MonthlyClose:
             self.batch_bar.pack_forget()
             return
         pairs = self.batch_pairs()
+        columns = self.cards["columns"]
+        for key, _, clear in pairs:  # mark the candidates in the list, also when it was filled before the PDFs were read
+            if self.cards.exists(key) and self.cards.set(key, columns[4]) == "증빙 미연결":
+                self.cards.set(key, columns[4], "후보 있음 · 확실" if clear else "후보 있음 · 거의 일치")
         if not pairs:
             self.batch_bar.pack_forget()
             return

@@ -195,6 +195,13 @@ def run():
 
         close = MonthlyClose.__new__(MonthlyClose)
         close.folder, close.practice_folder, close.status = evidence, None, Status()
+        from invoice_renamer import save_settings
+        copy_source = downloaded / "Copy.pdf"
+        copy_source.write_bytes(original)
+        copied_spec, copied_from = close.file_statement({"path": str(copy_source), "period": "2026-11"}, [])
+        check(copied_from is None and copy_source.exists() and copied_spec.get("copied")
+              and Path(copied_spec["path"]).read_bytes() == original, "v1.8: statement copied by default, original kept")
+        save_settings({"import_mode": "move"})
         spec, moved_from = close.file_statement({"path": str(incoming), "period": ""}, [entry for _, entry in entries])
         target = Path(spec["path"])
         check(moved_from == incoming and not incoming.exists(), "Statement moved out of the download folder")
@@ -207,6 +214,7 @@ def run():
         check(close.file_statement({"path": str(practice_file), "period": "2026-11"}, [])[1] is None, "Practice mode does not move")
         (folder / "invoice-edits.json").write_text("{}", encoding="utf-8")
         check(not any("명세서" in document.path.parts for document in index_pdfs(evidence)[0]), "Statement folder not indexed as evidence")
+        save_settings({"import_mode": "copy"})
 
         # 10. v1.4.1: duplicate invoices by content or by seller/date/total/number.
         base = (("2026-11-25", "greenist GmbH", "58.39 EUR"), "R1044176")
@@ -275,6 +283,14 @@ def run():
             check((inbox / "a.pdf").read_bytes() == b"%PDF-1.4 old" and (desk / "note.txt").exists() and len(history) == 2,
                   "Existing file kept, non-evidence left behind")
             check(free_name(inbox, "b.pdf").name == "b.pdf", "Free name")
+            (desk / "c.pdf").write_bytes(b"%PDF-1.4 copy me")
+            copied, _, errors = import_evidence([desk / "c.pdf"], inbox, copy=True)
+            check((desk / "c.pdf").exists() and (inbox / "c.pdf").read_bytes() == b"%PDF-1.4 copy me" and len(copied) == 1 and not errors,
+                  "v1.8: copy keeps the original")
+            from invoice_renamer import import_mode, save_settings
+            check(import_mode() == "copy", "Copy is the default import mode")
+            save_settings({"import_mode": "move"})
+            check(import_mode() == "move", "Import mode saved")
 
         # 14. v1.7.1: one PDF with two marketplace invoices is detected and split; the original goes to 제외.
         combined = root / "combo" / "order.pdf"
@@ -291,7 +307,7 @@ def run():
         parts = split_pdf(combined, info["parts"])
         check([read_invoice_details(path)[0][1:] for path in parts] == [("Shop Eins GmbH", "18.99 EUR"), ("Shop Zwei GmbH", "11.00 EUR")]
               and not combined.exists() and (combined.parent / "제외" / "order__나누기전_원본.pdf").exists(), "Combined PDF split")
-    print("PASS: v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+    print("PASS: v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":
