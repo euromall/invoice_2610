@@ -83,8 +83,9 @@ QPushButton:disabled {{ color: #9AA5AF; background: #F3F5F7; }}
 #Primary:hover {{ background: #0C5C55; }}
 #Primary:disabled {{ background: #9CC3BF; color: #FFFFFF; }}
 #Small {{ min-height: 30px; font-size: 9pt; padding: 0 10px; }}
-#Seg {{ background: transparent; border: none; border-radius: 7px; min-height: 36px; color: #4A5663; }}
-#Seg:checked {{ background: #FFFFFF; color: {INK}; font-weight: bold; border: 1px solid #D5DCE2; }}
+#Seg {{ background: transparent; border: none; border-radius: 7px; min-height: 36px; color: #6B7682; }}
+#Seg:hover {{ background: #E2E7EC; }}
+#Seg:checked {{ background: {ACCENT}; color: #FFFFFF; font-weight: bold; border: none; }}
 #Choice {{ border-radius: 10px; min-height: 64px; padding: 0; }}
 #ChoiceRec {{ min-height: 64px; padding: 0; border-radius: 10px; border: 2px solid {ACCENT}; background: #E9F5F3; }}
 #ChoiceRec:hover {{ background: #DDF0EC; }}
@@ -112,6 +113,7 @@ QHeaderView::section {{ background: #F6F8FA; color: {MUTED}; border: none; borde
 QCalendarWidget QWidget#qt_calendar_navigationbar {{ background: #16232E; }}
 QCalendarWidget QToolButton {{ color: #FFFFFF; background: transparent; font-weight: bold; padding: 4px 8px; }}
 QCalendarWidget QAbstractItemView {{ selection-background-color: {ACCENT}; selection-color: #FFFFFF; }}
+#CalPopup {{ background: #FFFFFF; border: 1px solid #CFD6DD; border-radius: 10px; }}
 QScrollArea {{ border: none; background: transparent; }}
 """
 
@@ -124,11 +126,57 @@ def pydate(q: QDate) -> dt.date:
     return dt.date(q.year(), q.month(), q.day())
 
 
+class DateField(QDateEdit):
+    """A date box that opens a month calendar when clicked anywhere on it (typing a date still works)."""
+
+    def __init__(self, d: dt.date, calendar=None, fmt='yyyy-MM-dd'):
+        super().__init__(qdate(d))
+        self.setDisplayFormat(fmt)
+        self.setCalendarPopup(False)
+        self.setButtonSymbols(QDateEdit.NoButtons)
+        self.setCursor(Qt.PointingHandCursor)
+        self.cal = calendar or WorkCalendar()
+        self.popup = QFrame(self, Qt.Popup)
+        self.popup.setObjectName('CalPopup')
+        lay = QVBoxLayout(self.popup)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.addWidget(self.cal)
+        self.cal.clicked.connect(self._picked)
+        self.cal.activated.connect(self._picked)
+        self.lineEdit().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == ev.Type.MouseButtonPress:
+            self.open_calendar()
+            return True
+        return super().eventFilter(obj, ev)
+
+    def mousePressEvent(self, ev):
+        self.open_calendar()
+
+    def open_calendar(self):
+        if self.popup.isVisible():
+            return
+        self.cal.setSelectedDate(self.date())
+        self.popup.adjustSize()
+        pos = self.mapToGlobal(self.rect().bottomLeft())
+        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        x = min(pos.x(), area.right() - self.popup.width())
+        y = pos.y() + 4
+        if y + self.popup.height() > area.bottom():
+            y = self.mapToGlobal(self.rect().topLeft()).y() - self.popup.height() - 4
+        self.popup.move(max(area.left(), x), y)
+        self.popup.show()
+        self.cal.setFocus()
+
+    def _picked(self, q: QDate):
+        self.setDate(q)
+        self.popup.hide()
+
+
 def date_edit(d: dt.date) -> QDateEdit:
-    w = QDateEdit(qdate(d))
-    w.setCalendarPopup(True)
-    w.setDisplayFormat('yyyy-MM-dd')
-    return w
+    return DateField(d)
 
 
 def label(text, name=None, wrap=False):
@@ -522,10 +570,7 @@ class MainWindow(QMainWindow):
         nxt.setObjectName('Arrow')
         nxt.setToolTip('하루 뒤')
         self.calendar = WorkCalendar()
-        self.work_date = QDateEdit(qdate(dt.date.today()))
-        self.work_date.setCalendarPopup(True)
-        self.work_date.setCalendarWidget(self.calendar)
-        self.work_date.setDisplayFormat('yyyy-MM-dd (ddd)')
+        self.work_date = DateField(dt.date.today(), self.calendar, 'yyyy-MM-dd (ddd)')
         self.work_date.setMinimumWidth(215)
         self.work_date.setToolTip('누르면 달력이 열립니다. 점: 이미 작업한 날 (파랑 견적서, 초록 청구서)')
         today = QPushButton('오늘')

@@ -135,10 +135,16 @@ def cargo_weight_merge(run: Run):
     ws = wb.active
     ws.title = 'Sheet1'
     _write_rows(ws, [SHIPPING_HEADER], 1, len(SHIPPING_HEADER))
-    rows = [r[:len(SHIPPING_HEADER)] for r in cargo_rows(run)]
+    rows = weight_merged_rows(run)
     for r in rows:
         r[C_CONTRACT_NO] = None      # Gmarket체결번호 stays empty in the carrier layout
-    # the weights of all lines of an order go on its first line, the other lines get 0
+    _write_rows(ws, rows, 2, len(SHIPPING_HEADER))
+    return wb
+
+
+def weight_merged_rows(run: Run):
+    """적하목록 rows where the weights of all lines of an order go on its first line, the other lines get 0."""
+    rows = [r[:len(SHIPPING_HEADER)] for r in cargo_rows(run)]
     i = 0
     for s in run.shipments:
         n = len(s.lines)
@@ -146,7 +152,61 @@ def cargo_weight_merge(run: Run):
         for r in rows[i + 1:i + n]:
             r[C_WEIGHT] = 0
         i += n
-    _write_rows(ws, rows, 2, len(SHIPPING_HEADER))
+    return rows
+
+
+# CR 업로드 양식 (기본): the 무게병합 rows in the column order of CR's upload sheet, like 02_CR_Lx 변환 양식.
+CR_HEADER = ['순번', '박스코드', '송장번호', 'EM_송하인', '송하인연락처', '송하인주소', '관리번호', '수하인', '수하인연락처',
+             '수하인휴대폰', '우편번호', '수하인주소', '상세주소', '주민번호', '베송메모', '1', 'A', '무게', '단위', '해외링크',
+             '판매링크', 'HS_1', '상품명', '브랜드명', '판매가', '수량', 'A', None, 'Euromall GmbH', None, None, None, None,
+             '관리번호']
+CR_WIDTHS = {'A': 12, 'B': 10, 'C': 16, 'D': 14, 'G': 24, 'H': 12, 'I': 14, 'J': 14, 'K': 8, 'L': 40, 'M': 20,
+             'N': 16, 'R': 7, 'S': 6, 'V': 10, 'W': 60, 'X': 16, 'Y': 9, 'Z': 6, 'AC': 15, 'AH': 24}
+
+
+def _zip5(v):
+    t = text(v)
+    return t.zfill(5) if t.isdigit() and len(t) < 5 else t
+
+
+def cr_upload(run: Run):
+    return cr_upload_book(weight_merged_rows(run), run.settings.work_date)
+
+
+def cr_upload_book(rows, work_date):
+    from openpyxl.styles import PatternFill, Alignment, Font
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'CR_변환'
+    head_fill = PatternFill('solid', fgColor='92D050')
+    for j, h in enumerate(CR_HEADER, 1):
+        c = ws.cell(1, j, h)
+        c.fill = head_fill
+        c.alignment = Alignment(horizontal='center')
+        c.font = Font(name='맑은 고딕', size=11)
+    seen = set()
+    r = 2
+    for row in rows:
+        hawb = text(row[C_HAWB])
+        first = hawb not in seen
+        seen.add(hawb)
+        g = (lambda k: row[k]) if first else (lambda k: None)
+        vals = [work_date, text(row[C_BOX_CODE]) or None, hawb if first else None,
+                ('EM_' + text(row[2])) if first else None, g(3), g(4), g(5), g(8), g(9), g(10),
+                _zip5(row[11]) if first else None, g(12), g(13), g(14), g(15),
+                '1' if first else None, 'A' if first else None, g(C_WEIGHT), g(23),
+                row[C_CONTRACT_NO], row[18], text(row[C_HS]) or None, row[28], row[C_BRAND], row[C_UNIT_PRICE],
+                row[C_QTY], 'A', None, 'Euromall GmbH', None, None, None, None, row[5]]
+        for j, v in enumerate(vals, 1):
+            if v not in (None, ''):
+                ws.cell(r, j, v)
+        ws.cell(r, 1).number_format = 'yy-mm-dd'
+        for col in (2, 3, 11, 22, 24):
+            ws.cell(r, col).number_format = '@'
+        r += 1
+    for k, w in CR_WIDTHS.items():
+        ws.column_dimensions[k].width = w
+    ws.freeze_panes = 'A2'
     return wb
 
 

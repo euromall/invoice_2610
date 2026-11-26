@@ -117,6 +117,7 @@ def generate(run: Run, paths: Paths, english_address: Optional[Callable[[str], s
     save(lists.cargo_list(run, paths.template('CargoList')), f'적하목록 취합_{date}')
     if s.make_cargo_weight_merge:
         save(lists.cargo_weight_merge(run), f'적하목록 취합_무게병합_{date}')
+        save(lists.cr_upload(run), f'CR_업로드_기본_{date}')
     save(lists.packing(run, paths.template('Packing')), f'포장리스트_{date}')
     save(lists.packing_list(run, paths.template('PackingList')), f'PackingList_{date}')
 
