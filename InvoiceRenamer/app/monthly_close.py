@@ -1411,7 +1411,7 @@ class MonthlyClose:
         hints = (
             r"transaction date|purchase date|kaufdatum|buchungstag|buchungsdatum|umsatzdatum|datum|거래일|이용일|사용일|date",
             r"merchant|händler|empfänger|auftraggeber|beschreibung|verwendungszweck|buchungstext|가맹점|사용처|description",
-            r"amount|betrag|금액|umsatz",
+            r"amount|betrag|금액|\bumsatz\b",  # not ‘Umsatzdatum’
             r"currency|währung|통화",
         )
         for index, label in enumerate(labels):
@@ -1419,7 +1419,9 @@ class MonthlyClose:
             if index < 4:
                 values = columns if index != 3 else ["기본 통화 사용", *columns]
                 entry = ttk.Combobox(form, values=values, state="readonly", width=39)
-                guess = next((i for i, name in enumerate(header) if re.search(hints[index], name, re.I)), None)
+                taken = {choice.current() - (pos == 3) for pos, choice in enumerate(choices)}
+                guess = next((i for i, name in enumerate(header)
+                              if re.search(hints[index], name, re.I) and i not in taken), None)
                 if guess is not None:
                     entry.current(guess + (index == 3))
                 elif index == 3:
@@ -1475,8 +1477,18 @@ class MonthlyClose:
             primary = [choice.current() for choice in choices[:3]]
             currency_index = choices[3].current() - 1
             default = choices[4].get().strip().upper()
-            if -1 in primary or len(set(primary)) != 3 or currency_index in primary or not re.fullmatch(r"[A-Z]{3}", default):
-                messagebox.showerror("열 지정 확인", "거래일·가맹점·금액에 서로 다른 열을 고르고 기본 통화를 입력하세요.", parent=dialog)
+            problems = [f"‘{labels[index]}’이 비어 있어요. 목록에서 열을 고르세요." for index, value in enumerate(primary) if value == -1]
+            chosen = [value for value in primary if value != -1]
+            for value in sorted(set(chosen)):
+                same = [labels[index] for index, item in enumerate(primary) if item == value]
+                if len(same) > 1:
+                    problems.append(f"{' · '.join(same)}에 같은 열({columns[value]})을 골랐어요. 서로 다른 열을 고르세요.")
+            if currency_index >= 0 and currency_index in primary:
+                problems.append(f"‘통화 열’이 다른 칸과 같은 열({columns[currency_index]})이에요. ‘기본 통화 사용’을 고르거나 다른 열을 고르세요.")
+            if not re.fullmatch(r"[A-Z]{3}", default):
+                problems.append("‘기본 통화’에 EUR처럼 세 글자를 적으세요.")
+            if problems:
+                messagebox.showerror("열 지정 확인", "\n".join(problems) + "\n\n파일의 열: " + ", ".join(columns[:12]), parent=dialog)
                 return
             account = choices[6].get().strip()
             period = "" if choices[7].current() == 0 else choices[7].get().strip()
