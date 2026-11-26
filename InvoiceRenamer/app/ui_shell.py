@@ -120,6 +120,66 @@ class Shell:
         self.show(1)
         root.after(300, lambda: attach_help(root))  # mouse-over explanations
         self.update_overview()
+        # v1.10.1: files put into the work folder with Explorer are picked up when the window is used again
+        self.folder_seen = None
+        self.folder_check_job = None
+        if not practice_folder:
+            root.after(1500, self.remember_folder)
+            root.bind("<FocusIn>", self.schedule_folder_check, add="+")
+            root.bind("<F5>", lambda event: self.check_folder(force=True), add="+")
+
+    # Work folder watching ---------------------------------------------
+    def folder_signature(self):
+        folder = self.app.folder
+        if folder is None or not Path(folder).is_dir():
+            return None
+        from invoice_renamer import evidence_in
+        try:
+            return frozenset((str(path.relative_to(folder)), path.stat().st_size, int(path.stat().st_mtime))
+                             for path in evidence_in(folder))
+        except OSError:
+            return None
+
+    def remember_folder(self):
+        self.folder_seen = self.folder_signature()
+
+    def schedule_folder_check(self, event):
+        if event.widget is not self.root:
+            return
+        if self.folder_check_job:
+            self.root.after_cancel(self.folder_check_job)
+        self.folder_check_job = self.root.after(400, self.check_folder)
+
+    def check_folder(self, force=False):
+        """Read the work folder again when files were added, removed or changed outside the program."""
+        self.folder_check_job = None
+        if any(type(widget).__name__ == "InlineDialog" for widget in self.root.winfo_children()) \
+                or self.root.place_slaves() or self.root.grab_current() is not None:
+            return  # a panel or progress overlay is open: do not change the lists under it
+        signature = self.folder_signature()
+        if signature is None or (signature == self.folder_seen and not force):
+            return
+        before = self.folder_seen or frozenset()
+        added = len({name for name, *_ in signature} - {name for name, *_ in before})
+        self.folder_seen = signature
+        if self.current == 1:
+            self.app.load_folder()
+            status = self.app.status
+        elif self.close is not None:
+            self.close.pdfs_loaded = False
+            if self.current == 3 and self.close.folder is not None:
+                self.close.load_pdfs(self.close.folder)
+                self.close.refresh()
+            status = self.close.status
+        else:
+            return
+        self.folder_seen = self.folder_signature()  # names the program changed while reading count as seen
+        if force:
+            status.set("작업 폴더를 다시 읽었어요.")
+        elif added:
+            status.set(f"작업 폴더에 새로 넣은 파일 {added}개를 읽었어요.")
+        else:
+            status.set("작업 폴더의 파일이 바뀌어 다시 읽었어요.")
 
     # Header -----------------------------------------------------------
     def build_header(self):
