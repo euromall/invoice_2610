@@ -106,9 +106,12 @@ class Shell:
         root.report_callback_exception = self.app.report_callback_error
         splash_text("작업 기록을 불러오고 있어요…")
         try:
-            self.close = MonthlyClose(root, self.app.folder, practice_folder, container=self.page2,
+            self.close = MonthlyClose(root, None, practice_folder, container=self.page2,
                                       on_change=self.update_overview)
             self.close.navigate = self.show
+            if not practice_folder and self.close.folder is None and self.app.folder is not None:
+                self.close.folder = self.app.folder  # statements are filed into the work folder; PDFs are read in step 3
+            self.app.on_work_folder = self.work_folder_changed
         except RuntimeError:
             self.close = None
         self.build_sidebar()
@@ -235,11 +238,18 @@ class Shell:
             if number == 3 and self.close.folder is None and self.app.folder is not None:
                 self.close.load_pdfs(self.app.folder)
                 self.close.file_loaded_statements()
-            elif number == 3 and self.close.folder is not None and previous == 1:
+            elif number == 3 and self.close.folder is not None and (previous == 1 or not self.close.pdfs_loaded):
                 self.close.load_pdfs(self.close.folder)  # pick up names changed in step 1
             self.close.show_step(number)
             self.page2.pack(fill="both", expand=True)
             self.status_bar.configure(textvariable=self.close.status)
+        self.update_overview()
+
+    def work_folder_changed(self, folder):
+        if self.close is not None:
+            self.close.folder = folder
+            self.close.pdfs_loaded = False
+            self.close.file_loaded_statements()
         self.update_overview()
 
     def update_overview(self):

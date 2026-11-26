@@ -803,6 +803,101 @@ def move_without_overwrite(source, target):
             raise
 
 
+def settings_path():
+    return user_data_folder() / "settings.json"
+
+
+def load_settings():
+    try:
+        data = json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_settings(changes):
+    data = {**load_settings(), **changes}
+    path = settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def default_work_folder():
+    documents = Path.home() / "Documents"
+    return (documents if documents.is_dir() else Path.home()) / "월마감"
+
+
+def work_folder():
+    """The fixed folder where invoices and statements are kept (v1.7)."""
+    saved = load_settings().get("work_folder")
+    return Path(saved) if isinstance(saved, str) and saved.strip() else default_work_folder()
+
+
+def free_name(folder, name, taken=()):
+    """name, or ‘name (2).pdf’ etc. when that name is already used in folder."""
+    candidate = Path(name)
+    index = 2
+    while (folder / candidate.name).exists() or (folder / candidate.with_suffix(".md").name).exists() \
+            or candidate.name.casefold() in taken:
+        candidate = Path(f"{Path(name).stem} ({index}){Path(name).suffix}")
+        index += 1
+    return folder / candidate.name
+
+
+def move_across(source, target):
+    """move_evidence that also works between drives (copy, check, then delete the original)."""
+    try:
+        move_evidence(source, target)
+        return
+    except OSError:
+        if target.exists() or not source.is_file():
+            raise
+    checksum = digest(source)
+    shutil.copy2(source, target)
+    try:
+        if digest(target) != checksum:
+            raise OSError("복사한 파일 내용이 원본과 달라요.")
+        source.unlink()
+    except OSError:
+        target.unlink(missing_ok=True)
+        raise
+    move_sidecar(source, target)
+
+
+def import_evidence(sources, folder):
+    """Move picked evidence files into the work folder. Returns (history for undo, already there, errors)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    history, inside, errors, taken = [], 0, [], set()
+    root = folder.resolve()
+    for source in sources:
+        source = Path(source)
+        try:
+            if source.is_symlink() or not source.is_file() or source.suffix.lower() not in RENAMER_EXTENSIONS:
+                continue
+            if source.resolve().is_relative_to(root):
+                inside += 1
+                continue
+            target = free_name(folder, source.name, taken)
+            taken.add(target.name.casefold())
+            checksum = digest(source)
+            move_across(source, target)
+        except OSError as error:
+            errors.append(f"{source.name}: {error}")
+            continue
+        history.append((source, target, checksum))
+    return history, inside, errors
+
+
+def evidence_in(folder):
+    """Evidence files in a folder and its subfolders, leaving out folders the program keeps apart."""
+    skip = {EXCLUDED_FOLDER, STATEMENT_FOLDER, DUPLICATE_FOLDER}
+    return sorted(path for path in Path(folder).rglob("*")
+                  if path.suffix.lower() in RENAMER_EXTENSIONS and path.is_file() and not path.is_symlink()
+                  and not skip & set(path.relative_to(folder).parts[:-1]))
+
+
 def digest(path):
     checksum = hashlib.sha256()
     with path.open("rb") as stream:
@@ -943,6 +1038,7 @@ class App:
         self.folder = None
         self.practice_folder = practice_folder
         self.on_change = on_change
+        self.on_work_folder = None  # set by the main window to keep steps 2-5 on the same work folder
         if container is None:
             title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
             root.title(f"[연습 모드] {title}" if practice_folder else title)
@@ -953,18 +1049,22 @@ class App:
         head.pack(fill="x")
         ttk.Label(head, text="1. 증빙 모으기·정리", style="Title.TLabel", font=FONT_TITLE).pack(anchor="w")
         ttk.Label(head, style="Muted.TLabel", text=(
-            "인보이스 폴더를 열면 발행일·업체명·총액·인보이스 번호를 읽어요. "
-            "빨간 행은 필수 항목을 못 읽은 파일, 회색 행은 인보이스가 아닌 것 같은 파일이에요.")).pack(anchor="w")
+            "가져온 파일은 작업 폴더로 옮겨 발행일·업체명·총액·번호를 읽어요. "
+            "빨간 행은 필수 누락, 회색 행은 인보이스가 아닌 것 같은 파일이에요.")).pack(anchor="w")
         toolbar = ttk.Frame(container, padding=(18, 8, 18, 4))
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="폴더 열기", command=self.choose).pack(side="left")
-        ttk.Button(toolbar, text="새 인보이스 (미분류)", command=self.open_inbox).pack(side="left", padx=6)
+        ttk.Button(toolbar, text="파일 가져오기", command=self.import_files).pack(side="left")
+        ttk.Button(toolbar, text="폴더 가져오기", command=self.import_folder).pack(side="left", padx=6)
         ttk.Button(toolbar, text="편집", command=self.edit).pack(side="left", padx=6)
         self.apply_button = ttk.Button(toolbar, text="파일명 변경", command=self.apply, style="Primary.TButton")
         self.apply_button.pack(side="left", padx=6)
         ttk.Button(toolbar, text="원본·내용 보기", command=self.view_contents).pack(side="left", padx=6)
         ttk.Button(toolbar, text="중복 정리", command=self.clean_duplicates).pack(side="left", padx=6)
         more_menu(toolbar, "더보기 ▾", [
+            ("작업 폴더 열기 (탐색기)", self.reveal_work_folder),
+            ("작업 폴더 바꾸기", self.change_work_folder),
+            ("다른 폴더 열기 (옮기지 않고 보기)", self.choose),
+            ("새 인보이스 (미분류)", self.open_inbox),
             ("배운 인보이스 양식", self.manage_learned),
             ("인보이스 아닌 파일 → 제외 폴더", self.exclude_selected),
             ("마크다운 다시 만들기", self.save_markdown),
@@ -980,7 +1080,7 @@ class App:
         for label in ("전체", "필수 누락", "인보이스 아님 의심", "변경 가능"):
             ttk.Radiobutton(options, text=label, value=label, variable=self.view, command=self.refresh,
                             style="Chip.TRadiobutton").pack(side="left", padx=(8, 0))
-        self.status = tk.StringVar(value="폴더를 선택하세요. 여러 행은 Ctrl 또는 Shift로 선택할 수 있어요.")
+        self.status = tk.StringVar(value="‘파일 가져오기’나 ‘폴더 가져오기’로 인보이스를 작업 폴더에 넣으세요. 여러 행은 Ctrl 또는 Shift로 선택할 수 있어요.")
         if container is root:
             ttk.Label(root, textvariable=self.status, style="Status.TLabel").pack(fill="x", side="bottom")
         frame = ttk.Frame(container, padding=(18, 0, 18, 8))
@@ -998,6 +1098,9 @@ class App:
         bar.pack(side="right", fill="y")
         self.table.pack(fill="both", expand=True)
         self.table.bind("<Double-1>", lambda event: self.edit())
+        if not practice_folder:
+            self.folder = work_folder()  # v1.7: invoices live in one fixed work folder
+            root.after(150, lambda: self.folder == work_folder() and not self.rows and self.use_work_folder())
         self.table.bind("<Control-a>", lambda event: self.table.selection_set(self.table.get_children()))
         self.table.bind("<<TreeviewSelect>>", lambda event: self.show_checks())
         self.table.bind("<Button-1>", self.click_check, add=True)
@@ -1101,6 +1204,97 @@ class App:
         self.load_folder()
         self.table.selection_set(tuple(self.targets))
         self.status.set(f"{inbox} · 정리 가능한 {len(self.targets)}개 선택됨 · 경로 확인 후 ‘정리하기 (미분류)’")
+
+    def use_work_folder(self, load=True):
+        """Open the fixed work folder (created when missing)."""
+        folder = work_folder()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self.status.set(f"작업 폴더를 만들지 못했어요: {folder} ({error}) · 더보기 → ‘작업 폴더 바꾸기’")
+            return False
+        if self.folder != folder:
+            self.rows.clear()
+        self.folder = folder
+        self.inbox_mode = False
+        if load:
+            self.load_folder()
+        return True
+
+    def import_files(self, names=None):
+        if self.practice_folder:
+            self.notice("연습 모드에서는 파일을 가져오지 않아요. 예시 증빙으로 연습하세요.")
+            return
+        names = names or filedialog.askopenfilenames(parent=self.root, title="작업 폴더로 옮길 인보이스 고르기 (여러 개 가능)",
+                                                    filetypes=[("인보이스 (PDF·사진·XML)", "*.pdf *.jpg *.jpeg *.png *.xml"),
+                                                               ("모든 파일", "*.*")])
+        if names:
+            self.finish_import([Path(name) for name in names])
+
+    def import_folder(self, selected=None):
+        if self.practice_folder:
+            self.notice("연습 모드에서는 파일을 가져오지 않아요. 예시 증빙으로 연습하세요.")
+            return
+        selected = selected or filedialog.askdirectory(parent=self.root, title="인보이스가 든 폴더 고르기 (하위 폴더 포함, 작업 폴더로 옮겨요)")
+        if not selected:
+            return
+        source, target = Path(selected).resolve(), work_folder().resolve()
+        if source.is_relative_to(target) or target.is_relative_to(source):
+            self.notice("작업 폴더이거나 작업 폴더를 품은 폴더예요. 다른 폴더를 고르세요.", kind="warn")
+            return
+        try:
+            files = evidence_in(source)
+        except OSError as error:
+            self.notice(f"폴더를 읽지 못했어요: {error}", kind="error")
+            return
+        if not files:
+            self.notice("고른 폴더에 PDF·사진·XML 인보이스가 없어요.")
+            return
+        self.finish_import(files)
+
+    def finish_import(self, files):
+        if not self.use_work_folder(load=False):
+            return
+        history, inside, errors = import_evidence(files, self.folder)
+        if history:
+            self.last_moves = history
+        self.load_folder()
+        lines = [f"{len(history)}개를 작업 폴더로 옮겼어요.\n{self.folder}"]
+        if inside:
+            lines.append(f"이미 작업 폴더 안에 있는 파일 {inside}개는 그대로 뒀어요.")
+        if errors:
+            lines.append(f"옮기지 못한 파일 {len(errors)}개: " + " / ".join(errors[:3]))
+        if history:
+            lines.append("빨간 행은 편집에서 고치고, 체크한 뒤 ‘파일명 변경’을 누르세요.\n원래 자리로 돌리려면 더보기 → ‘정리 되돌리기’.")
+        self.notice("\n".join(lines), kind="warn" if errors else "info", title="가져오기 완료")
+        if self.on_change:
+            self.on_change()
+
+    def reveal_work_folder(self):
+        if not self.use_work_folder(load=self.folder != work_folder()):
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(self.folder)
+            else:
+                subprocess.Popen(["xdg-open", str(self.folder)])
+        except OSError as error:
+            self.notice(f"탐색기를 열지 못했어요: {error}\n{self.folder}", kind="warn")
+
+    def change_work_folder(self):
+        selected = filedialog.askdirectory(parent=self.root, title="새 작업 폴더 고르기", initialdir=str(work_folder()))
+        if not selected:
+            return
+        try:
+            save_settings({"work_folder": str(Path(selected))})
+        except OSError as error:
+            self.notice(f"설정을 저장하지 못했어요: {error}", kind="error")
+            return
+        self.use_work_folder()
+        self.notice(f"작업 폴더를 바꿨어요.\n{self.folder}\n이전 작업 폴더의 파일은 옮기지 않았어요. 필요하면 ‘폴더 가져오기’로 옮기세요.",
+                    title="작업 폴더")
+        if self.on_work_folder:
+            self.on_work_folder(self.folder)
 
     def choose(self):
         if self.practice_folder:

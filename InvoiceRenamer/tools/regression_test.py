@@ -13,7 +13,7 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 from invoice_renamer import (  # noqa: E402
-    App, EditsFileError, duplicate_groups, move_evidence, write_markdown, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
+    App, EditsFileError, duplicate_groups, free_name, import_evidence, work_folder, move_evidence, write_markdown, filename_fields, invoice_likeness, invoice_fields, load_invoice_edits, original_stem, proposed_name,
     read_invoice_details, remember_original_name, reserve_name,
 )
 from monthly_close import MonthlyClose, package_part, Transaction, decode_statement, german_import_error, index_pdfs, numbered_statement, read_statement_pdf  # noqa: E402
@@ -258,7 +258,24 @@ def run():
             check(learned_formats.learn("Shop\n", "b.pdf", ("2026-01-01", "Nowhere AG", ""), "")[0] is None, "Seller must be printed")
             check(learned_formats.parse_date("5. März 2026") == "2026-03-05" and learned_formats.parse_date("March 5, 2026") == "2026-03-05",
                   "Month-name dates")
-    print("PASS: v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+
+        # 13. v1.7: picked files are moved into the fixed work folder without overwriting; undo data is kept.
+        with patch.dict("os.environ", {"LOCALAPPDATA": str(root / "appdata2")}):
+            check(work_folder().name == "월마감", "Default work folder")
+            inbox, desk = root / "work13", root / "desk13"
+            (desk / "sub").mkdir(parents=True)
+            inbox.mkdir()
+            (inbox / "a.pdf").write_bytes(b"%PDF-1.4 old")
+            (desk / "a.pdf").write_bytes(b"%PDF-1.4 new")
+            (desk / "sub" / "a.pdf").write_bytes(b"%PDF-1.4 newer")
+            (desk / "note.txt").write_text("x")
+            history, inside, errors = import_evidence([desk / "a.pdf", desk / "sub" / "a.pdf", desk / "note.txt", inbox / "a.pdf"], inbox)
+            check(sorted(path.name for path in inbox.iterdir()) == ["a (2).pdf", "a (3).pdf", "a.pdf"] and inside == 1 and not errors,
+                  f"Import without overwrite: {sorted(path.name for path in inbox.iterdir())} {inside} {errors}")
+            check((inbox / "a.pdf").read_bytes() == b"%PDF-1.4 old" and (desk / "note.txt").exists() and len(history) == 2,
+                  "Existing file kept, non-evidence left behind")
+            check(free_name(inbox, "b.pdf").name == "b.pdf", "Free name")
+    print("PASS: v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":

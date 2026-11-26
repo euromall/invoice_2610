@@ -925,6 +925,7 @@ class MonthlyClose:
             self.root.geometry("1160x720")
             container = self.root
         self.folder = folder
+        self.pdfs_loaded = False
         self.practice_folder = practice_folder
         self.transactions = {}
         self.statement_sources = {}
@@ -2026,6 +2027,7 @@ class MonthlyClose:
             messagebox.showerror("PDF 폴더 열기 실패", str(error), parent=self.root)
             return
         self.folder = folder
+        self.pdfs_loaded = True
         self.by_key = {}
         hashes = Counter(item.key for item in self.invoices)
         numbers = defaultdict(set)
