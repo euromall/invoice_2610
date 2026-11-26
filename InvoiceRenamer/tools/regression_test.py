@@ -63,7 +63,16 @@ def run():
     check(invoice_fields(["Gesamtbetrag 58,39 EUR"])[2] == "58.39 EUR", "Gesamtbetrag")
     check(invoice_fields(["Zahlbetrag: 1.234,56 €"])[2] == "1234.56 EUR", "Zahlbetrag")
     check(invoice_fields(["Summe 50,00 EUR\nBruttobetrag 59,50 EUR"])[2] == "59.50 EUR", "Primary label priority")
-    check(invoice_fields(["Summe 50,00 EUR\nGesamtbetrag 59,50 EUR"])[2] == "", "Ambiguous fallback stays unresolved")
+    check(invoice_fields(["Summe 50,00 EUR\nGesamtbetrag 59,50 EUR"])[2] == "59.50 EUR", "v1.6: Gesamtbetrag beats weak Summe")
+    check(invoice_fields(["Zahlbetrag 10,00 EUR\nGesamtbetrag 12,00 EUR"])[2] == "", "Ambiguous fallback stays unresolved")
+    check(invoice_fields(["USt. Gesamt\n5,59 €\nZahlbetrag\n34,99 €"])[2] == "34.99 EUR", "v1.6: VAT ‘Gesamt’ line ignored")
+    # v1.6 common seller and date rules (synthetic text shaped like real invoices).
+    check(invoice_fields(["Verkauft von Muster Shop GmbH\nRechnungsdatum\n/Lieferdatum 02 Juli 2026"])[:2] == ("2026-07-02", "Muster Shop GmbH"),
+          "Marketplace seller and month-name date")
+    check(invoice_fields(["Muster Energie GmbH, Postfach 11 07 61, 64222 Darmstadt\nKunde GmbH\n   Dienstag, 30. Mai 2023"])[:2]
+          == ("2023-05-30", "Muster Energie GmbH"), "Sender line and weekday date")
+    check(invoice_fields(["Beispiel Apotheke - Hauptstraße 16 - 95152 Selbitz"])[1] == "Beispiel Apotheke", "Sender line without legal form")
+    check(invoice_fields(["Gesamtbetrag 1.122,04 Euro"])[2] == "1122.04 EUR", "Euro spelled out")
 
     # 2. German import error keeps the amounts.
     message = german_import_error("검산 불일치 · 계산 잔액 100.00 / 원본 120.50 EUR")
@@ -230,7 +239,26 @@ def run():
         check(write_markdown(moving / "other.pdf", "# 인보이스\n").name == "other_2.md", "User Markdown never overwritten")
         check(package_part("Kontoauszuege/01_x_nummeriert.pdf") == "nummeriert" and package_part("Belege/2026-11/a.pdf") == "Belege"
               and package_part("03_Offene_Posten.csv") == "03_Offene_Posten.csv", "ZIP part names")
-    print("PASS: v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+
+        # 12. v1.6: a seller layout learned from one correction reads the next invoice of that seller.
+        import learned_formats
+        with patch.dict("os.environ", {"LOCALAPPDATA": str(root / "appdata")}):
+            first = ("Amazon EU S.a.r.l.\nTax Invoice\nBestelldatum 02.11.2026\nRechnungsdatum / Lieferdatum\n05.11.2026\n"
+                     "Rechnungsnummer DE6AB12CD3EF\nZwischensumme 10,00 €\nZahlbetrag 11,90 €\n")
+            entry, reason = learned_formats.learn(first, "a.pdf", ("2026-11-05", "Amazon EU S.a.r.l.", "11.90 EUR"), "DE6AB12CD3EF")
+            check(entry and not reason, f"Layout learned: {reason}")
+            check(entry["labels"] == {"date": "Rechnungsdatum Lieferdatum", "total": "Zahlbetrag", "number": "Rechnungsnummer"},
+                  f"Learned labels: {entry['labels']}")
+            second = ("Amazon EU S.a.r.l.\nTax Invoice\nBestelldatum 20.10.2026\nRechnungsdatum / Lieferdatum\n24.10.2026\n"
+                      "Rechnungsnummer DE9XY88ZZ1\nZwischensumme 100,00 €\nZahlbetrag 1.234,50 €\n")
+            fields, number, marker = learned_formats.apply(second, ("", "", ""), "")
+            check(fields == ("2026-10-24", "Amazon EU S.a.r.l.", "1234.50 EUR") and number == "DE9XY88ZZ1" and marker,
+                  f"Learned layout applied: {fields} {number} {marker}")
+            check(learned_formats.apply("Other Shop GmbH\nDatum 01.01.2026", ("", "", ""), "")[2] == "", "Other sellers untouched")
+            check(learned_formats.learn("Shop\n", "b.pdf", ("2026-01-01", "Nowhere AG", ""), "")[0] is None, "Seller must be printed")
+            check(learned_formats.parse_date("5. März 2026") == "2026-03-05" and learned_formats.parse_date("March 5, 2026") == "2026-03-05",
+                  "Month-name dates")
+    print("PASS: v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":

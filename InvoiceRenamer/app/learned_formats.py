@@ -1,0 +1,197 @@
+"""Per-seller invoice layouts learned from one manual correction.
+
+When the user corrects an invoice in step 1, the words standing in front of the issue date, the total
+and the invoice number are remembered together with a marker text (the seller name as printed).
+Later invoices that contain the marker are read with those words, so each new seller needs to be
+corrected only once. Stored in %LOCALAPPDATA%\\InvoiceRenamer\\learned-formats.json.
+"""
+
+from datetime import date
+from decimal import Decimal, InvalidOperation
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+
+GERMAN_MONTHS = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September",
+                 "Oktober", "November", "Dezember")
+ENGLISH_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September",
+                  "October", "November", "December")
+MONTH_NAMES = {name.casefold(): index for names in (GERMAN_MONTHS, ENGLISH_MONTHS)
+               for index, name in enumerate(names, 1)}
+MONTH_NAMES.update({name[:3].casefold(): index for names in (GERMAN_MONTHS, ENGLISH_MONTHS)
+                    for index, name in enumerate(names, 1)})
+MONTH_NAMES["mär"] = MONTH_NAMES["maerz"] = 3
+MONTH_WORD = r"[A-Za-zÄÖÜäöü]{3,9}\.?"
+DATE_TOKEN = (rf"\d{{4}}-\d{{1,2}}-\d{{1,2}}|\d{{1,2}}[./]\d{{1,2}}[./]\d{{2,4}}|"
+              rf"\d{{1,2}}\.?\s+{MONTH_WORD}\s+\d{{4}}|{MONTH_WORD}\s+\d{{1,2}},?\s+\d{{4}}")
+AMOUNT_TOKEN = r"-?\d{1,3}(?:[.,'  ]\d{3})*[.,]\d{2}|-?\d+[.,]\d{2}"
+CURRENCIES = {"€": "EUR", "EUR": "EUR", "$": "USD", "USD": "USD", "£": "GBP", "GBP": "GBP", "CHF": "CHF"}
+
+
+def storage_path():
+    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "InvoiceRenamer" / "learned-formats.json"
+
+
+def load_formats():
+    path = storage_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    except (OSError, ValueError):
+        return []
+    return [item for item in data if isinstance(item, dict) and item.get("marker")]
+
+
+def save_formats(formats):
+    path = storage_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False) as output:
+            temporary = Path(output.name)
+            json.dump(formats, output, ensure_ascii=False, indent=2)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def parse_date(token):
+    token = " ".join(token.replace(",", " ").split())
+    numeric = re.fullmatch(r"(\d{1,2})[./](\d{1,2})[./](\d{2,4})", token)
+    try:
+        if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", token):
+            return date(*map(int, token.split("-"))).isoformat()
+        if numeric:
+            day, month, year = map(int, numeric.groups())
+            return date(year + 2000 if year < 100 else year, month, day).isoformat()
+        named = re.fullmatch(r"(\d{1,2})\.?\s+(\S+?)\.?\s+(\d{4})", token)
+        if named and named[2].casefold() in MONTH_NAMES:
+            return date(int(named[3]), MONTH_NAMES[named[2].casefold()], int(named[1])).isoformat()
+        named = re.fullmatch(r"(\S+?)\.?\s+(\d{1,2})\s+(\d{4})", token)
+        if named and named[1].casefold() in MONTH_NAMES:
+            return date(int(named[3]), MONTH_NAMES[named[1].casefold()], int(named[2])).isoformat()
+    except ValueError:
+        return ""
+    return ""
+
+
+def parse_amount(token):
+    raw = re.sub(r"[\s' ]", "", token)
+    cents = re.search(r"[.,](\d{2})$", raw)
+    if not cents:
+        return None
+    whole = re.sub(r"[^\d-]", "", raw[:cents.start()])
+    try:
+        return Decimal(f"{whole}.{cents[1]}")
+    except InvalidOperation:
+        return None
+
+
+def date_spellings(value):
+    day = date.fromisoformat(value)
+    return {day.strftime("%d.%m.%Y"), f"{day.day}.{day.month}.{day.year}", day.strftime("%d/%m/%Y"),
+            day.isoformat(), day.strftime("%d.%m.%y"),
+            f"{day.day}. {GERMAN_MONTHS[day.month - 1]} {day.year}", f"{day.day} {GERMAN_MONTHS[day.month - 1]} {day.year}",
+            f"{day.strftime('%d')}. {GERMAN_MONTHS[day.month - 1]} {day.year}",
+            f"{ENGLISH_MONTHS[day.month - 1]} {day.day}, {day.year}", f"{day.day} {ENGLISH_MONTHS[day.month - 1]} {day.year}"}
+
+
+def amount_spellings(amount):
+    plain = f"{amount:.2f}"
+    grouped = f"{amount:,.2f}"
+    return {plain.replace(".", ","), plain, grouped, grouped.replace(",", "_").replace(".", ",").replace("_", ".")}
+
+
+def label_before(text, start):
+    """Words in front of a value: same line if there are any, else the previous non-empty line."""
+    line_start = text.rfind("\n", 0, start) + 1
+    label = text[line_start:start]
+    if not re.search(r"[^\W\d_]", label):
+        previous = text[:line_start].rstrip("\n").splitlines()
+        label = next((line for line in reversed(previous) if line.strip()), "")
+    label = re.sub(r"[\s:：#€$£-]+$", "", label)
+    words = re.findall(r"[^\W\d_][\w./()-]*", label)
+    return " ".join(words[-3:])
+
+
+def find_label(text, spellings, last=False):
+    hits = []
+    for spelling in spellings:
+        for match in re.finditer(rf"(?<![\d.,]){re.escape(spelling)}(?![\d])", text):
+            label = label_before(text, match.start())
+            if label:
+                hits.append((match.start(), label))
+    if not hits:
+        return ""
+    hits.sort()
+    return hits[-1][1] if last else hits[0][1]
+
+
+def pick_marker(text, seller):
+    folded = text.casefold()
+    if seller and seller.casefold() in folded:
+        return seller
+    for word in sorted(re.findall(r"[^\W\d_]{4,}", seller or ""), key=len, reverse=True):
+        if word.casefold() in folded and word.casefold() not in ("gmbh", "rechnung", "invoice"):
+            return word
+    return ""
+
+
+def learn(text, filename, fields, number):
+    """Remember the layout of one corrected invoice. Returns the stored entry or None (and why)."""
+    issued, seller, total = fields
+    marker = pick_marker(text, seller)
+    if not marker:
+        return None, "업체명이 PDF 안에 그대로 적혀 있지 않아 양식을 배우지 못했어요. PDF에 보이는 업체명으로 적어 주세요."
+    labels = {}
+    if issued:
+        labels["date"] = find_label(text, date_spellings(issued))
+    amount_text, _, currency = total.partition(" ")
+    amount = parse_amount(amount_text) if amount_text else None
+    if amount is not None:
+        labels["total"] = find_label(text, amount_spellings(abs(amount)), last=True)
+    if number:
+        labels["number"] = find_label(text, {number})
+    labels = {key: value for key, value in labels.items() if value}
+    if not labels:
+        return None, "PDF 안에서 입력한 값을 찾지 못해 양식을 배우지 못했어요."
+    entry = {"marker": marker, "seller": seller, "currency": currency or "EUR", "labels": labels,
+             "learned_from": filename, "at": date.today().isoformat()}
+    formats = [item for item in load_formats() if item["marker"].casefold() != marker.casefold()]
+    formats.append(entry)
+    save_formats(formats)
+    return entry, ""
+
+
+def label_pattern(label):
+    return r"[^\w\n]+".join(re.escape(word) for word in label.split())
+
+
+def value_after(text, label, token):
+    match = re.search(rf"(?i){label_pattern(label)}[^\S\n]*[:：#]?[^\S\n]*(?:[^\n]*?)(?:\n[^\S\n]*)?({token})", text)
+    return match[1] if match else ""
+
+
+def apply(text, fields, number):
+    """Fill fields from a learned layout whose marker is in the text. Returns (fields, number, seller name used)."""
+    folded = text.casefold()
+    for entry in load_formats():
+        if entry["marker"].casefold() not in folded:
+            continue
+        issued, seller, total = fields
+        labels = entry.get("labels", {})
+        if labels.get("date"):
+            issued = parse_date(value_after(text, labels["date"], DATE_TOKEN)) or issued
+        if labels.get("total"):
+            token = value_after(text, labels["total"], AMOUNT_TOKEN)
+            amount = parse_amount(token) if token else None
+            if amount is not None:
+                currency = entry.get("currency") or "EUR"
+                total = f"{amount:.0f} {currency}" if currency == "KRW" else f"{amount:.2f} {currency}"
+        if labels.get("number"):
+            found = value_after(text, labels["number"], r"[\w/-]*\d[\w/-]*")
+            number = found or number
+        return (issued, entry.get("seller") or seller, total), number, entry["marker"]
+    return fields, number, ""

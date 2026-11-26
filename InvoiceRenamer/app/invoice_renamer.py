@@ -16,6 +16,7 @@ from zipfile import ZipFile
 
 import pymupdf
 
+import learned_formats
 from release_info import VERSION, export_diagnostics, record_error
 from ui_theme import COLORS, FONT_BOLD, InlineDialog, show_notice
 
@@ -30,11 +31,25 @@ TOTAL_LABEL = (
 # Used only when none of the labels above yields an amount, so invoices that
 # were recognised before v1.1.1 keep the same result.
 TOTAL_LABEL_FALLBACK = (
-    r"Gesamtbetrag(?:\s+brutto)?|Gesamtsumme(?:\s+brutto)?|Bruttosumme|Rechnungssumme|Endsumme|"
-    r"Zahlbetrag|Zahlungsbetrag|zu\s+zahlender\s+Betrag|zu\s+zahlen|Gesamt|Summe(?:\s+brutto)?|"
-    r"Total\s+(?:due|amount)|Amount\s+due|Balance\s+due|Total"
+    r"Gesamtbetrag(?:\s+brutto)?|Gesamtsumme(?:\s+brutto)?|Bruttosumme|Rechnungssumme|Endsumme|Gesamtpreis|"
+    r"Zahlbetrag|Zahlungsbetrag|zu\s+zahlender\s+Betrag|zu\s+zahlen|"
+    r"Total\s+(?:due|amount)|Amount\s+due|Balance\s+due"
 )
-CURRENCY = r"EUR|USD|GBP|KRW|CHF|€|\$|£|₩|원"
+# v1.6: weaker words, used only when the fallback labels above find nothing (‘USt. Gesamt’ is often the VAT line).
+TOTAL_LABEL_WEAK = r"Gesamt|Summe(?:\s+brutto)?|Total"
+MONTH_WORDS = (r"Januar|Februar|März|Maerz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember|"
+               r"January|February|March|May|June|July|October|December|"
+               r"Jan|Feb|Mär|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Okt|Oct|Nov|Dez|Dec")
+LONG_DATE = rf"\d{{1,2}}\.?[ \t]+(?:{MONTH_WORDS})\.?[ \t]+\d{{4}}|(?:{MONTH_WORDS})\.?[ \t]+\d{{1,2}},?[ \t]+\d{{4}}"
+WEEKDAYS = r"Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag"
+LEGAL_FORM = (r"GmbH(?:[ \t]*&[ \t]*Co\.?[ \t]*(?:KGaA|KG|OHG))?|AG|KGaA|KG|OHG|UG(?:[ \t]*\(haftungsbeschränkt\))?|"
+              r"e\.[ \t]?K\.|GbR|SE|mbH|S\.?[ \t]?[àa]\.?[ \t]?r\.?[ \t]?l\.?|Ltd\.?|Limited|Inc\.?|LLC|B\.V\.|S\.A\.|S\.r\.l\.")
+# The sender's one-line address at the top of a letter, e.g. ‘ENTEGA Plus GmbH, Postfach 11 07 61, 64222 Darmstadt’.
+SENDER_LINES = (
+    rf"^[ \t]*((?:[^\W\d_][\w.&'’+-]*[ \t]+){{0,6}}?(?:{LEGAL_FORM}))(?![\w])[^\n]{{0,90}}?\b\d{{5}}[ \t]+[^\W\d_]",
+    r"^[ \t]*([^\W\d_][^\n,|]{2,50}?)[ \t]+[-–|][ \t]+[^\n]{3,60}?[ \t]\d+[ \t]?\w?[ \t]+[-–|][ \t]+\d{5}[ \t]+[^\W\d_]",
+)
+CURRENCY = r"Euro|EUR|USD|GBP|KRW|CHF|€|\$|£|₩|원"
 NUMBER = r"-?\d+(?:[.,'’\u00a0 ]\d{3})*(?:[.,]\d{2})?"
 MONEY = rf"(?:(?P<before>{CURRENCY})[ \t]*(?P<first>{NUMBER})|(?P<last>{NUMBER})[ \t]*(?P<after>{CURRENCY}))(?![\w.,])"
 VENDOR_LABEL = r"Lieferant|Verkäufer|Rechnungssteller|Supplier|Seller|공급자|업체명"
@@ -64,7 +79,7 @@ def normalized_date(value):
 
 def normalized_money(match):
     currency = (match["before"] or match["after"]).upper()
-    currency = {"€": "EUR", "£": "GBP", "₩": "KRW", "원": "KRW"}.get(currency, currency)
+    currency = {"€": "EUR", "EURO": "EUR", "£": "GBP", "₩": "KRW", "원": "KRW"}.get(currency, currency)
     raw = match["first"] or match["last"]
     cents = re.search(r"[.,](\d{2})$", raw)
     if cents:
@@ -99,15 +114,34 @@ def header_sellers():
     return patterns
 
 
+def any_date(value):
+    return normalized_date(value) or learned_formats.parse_date(value)
+
+
+def sender_line(layouts):
+    """Seller from the one-line sender address near the top (first page order), or ''."""
+    for layout in reversed(layouts):
+        top = "\n".join([line for line in layout.splitlines() if line.strip()][:40])
+        for pattern in SENDER_LINES:
+            match = re.search(f"(?im){pattern}", top)
+            if match:
+                return " ".join(match[1].split())
+    return ""
+
+
 def invoice_fields(layouts):
     dates = []
     amounts = []
     fallback_amounts = []
+    weak_amounts = []
     known_sellers = header_sellers()
     sellers = []
+    labelled_sellers = []
     alternate_dates = []
     for layout in layouts:
-        dates.extend(re.findall(rf"(?im)\b(?:{DATE_LABEL})\s*[:：]?[ \t]*(?:\n[ \t]*)?({DATE})\b", layout))
+        dates.extend(re.findall(rf"(?im)\b(?:{DATE_LABEL})(?:\s*/\s*Lieferdatum)?\s*[:：]?[ \t]*(?:\n[ \t]*)?({DATE}|{LONG_DATE})(?![\d])", layout))
+        alternate_dates.extend(re.findall(rf"(?im)^[ \t]*(?:{WEEKDAYS}),[ \t]*({LONG_DATE})[ \t]*$", layout))
+        labelled_sellers.extend(re.findall(r"(?im)\bVerkauft\s+von[ \t]*:?[ \t]*(?:\n[ \t]*)?([^\W\d_][^\n]*?)(?:[ \t]{2,}|[ \t]*$)", layout))
         for line in layout.splitlines():
             fallback = re.search(rf"(?i)^\s*Rechnung\b(?:\s+Nr\.?\s*:?\s*[\w/-]+)?[ \t]+(?:[^\d\n]+?\bden[ \t]+)?({DATE})\b", line)
             if fallback:
@@ -116,17 +150,19 @@ def invoice_fields(layouts):
             amounts.append(normalized_money(match))
         for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL_FALLBACK})\b[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
             fallback_amounts.append(normalized_money(match))
+        for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL_WEAK})\b[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
+            weak_amounts.append(normalized_money(match))
         sellers.extend(re.findall(rf"(?im)^\s*(?:{VENDOR_LABEL})\s*[:：][ \t]*([^\n]+)", layout))
         header = "\n".join(line for line in layout.splitlines() if line.strip())
         header = "\n".join(header.splitlines()[:12])
         for pattern, name in known_sellers:
             if re.search(f"(?im){pattern}", header):
                 sellers.append(name)
-    return (
-        unique(filter(None, map(normalized_date, dates or alternate_dates))),
-        unique(" ".join(seller.split()) for seller in sellers),
-        unique(amounts) if amounts else unique(fallback_amounts),
-    )
+    seller = unique(" ".join(seller.split()) for seller in sellers)
+    if not seller and not sellers:
+        seller = unique(" ".join(seller.split()) for seller in labelled_sellers) or sender_line(layouts)
+    total = unique(amounts) if amounts else unique(fallback_amounts) if fallback_amounts else unique(weak_amounts)
+    return unique(filter(None, map(any_date, dates or alternate_dates))), seller, total
 
 
 def tessdata_folder():
@@ -260,12 +296,16 @@ def read_invoice_details(path, info=None):
     correction = False
     for layout in layouts:
         numbers.extend(re.findall(
-            r"(?im)\b(?:Rechnungsnummer|Rechnung\s+Nr\.?|Invoice\s+(?:No\.?|Number|#)|인보이스\s*번호)\s*[:#]?[ \t]*(?:\n[ \t]*)?([\w/-]*\d[\w/-]*)\b",
+            r"(?im)\b(?:Rechnungsnummer|Rechnungs-?Nr\.?|Rechnung\s+Nr\.?|Beleg-?Nr\.?|Invoice\s+(?:No\.?|Number|#)|인보이스\s*번호)\s*[:#]?[ \t]*(?:\n[ \t]*)?([\w/-]*\d[\w/-]*)\b",
             layout,
         ))
         correction |= bool(re.search(r"(?im)^\s*(?:Gutschrift|Stornorechnung|Credit Note)\b", layout))
     override = load_invoice_edits().get(digest(path))
     number = unique(numbers)
+    fields, number, learned = learned_formats.apply(layouts[1] + "\n" + layouts[0], fields, number)
+    if learned:
+        info["learned"] = learned
+        info["invoice_like"] = True
     if not fields[0]:
         fields = (date_from_filename(path), *fields[1:])
     if override:
@@ -925,6 +965,7 @@ class App:
         ttk.Button(toolbar, text="원본·내용 보기", command=self.view_contents).pack(side="left", padx=6)
         ttk.Button(toolbar, text="중복 정리", command=self.clean_duplicates).pack(side="left", padx=6)
         more_menu(toolbar, "더보기 ▾", [
+            ("배운 인보이스 양식", self.manage_learned),
             ("인보이스 아닌 파일 → 제외 폴더", self.exclude_selected),
             ("마크다운 다시 만들기", self.save_markdown),
             ("정리 되돌리기", self.undo),
@@ -1353,6 +1394,86 @@ class App:
         if errors:
             messagebox.showerror("이동 실패", "\n".join(errors[:8]), parent=self.root)
 
+    def learn_from(self, path, fields, number):
+        """Remember this seller's layout and re-read the other files that are still incomplete."""
+        self.refresh()
+        if path.suffix.lower() == ".xml":
+            return
+        try:
+            pages = list(read_pdf_pages(path))
+            text = "\n".join(page[1] for page in pages) + "\n" + "\n".join(page[0] for page in pages)
+            entry, reason = learned_formats.learn(text, path.name, fields, number)
+        except (OSError, RuntimeError, ValueError) as error:
+            record_error("learn_format", error)
+            entry, reason = None, str(error)
+        if not entry:
+            self.status.set(f"수정값을 저장했어요 · {reason}")
+            return
+        updated = self.reread_incomplete()
+        known = {"date": "발행일", "total": "총액", "number": "번호"}
+        words = " · ".join(f"{known[key]} ‘{label}’" for key, label in entry["labels"].items())
+        self.notice(f"수정값을 저장하고 ‘{entry['marker']}’ 인보이스 양식을 배웠어요.\n찾는 단어: {words}\n"
+                    f"같은 업체 파일 {updated}개를 다시 읽어 채웠어요. 다음부터 이 업체는 자동으로 읽어요.",
+                    title="양식 학습 완료")
+
+    def reread_incomplete(self):
+        """Read again the files that still miss a required field (after a layout was learned)."""
+        updated = 0
+        for key, (path, fields, note, number) in list(self.rows.items()):
+            if all(fields) and number:
+                continue
+            info = {}
+            try:
+                new_fields, new_note, new_number, _ = read_invoice_details(path, info)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if info.get("learned") and (new_fields, new_number) != (fields, number):
+                self.rows[key] = (path, new_fields, new_note, new_number)
+                self.invoice_like[path] = True
+                updated += 1
+        self.refresh()
+        return updated
+
+    def manage_learned(self):
+        """List of learned seller layouts; wrong ones can be deleted."""
+        dialog = InlineDialog(self.root)
+        dialog.title("배운 인보이스 양식")
+        dialog.geometry("900x480")
+        dialog.grab_set()
+        ttk.Label(dialog, text="편집에서 인보이스를 한 번 고치면 그 업체 양식을 배워요. PDF에 ‘표시 단어’가 있으면 그 양식으로 읽어요. "
+                               "잘못 배운 양식은 지우고 다시 고치면 돼요.", wraplength=860, padding=(14, 10, 14, 6)).pack(anchor="w")
+        footer = tk.Frame(dialog, background=COLORS["bg"])
+        footer.pack(side="bottom", fill="x", padx=14, pady=10)
+        frame = ttk.Frame(dialog)
+        frame.pack(fill="both", expand=True, padx=14)
+        columns = ("업체명", "표시 단어", "발행일 앞 단어", "총액 앞 단어", "번호 앞 단어", "배운 파일")
+        table = ttk.Treeview(frame, columns=columns, show="headings")
+        for column, width in zip(columns, (140, 120, 130, 130, 120, 220)):
+            table.heading(column, text=column)
+            table.column(column, width=width, minwidth=60)
+        table.pack(fill="both", expand=True)
+
+        def fill():
+            table.delete(*table.get_children())
+            for index, entry in enumerate(learned_formats.load_formats()):
+                labels = entry.get("labels", {})
+                table.insert("", "end", iid=str(index), values=(entry.get("seller", ""), entry["marker"], labels.get("date", ""),
+                                                                labels.get("total", ""), labels.get("number", ""),
+                                                                f"{entry.get('learned_from', '')} · {entry.get('at', '')}"))
+
+        def delete():
+            selection = table.selection()
+            if not selection:
+                show_notice(dialog, "지울 양식을 고르세요.")
+                return
+            formats = learned_formats.load_formats()
+            drop = {int(key) for key in selection}
+            learned_formats.save_formats([entry for index, entry in enumerate(formats) if index not in drop])
+            fill()
+
+        ttk.Button(footer, text="선택 양식 지우기", command=delete).pack(side="left")
+        fill()
+
     def edit_many(self, selection):
         """Fill the same issue date, seller or currency into several files at once (empty fields stay as read)."""
         dialog = InlineDialog(self.root)
@@ -1452,8 +1573,8 @@ class App:
                 return
             self.rows[key] = (path, edited, "", values[3])
             self.invoice_like[path] = True
-            self.refresh()
             dialog.destroy()
+            self.learn_from(path, edited, values[3])
 
         ttk.Button(body, text="원본 위치 확인", command=lambda: show_source_locations(
             dialog, path, {"발행일": fields[0], "총액": fields[2], "인보이스 번호": number},

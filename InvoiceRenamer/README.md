@@ -2,6 +2,14 @@
 
 독일 세무 월마감용 프로그램입니다. 은행·카드 명세서 거래에 인보이스를 연결하고, 세무사에게 전달할 독일어 ZIP과 Excel 대조표를 만듭니다.
 
+## v1.6.0 변경 사항 (2026-11-26)
+
+| 구분 | 내용 |
+|---|---|
+| 업체별 양식 학습 | `learned_formats.py`: 1단계 편집에서 한 파일을 고쳐 저장하면 PDF 안에서 입력값 앞 단어(발행일·총액·번호)와 업체명(표시 단어)을 `%LOCALAPPDATA%\InvoiceRenamer\learned-formats.json`에 저장. 같은 표시 단어가 있는 파일은 그 단어로 읽고, 열린 목록의 필수 누락 파일을 바로 다시 읽음. 더보기 → '배운 인보이스 양식'에서 확인·삭제. 파일별 편집값이 항상 우선. |
+| 공통 규칙 보강 | 업체명: `Verkauft von`(Amazon 마켓플레이스 판매자), 맨 위 발신자 한 줄 주소(`회사명 GmbH, … 12345 도시`, `이름 - 거리 1 - 12345 도시`). 발행일: `Rechnungsdatum/Lieferdatum`, 월 이름 날짜(`02 Juli 2026`, `Dienstag, 30. Mai 2023`). 총액: 보조 라벨 우선순위(`Zahlbetrag`·`Gesamtbetrag`·`Gesamtpreis` 등이 `Gesamt`·`Summe`보다 먼저, 'USt. Gesamt' 오인 방지), `Euro` 표기. 번호: `Rechnungs-Nr.`, `Beleg-Nr.`. |
+| 테스트 | 사용자 제공 실제 인보이스 6종(O2, Amazon 마켓플레이스, Douglas, 온라인 약국, ENTEGA, Birkenstock)으로 확인: 6개 모두 발행일, 5개 업체명, 5개 총액 자동 인식. 회귀 테스트는 개인정보 없는 합성 문장으로 작성. |
+
 ## v1.5.0 변경 사항 (2026-11-26)
 
 | 구분 | 내용 |

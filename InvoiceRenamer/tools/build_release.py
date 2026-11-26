@@ -11,7 +11,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_FILES = (
-    "Start.bat", "invoice_renamer.py", "monthly_close.py", "ui_shell.py", "ui_theme.py", "tax_documents.py", "workspace_backup.py",
+    "Start.bat", "invoice_renamer.py", "monthly_close.py", "ui_shell.py", "ui_theme.py", "learned_formats.py", "tax_documents.py", "workspace_backup.py",
     "advisor_workbook.py", "setup_ocr.py", "release_info.py", "VERSION", "Restore-PreviousVersion.cmd", "사용법.txt", "사용법.html",
     "Beispiele/Belege/Rechnung_Rechnungstest-001.pdf", "Beispiele/Karte.csv",
 )
