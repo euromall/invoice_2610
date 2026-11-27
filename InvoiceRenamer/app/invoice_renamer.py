@@ -1985,6 +1985,11 @@ def remember_photos(paths, action):
     temporary.replace(path)
 
 
+def imaplib_error():
+    import imaplib
+    return imaplib.IMAP4.error
+
+
 def exclusion_log_path():
     return user_data_folder() / "exclusion-log.json"
 
@@ -2166,6 +2171,7 @@ class App:
             ("다른 폴더 열기 (옮기지 않고 보기)", self.choose),
             ("새 인보이스 (미분류)", self.open_inbox),
             ("휴대폰 사진 가져오기", self.import_photos),
+            ("메일 첨부 가져오기", self.import_mail),
             ("배운 인보이스 양식", self.manage_learned),
             ("제외 기록 보기", self.show_exclusion_log),
             ("새로고침 (바뀐 파일만, F5)", lambda: self.load_folder()),
@@ -2258,10 +2264,10 @@ class App:
         else:
             self.table.selection_set(rows)
 
-    def notice(self, message, kind="info", title="안내"):
+    def notice(self, message, kind="info", title="안내", action=None):
         """Show a guidance message as a pop-up inside the window and keep it in the status line."""
         self.status.set(message.replace("\n", " "))
-        show_notice(self.root, message, title=title, kind=kind)
+        show_notice(self.root, message, title=title, kind=kind, action=action)
 
     def report_callback_error(self, error_type, error, traceback):
         if error is not None and getattr(error, "__traceback__", None) is None:
@@ -2508,6 +2514,201 @@ class App:
         ttk.Button(footer, text="폴더 바꾸기", command=lambda: (dialog.destroy(), self.import_photos(ask_folder=True))).pack(side="right", padx=6)
         fill()
 
+    def mail_account_dialog(self):
+        """v1.14 환경설정 → 메일 → 메일 계정 설정: server, address and app password (kept in the credential manager)."""
+        import mail_link
+        account = mail_link.account_settings(load_settings())
+        dialog = InlineDialog(self.root)
+        dialog.title("메일 계정 (IMAP·SMTP)")
+        dialog.center(720, 520)
+        dialog.grab_set()
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="메일 회사").grid(row=0, column=0, sticky="w")
+        preset = ttk.Combobox(body, values=list(mail_link.MAIL_PRESETS), state="readonly", width=18)
+        preset.set(account["preset"] if account["preset"] in mail_link.MAIL_PRESETS else "Gmail")
+        preset.grid(row=0, column=1, sticky="w", pady=3)
+        hint = tk.StringVar()
+        ttk.Label(body, textvariable=hint, style="Muted.TLabel", wraplength=640).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        fields = {}
+        for row, (field, label, width) in enumerate((("user", "메일 주소", 34), ("sender", "보내는 이름 (선택)", 34),
+                                                     ("imap_host", "IMAP 서버", 26), ("imap_port", "포트", 6),
+                                                     ("smtp_host", "SMTP 서버", 26), ("smtp_port", "포트", 6),
+                                                     ("folder", "가져올 메일함", 20)), 2):
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w")
+            fields[field] = ttk.Entry(body, width=width)
+            fields[field].insert(0, str(account[field]))
+            fields[field].grid(row=row, column=1, sticky="w", pady=3)
+        ttk.Label(body, text="앱 비밀번호").grid(row=9, column=0, sticky="w")
+        password = ttk.Entry(body, width=34, show="•")
+        password.grid(row=9, column=1, sticky="w", pady=3)
+        stored = tk.StringVar()
+        ttk.Label(body, textvariable=stored, style="Muted.TLabel").grid(row=10, column=1, sticky="w")
+
+        def show_stored():
+            try:
+                stored.set("저장된 비밀번호 있음 (바꿀 때만 새로 넣어요)" if account["user"] and mail_link.load_password(account["user"])
+                           else "저장된 비밀번호 없음")
+            except RuntimeError as error:
+                stored.set(str(error))
+
+        def apply_preset(_event=None):
+            imap_host, imap_port, smtp_host, smtp_port, note_text = mail_link.MAIL_PRESETS[preset.get()]
+            hint.set(note_text)
+            if preset.get() != "직접 입력":
+                for field, value in (("imap_host", imap_host), ("imap_port", imap_port), ("smtp_host", smtp_host), ("smtp_port", smtp_port)):
+                    fields[field].delete(0, "end")
+                    fields[field].insert(0, str(value))
+
+        def current():
+            values = {field: widget.get().strip() for field, widget in fields.items()}
+            for field in ("imap_port", "smtp_port"):
+                values[field] = int(values[field]) if values[field].isdigit() else mail_link.account_settings({})[field]
+            values["preset"] = preset.get()
+            values["folder"] = values["folder"] or "INBOX"
+            return values
+
+        def store():
+            values = current()
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", values["user"]) or not values["imap_host"]:
+                show_notice(dialog, "메일 주소와 IMAP 서버를 적어 주세요.")
+                return False
+            try:
+                if password.get():
+                    mail_link.save_password(values["user"], password.get())
+                save_settings({"mail_account": values})
+            except (RuntimeError, OSError) as error:
+                show_notice(dialog, str(error), kind="error")
+                return False
+            account.update(values)
+            password.delete(0, "end")
+            show_stored()
+            self.status.set("메일 계정을 저장했어요.")
+            return True
+
+        def test():
+            if not store():
+                return
+            try:
+                secret = mail_link.load_password(account["user"])
+                if not secret:
+                    raise RuntimeError("앱 비밀번호를 넣고 저장하세요.")
+                with Busy(self.root, "메일 서버에 연결하고 있어요"):
+                    connection = mail_link.imap_connect(account, secret)
+                    connection.logout()
+            except (RuntimeError, OSError, imaplib_error()) as error:
+                show_notice(dialog, f"연결하지 못했어요: {error}", kind="error")
+                return
+            show_notice(dialog, "메일 서버에 연결했어요. 1단계 더보기 → ‘메일 첨부 가져오기’를 쓸 수 있어요.")
+
+        def forget():
+            if account["user"] and ask_yes_no("비밀번호 지우기", f"{account['user']}의 저장된 앱 비밀번호를 지울까요?", parent=dialog):
+                mail_link.delete_password(account["user"])
+                show_stored()
+
+        preset.bind("<<ComboboxSelected>>", apply_preset)
+        hint.set(mail_link.MAIL_PRESETS[preset.get()][4])
+        show_stored()
+        footer = ttk.Frame(dialog, padding=(16, 10))
+        footer.pack(side="bottom", fill="x")
+        ttk.Button(footer, text="저장", style="Primary.TButton", command=store).pack(side="right")
+        ttk.Button(footer, text="연결 시험", command=test).pack(side="right", padx=6)
+        ttk.Button(footer, text="비밀번호 지우기", command=forget).pack(side="left")
+
+    def import_mail(self):
+        """v1.14 1단계 더보기 → 메일 첨부 가져오기: PDF·XML·photo attachments of recent mails, picked and copied into the
+        work folder. Mails stay unread and untouched; attachments taken in or hidden are not offered again."""
+        import mail_link
+        if self.practice_folder:
+            self.notice("연습 모드에서는 파일을 가져오지 않아요.")
+            return
+        account = mail_link.account_settings(load_settings())
+        if not mail_link.configured(account):
+            self.notice("먼저 환경설정 → 메일 → ‘메일 계정 설정’에서 메일 주소와 앱 비밀번호를 넣으세요.", title="메일 첨부 가져오기",
+                        action=("메일 계정 설정", self.mail_account_dialog))
+            return
+        try:
+            secret = mail_link.load_password(account["user"])
+        except RuntimeError as error:
+            self.notice(str(error), kind="error")
+            return
+        if not secret:
+            self.notice("저장된 앱 비밀번호가 없어요. 환경설정 → 메일 → ‘메일 계정 설정’에서 넣으세요.", action=("메일 계정 설정", self.mail_account_dialog))
+            return
+        seen_path = user_data_folder() / "mail-imports.json"
+        days = load_settings().get("mail_days", 30)
+        try:
+            with Busy(self.root, "메일 첨부를 찾고 있어요 (메일은 읽음 표시하지 않아요)") as busy:
+                found, skipped = mail_link.fetch_attachments(account, secret, days, mail_link.load_seen(seen_path), busy.step)
+        except (RuntimeError, OSError, imaplib_error()) as error:
+            record_error("mail_import", error)
+            self.notice(f"메일을 가져오지 못했어요: {error}", kind="error")
+            return
+        if not found:
+            self.notice(f"최근 {days}일 메일에 새 인보이스 첨부가 없어요." + (f" 너무 큰 첨부 {skipped}개는 건너뛰었어요." if skipped else ""))
+            return
+        dialog = InlineDialog(self.root)
+        dialog.title("메일 첨부 가져오기")
+        dialog.center(980, 560)
+        footer = ttk.Frame(dialog, padding=(12, 8))
+        footer.pack(side="bottom", fill="x")
+        hide_rest = tk.BooleanVar(value=True)
+        ttk.Checkbutton(footer, text="고르지 않은 첨부는 다음부터 숨기기", variable=hide_rest).pack(side="left")
+        ttk.Label(dialog, text=f"최근 {days}일 메일의 새 첨부 {len(found)}개 · 행을 누르면 넣기/빼기 · 작업 폴더에 복사해요.",
+                  padding=(12, 8)).pack(anchor="w")
+        frame = ttk.Frame(dialog, padding=(12, 0))
+        frame.pack(fill="both", expand=True)
+        table = ttk.Treeview(frame, columns=("pick", "day", "sender", "subject", "file"), show="headings")
+        for column, title, width in (("pick", "넣기", 50), ("day", "날짜", 90), ("sender", "보낸 사람", 220),
+                                     ("subject", "제목", 300), ("file", "첨부", 280)):
+            table.heading(column, text=title)
+            table.column(column, width=width, anchor="w")
+        table.pack(side="left", fill="both", expand=True)
+        picked = set()
+        for index, item in enumerate(found):
+            picked.add(str(index))
+            table.insert("", "end", iid=str(index), values=("☑", item["day"], item["sender"][:60], item["subject"][:90], item["filename"]))
+
+        def toggle(event):
+            row = table.identify_row(event.y)
+            if row:
+                picked.symmetric_difference_update({row})
+                table.set(row, "pick", "☑" if row in picked else "☐")
+
+        def take():
+            chosen = [found[int(iid)] for iid in sorted(picked, key=int)]
+            dialog.destroy()
+            if not self.use_work_folder(load=False):
+                return
+            history, errors = [], []
+            with tempfile.TemporaryDirectory(prefix="invoice-mail-") as staging:
+                files = []
+                for item in chosen:
+                    target = free_name(Path(staging), item["filename"])
+                    target.write_bytes(item["data"])
+                    files.append(target)
+                if files:
+                    with Busy(self.root, "첨부를 작업 폴더로 복사하고 있어요") as busy:
+                        history, _inside, errors = import_evidence(files, self.folder, copy=True, progress=busy.step)
+            today = date.today().isoformat()
+            entries = {item["key"]: {"date": today, "file": item["filename"], "action": "가져옴"} for item in chosen}
+            if hide_rest.get():
+                entries.update({item["key"]: {"date": today, "file": item["filename"], "action": "숨김"}
+                                for index, item in enumerate(found) if str(index) not in picked})
+            try:
+                mail_link.remember_seen(seen_path, entries)
+            except OSError as error:
+                record_error("mail_import", error)
+            self.load_folder()
+            self.notice(f"메일 첨부 {len(history)}개를 작업 폴더에 넣었어요." + (f"\n넣지 못한 첨부 {len(errors)}개: " + " / ".join(errors[:3]) if errors else ""),
+                        kind="warn" if errors else "info", title="메일 첨부 가져오기")
+            if self.on_change:
+                self.on_change()
+
+        table.bind("<Button-1>", toggle)
+        ttk.Button(footer, text="가져오기 (복사)", style="Primary.TButton", command=take).pack(side="right")
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
+
     def finish_import(self, files, base=None):
         if not self.use_work_folder(load=False):
             return
@@ -2636,11 +2837,15 @@ class App:
         ttk.Button(sales_row, text="해제", style="Small.TButton", command=lambda: pick_sales(True)).pack(side="left")
         self.program_folder_rows(folders, 5, dialog)
         # 메일 ---------------------------------------------------------
+        mail = page("메일")
         if self.on_manage_mail:
-            mail = page("메일")
             ttk.Label(mail, text="메일 검색에 쓸 메일함", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
             note(mail, "3단계 ‘메일 검색’이 이 목록의 메일함을 브라우저에서 열어요. Gmail 계정이 여러 개면 로그인 순서 번호를 적어요.", 1)
             launcher(mail, 2, "메일 등록 (Gmail·한메일)", self.on_manage_mail)
+        ttk.Label(mail, text="메일 연결 (IMAP·SMTP)", font=FONT_BOLD).grid(row=3, column=0, sticky="w", pady=(22, 0))
+        note(mail, "받은 메일의 인보이스 첨부를 가져오고(1단계 더보기 → 메일 첨부 가져오기), 세무사 알림 메일을 바로 보내요. "
+                   "앱 비밀번호는 Windows 자격 증명 관리자에 저장돼요(설정 파일에는 저장하지 않아요).", 4)
+        launcher(mail, 5, "메일 계정 설정", self.mail_account_dialog)
         # 명세서·계좌 ---------------------------------------------------
         if self.on_account_order:
             accounts = page("명세서·계좌")

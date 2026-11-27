@@ -1497,6 +1497,11 @@ def german_request(item, merchant):
 INQUIRY_STATES = {"답변 필요": "Offen", "답변함": "Beantwortet", "완료": "Erledigt"}
 
 
+def smtplib_error():
+    import smtplib
+    return smtplib.SMTPException
+
+
 def advisor_profile():
     """Settings → 세무사 정보: {company, advisor, email}; empty when not set or unreadable."""
     try:
@@ -5243,11 +5248,11 @@ class MonthlyClose:
 
     def advisor_mail(self, entry, month, parent=None):
         """v1.14 German notification text for the advisor (upload done, Nachreichung, asking for a reply).
-        Copy it or open the mail program (mailto). Nothing is sent by the program itself."""
+        Copy it, open the mail program (mailto) or send it with the mail account of 환경설정 → 메일 (asks first)."""
         parent = parent or self.root
         window = InlineDialog(parent)
         window.title(f"세무사 알림 메일 · {month}")
-        window.center(760, 560)
+        window.center(900, 580)
         frame = ttk.Frame(window, padding=12)
         frame.pack(fill="both", expand=True)
         profile = advisor_profile()
@@ -5269,7 +5274,7 @@ class MonthlyClose:
         ttk.Entry(frame, textvariable=subject_var).pack(fill="x", pady=(10, 4))
         bar = ttk.Frame(frame, padding=(0, 8, 0, 0))
         bar.pack(side="bottom", fill="x")
-        ttk.Label(frame, text="프로그램이 메일을 직접 보내지는 않아요. 복사해서 붙이거나 ‘메일 프로그램 열기’를 누르세요.",
+        ttk.Label(frame, text="‘바로 보내기’는 환경설정 → 메일 계정으로 보내요(보내기 전에 한 번 더 물어요). 계정이 없으면 복사하거나 ‘메일 프로그램 열기’를 쓰세요.",
                   foreground=COLORS["muted"]).pack(side="bottom", anchor="w", pady=(6, 0))
         content = tk.Text(frame, height=10, wrap="word")
         content.pack(fill="both", expand=True)
@@ -5298,8 +5303,60 @@ class MonthlyClose:
             if not webbrowser.open(url):
                 show_notice(window, "메일 프로그램을 열지 못했어요. ‘복사’ 후 직접 붙여 넣으세요.")
 
+        attach_zip = tk.BooleanVar(value=False)
+        zip_path = Path(entry.get("path", ""))
+
+        def send_now():
+            """v1.14: send over SMTP with the account of 환경설정 → 메일 (asks first, then marks the version ‘전달함’)."""
+            import mail_link
+            from invoice_renamer import load_settings
+            account = mail_link.account_settings(load_settings())
+            address = fields["email"].get().strip()
+            if not mail_link.configured(account) or not account.get("smtp_host"):
+                show_notice(window, "먼저 환경설정 → 메일 → ‘메일 계정 설정’에서 메일 주소·서버·앱 비밀번호를 넣으세요.")
+                return
+            if not re.fullmatch(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+", address):
+                show_notice(window, "세무사 메일 주소를 하나 적어 주세요.")
+                return
+            attachments = []
+            if attach_zip.get():
+                try:
+                    if zip_path.stat().st_size > 20 * 1024 * 1024:
+                        show_notice(window, "ZIP이 20MB보다 커서 메일에 붙일 수 없어요. 업로드 후 알림만 보내세요.")
+                        return
+                    attachments = [(zip_path.name, zip_path.read_bytes())]
+                except OSError as error:
+                    show_notice(window, f"ZIP을 읽지 못했어요: {error}")
+                    return
+            remember()
+            if not ask_yes_no("메일 보내기", f"{address}에게 지금 보낼까요?\n보내는 계정: {account['user']}\n제목: {subject_var.get()}"
+                              + (f"\n첨부: {zip_path.name}" if attachments else ""), parent=window, ok="보내기",
+                              undo="보낸 메일은 되돌릴 수 없어요."):
+                return
+            try:
+                secret = mail_link.load_password(account["user"])
+                if not secret:
+                    raise RuntimeError("저장된 앱 비밀번호가 없어요. 메일 계정 설정에서 넣으세요.")
+                with Busy(self.root, "메일을 보내고 있어요"):
+                    mail_link.smtp_send(account, secret, address, subject_var.get(), content.get("1.0", "end-1c"), attachments)
+            except (RuntimeError, OSError, smtplib_error()) as error:
+                record_error("smtp", error)
+                show_notice(window, f"보내지 못했어요: {error}", kind="error")
+                return
+            state = deepcopy(self.state)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            for versions in state.get("exports", {}).values():
+                for saved in versions:
+                    if saved.get("path") == entry.get("path") and saved.get("at") == entry.get("at"):
+                        saved.update(delivery_status=DELIVERY_STATES[1], status_at=now, mailed_to=address, mailed_at=now)
+            self.save(state)
+            window.destroy()
+            self.notice(f"{address}에게 메일을 보냈어요. 전달 상태를 ‘전달함’으로 바꿨어요.", title="메일 보내기")
+
         kind.bind("<<ComboboxSelected>>", generate)
         self.buttons(bar, [("다시 만들기", generate), ("복사", copy), ("메일 프로그램 열기", open_mail)])
+        ttk.Button(bar, text="바로 보내기 (메일 계정)", style="Primary.TButton", command=send_now).pack(side="right")
+        ttk.Checkbutton(bar, text="ZIP 첨부 (20MB까지)", variable=attach_zip).pack(side="right", padx=8)
         generate()
 
     def inquiries(self):

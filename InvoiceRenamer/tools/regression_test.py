@@ -895,9 +895,104 @@ def run_v114_folders():
     print("PASS: v1.14 folder names and places (old names still known, move existing files, step 1/3 reading, exclusion, undo), phone photos, sales invoices, Kasse numbers")
 
 
+def run_v114_mail():
+    """v1.14 IMAP attachments and SMTP mail with fake servers; password in a fake credential store."""
+    import mail_link
+    from email.message import EmailMessage
+    from datetime import date as day
+    import keyring
+    from keyring.backend import KeyringBackend
+
+    class Memory(KeyringBackend):
+        priority = 1
+        store = {}
+
+        def set_password(self, service, user, password):
+            self.store[(service, user)] = password
+
+        def get_password(self, service, user):
+            return self.store.get((service, user))
+
+        def delete_password(self, service, user):
+            self.store.pop((service, user), None)
+
+    previous = keyring.get_keyring()
+    keyring.set_keyring(Memory())
+    try:
+        mail_link.save_password("me@example.com", "app-secret")
+        check(mail_link.load_password("me@example.com") == "app-secret" and Memory.store, "v1.14 mail: password in the credential store")
+        with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
+            import invoice_renamer as ir
+            ir.save_settings({"mail_account": {"user": "me@example.com", "imap_host": "imap.example.com", "imap_port": "993"}})
+            account = mail_link.account_settings(ir.load_settings())
+            check(account["imap_port"] == 993 and "app-secret" not in (Path(scratch) / "InvoiceRenamer" / "settings.json").read_text(encoding="utf-8"),
+                  "v1.14 mail: settings keep no password")
+        mails = []
+        for index, files in enumerate(([("Rechnung_1.pdf", b"%PDF-1 a")], [("foto.jpg", b"jpg"), ("agb.txt", b"t")], [])):
+            message = EmailMessage()
+            message["From"], message["Subject"], message["Message-ID"] = "Shop <shop@example.com>", f"=?utf-8?q?Rechnung_Nr._{index}_=C3=BC?=", f"<m{index}@x>"
+            message["Date"] = "Thu, 26 Nov 2026 10:00:00 +0100"
+            message.set_content("Hallo")
+            for name, data in files:
+                message.add_attachment(data, maintype="application", subtype="octet-stream", filename=name)
+            mails.append(message.as_bytes())
+
+        class FakeImap:
+            calls = []
+
+            def select(self, folder, readonly=False):
+                self.calls.append(("select", folder, readonly))
+                return "OK", [b"3"]
+
+            def uid(self, command, *args):
+                self.calls.append((command, args))
+                if command == "SEARCH":
+                    return "OK", [b"1 2 3"]
+                return "OK", [(b"1 (BODY[] {10}", mails[int(args[0]) - 1]), b")"]
+
+            def logout(self):
+                self.calls.append(("logout",))
+
+        fake = FakeImap()
+        found, skipped = mail_link.fetch_attachments(account, "app-secret", 30, connect=lambda *_: fake)
+        names = sorted(item["filename"] for item in found)
+        check(names == ["Rechnung_1.pdf", "foto.jpg"] and found[0]["day"] == "2026-11-26" and "ü" in found[0]["subject"]
+              and ("select", "INBOX", True) in fake.calls and all("PEEK" in str(call) for call in fake.calls if call[0] == "FETCH")
+              and fake.calls[-1] == ("logout",), f"v1.14 mail: attachments read without marking mails {names} {fake.calls}")
+        again, _ = mail_link.fetch_attachments(account, "app-secret", 30, seen={item["key"] for item in found}, connect=lambda *_: fake)
+        check(again == [], "v1.14 mail: attachments taken before are not offered again")
+
+        class FakeSmtp:
+            sent = []
+
+            def login(self, user, password):
+                self.sent.append(("login", user, password))
+
+            def send_message(self, message):
+                self.sent.append(message)
+
+            def quit(self):
+                pass
+
+        server = FakeSmtp()
+        account.update(smtp_host="smtp.example.com", sender="Euromall GmbH")
+        mail_link.smtp_send(account, "app-secret", "kanzlei@example.com", "Unterlagen 10/2026", "Guten Tag", [("M.zip", b"PK")],
+                            connect=lambda _account: server)
+        message = server.sent[-1]
+        check(server.sent[0] == ("login", "me@example.com", "app-secret") and message["To"] == "kanzlei@example.com"
+              and "Euromall GmbH" in message["From"] and [part.get_filename() for part in message.iter_attachments()] == ["M.zip"],
+              f"v1.14 mail: SMTP message {message['From']}")
+        mail_link.delete_password("me@example.com")
+        check(mail_link.load_password("me@example.com") == "", "v1.14 mail: password removed")
+    finally:
+        keyring.set_keyring(previous)
+    print("PASS: v1.14 mail link (credential store, IMAP attachments unread and once, SMTP mail with ZIP)")
+
+
 if __name__ == "__main__":
     run()
     run_v113()
     run_v1131()
     run_v114()
     run_v114_folders()
+    run_v114_mail()
