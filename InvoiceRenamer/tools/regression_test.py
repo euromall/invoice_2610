@@ -474,7 +474,7 @@ def run():
 def run_v113():
     """v1.13: learning picks the right labels, file-name numbers, field guess from labels, duplicate words."""
     import learned_formats
-    from invoice_renamer import field_from_label, number_from_filename, value_problems
+    from invoice_renamer import field_from_label, invoice_likeness, number_from_filename, value_problems
     from pdf_view import PdfView
 
     with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
@@ -539,7 +539,33 @@ def run_v113():
                                                          if w[4] == "612088028"))
         check(picked == "Nr 612088028", f"v1.13: duplicate words dropped ‘{picked}’")
         check(label == "Nr", f"v1.13: label next to the value ‘{label}’")
-    print("PASS: v1.13 learning labels, file-name number, field guess, value check, duplicate words")
+
+        # not-invoice rule: full-width letters, order words, table totals, customs papers
+        from invoice_renamer import customs_document, invoice_fields, set_flag
+        chinese = ("Shenzhen Trading Co., Ltd.\nＩｎｖｏｉｃｅ\nOrder ID 302-1234567-1234567\nInvoice Date 2026-10-02\n"
+                   "Item  Quantity  Unit Price  Total Price(EUR)\nUSB cable 3 11.99 35.97\n")
+        check(invoice_likeness(chinese) >= 3, f"v1.13: Chinese seller invoice counts as invoice ({invoice_likeness(chinese)})")
+        check(invoice_fields(["Total Price(EUR) 35.97", "Total Price(EUR) 35.97"])[2] == "35.97 EUR", "v1.13: total with currency in heading")
+        check(customs_document("COMMERCIAL INVOICE\nDeclared value 17.98") == "commercial invoice", "v1.13: customs paper")
+        check(customs_document("Rechnung\nSumme 10,00 EUR") == "", "v1.13: normal invoice is not customs")
+        customs = root / "awb.pdf"
+        with pymupdf.open() as document:
+            document.new_page().insert_text((60, 80), "Air Waybill\nShipper Shenzhen Trading\nConsignee Euromall\n"
+                                                      "Declared value 17.98 USD\nPieces 1 Weight 0.4 kg")
+            document.save(customs)
+        info = {}
+        read_invoice_details(customs, info)
+        check(info["invoice_like"] is False and info.get("kind") == "customs" and "Air Waybill".casefold() in info["reason"].casefold(),
+              f"v1.13: air waybill classified {info}")
+        set_flag([customs], "invoice")
+        info = {}
+        read_invoice_details(customs, info)
+        check(info["invoice_like"] is True, "v1.13: ‘인보이스 맞음’ is remembered")
+        set_flag([customs], "invoice", None)
+        info = {}
+        read_invoice_details(customs, info)
+        check(info["invoice_like"] is False, "v1.13: mark removed")
+    print("PASS: v1.13 learning labels, file-name number, field guess, value check, duplicate words, not-invoice rule, customs papers")
 
 
 if __name__ == "__main__":

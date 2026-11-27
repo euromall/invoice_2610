@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import tkinter as tk
+import unicodedata
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -154,6 +155,11 @@ def invoice_fields(layouts):
             fallback_amounts.append(normalized_money(match))
         for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL_WEAK})\b[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
             weak_amounts.append(normalized_money(match))
+        # table totals with the currency in the heading: ‘Total Price(EUR) 35.97’, ‘Gesamt (EUR): 12,50’
+        for match in re.finditer(rf"(?im)\b(?:Total(?:[ \t]+(?:Price|Amount))?|Gesamt(?:betrag|summe)?|Summe)[ \t]*\("
+                                 rf"(EUR|USD|GBP|CHF)\)[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?(\d+(?:[.,]\d{{3}})*[.,]\d{{2}})(?![\d.,])",
+                                 layout):
+            weak_amounts.append(money_text(match[2], match[1].upper()))
         sellers.extend(re.findall(rf"(?im)^\s*(?:{VENDOR_LABEL})\s*[:：][ \t]*([^\n]+)", layout))
         header = "\n".join(line for line in layout.splitlines() if line.strip())
         header = "\n".join(header.splitlines()[:12])
@@ -196,10 +202,31 @@ INVOICE_WORDS = (
 )
 
 
+INVOICE_WORDS += (
+    "rechnungsdatum", "invoice date", "invoice no", "order id", "order no", "bestellnummer", "quantity", "menge",
+    "unit price", "einzelpreis", "subtotal", "zwischensumme", "p.iva", "partita iva", "tax", "steuer",
+)
+AMAZON_ORDER = r"(?<!\d)\d{3}-\d{7}-\d{7}(?!\d)"
+# shipping and customs papers that come with parcels from abroad: kept apart from the invoices (보조 자료)
+CUSTOMS_WORDS = ("commercial invoice", "proforma invoice", "pro forma invoice", "air waybill", "airway bill", "air way bill",
+                 "cn22", "cn23", "customs declaration", "zollinhaltserklärung", "packing list")
+
+
+def invoice_words(text):
+    """Invoice words found in the text (full-width letters and ligatures are folded first)."""
+    words = unicodedata.normalize("NFKC", text).casefold()
+    return [word for word in INVOICE_WORDS if re.search(rf"(?<!\w){re.escape(word)}", words)]
+
+
 def invoice_likeness(text):
-    """Rough score: how many invoice words appear in the text."""
-    words = text.casefold()
-    return sum(1 for word in INVOICE_WORDS if re.search(rf"(?<!\w){re.escape(word)}", words))
+    """Rough score: how many invoice words appear in the text (+2 for an Amazon order number)."""
+    return len(invoice_words(text)) + (2 if re.search(AMAZON_ORDER, unicodedata.normalize("NFKC", text)) else 0)
+
+
+def customs_document(text):
+    """The customs/shipping word in the text (‘Commercial Invoice’, ‘Air Waybill’, ...) or ''."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return next((word for word in CUSTOMS_WORDS if word in " ".join(folded.split())), "")
 
 
 # The renaming screen also lists XRechnung XML files. Monthly close keeps its own list.
@@ -349,8 +376,18 @@ def read_invoice_details(path, info=None):
     fields = invoice_fields(layouts)
     text = layouts[0]
     if len(re.findall(r"\w", text)) >= 30 and not scan_note:
-        score = invoice_likeness(text) + (2 if fields[2] else 0)
+        found = invoice_words(text)
+        order = bool(re.search(AMAZON_ORDER, unicodedata.normalize("NFKC", text)))
+        score = len(found) + (2 if order else 0) + (2 if fields[2] else 0)
         info["invoice_like"] = score >= 3
+        customs = customs_document(text)
+        if customs:
+            info["invoice_like"] = False
+            info["kind"] = "customs"
+            info["reason"] = f"‘{customs}’ 문서 · 통관·배송 서류로 보여요 (실제 인보이스는 따로 있어야 해요)"
+        elif not info["invoice_like"]:
+            words = ", ".join(found[:4]) or "없음"
+            info["reason"] = f"인보이스 단어 {len(found)}개({words})" + ("" if fields[2] else " · 총액 못 읽음")
     numbers = []
     correction = False
     for layout in layouts:
@@ -385,6 +422,10 @@ def read_invoice_details(path, info=None):
         if len(override) > 3:
             number = override[3]
         checks = {}
+    flags = load_flags() if not info["invoice_like"] else {}
+    if flags and flags.get(digest(path), {}).get("invoice"):
+        info["invoice_like"] = True
+        info.pop("kind", None)
     info["checks"] = checks
     return fields, scan_note, number, correction
 
@@ -1493,6 +1534,41 @@ class EditsFileError(ValueError):
     pass
 
 
+def flags_path():
+    return invoice_edits_path().with_name("invoice-flags.json")
+
+
+def load_flags():
+    """{file digest: {"invoice": True, "hold": "reason"}} — marks the user set on files (kept when files move)."""
+    try:
+        data = json.loads(flags_path().read_text(encoding="utf-8")) if flags_path().is_file() else {}
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def set_flag(paths, name, value=True):
+    """Set (or with value=None remove) one mark on files; returns how many changed."""
+    flags = load_flags()
+    changed = 0
+    for path in paths:
+        key = digest(Path(path))
+        entry = flags.setdefault(key, {})
+        if value is None:
+            changed += int(entry.pop(name, None) is not None)
+        elif entry.get(name) != value:
+            entry[name] = value
+            changed += 1
+        if not entry:
+            flags.pop(key)
+    storage = flags_path()
+    storage.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=storage.parent, mode="w", encoding="utf-8", delete=False) as output:
+        json.dump(flags, output, ensure_ascii=False, indent=2)
+    Path(output.name).replace(storage)
+    return changed
+
+
 def load_invoice_edits():
     path = invoice_edits_path()
     if not path.exists():
@@ -1616,6 +1692,7 @@ class App:
         self.invoice_like = {}
         self.parts = {}  # combined PDFs: path -> page ranges of each invoice
         self.checks = {}  # path -> {field: why it needs a look}, from reading (file name, learned layout, ...)
+        self.reasons = {}  # path -> (kind, why it does not look like an invoice); kind "customs" for 통관·배송 서류
         self.last_moves = []
         self.inbox_mode = False
         self.folder = None
@@ -2015,6 +2092,7 @@ class App:
                 fields, note, number = ("", "", ""), "PDF 읽기 실패", ""
             self.invoice_like[path] = info.get("invoice_like", True)
             self.checks[path] = info.get("checks", {})
+            self.reasons[path] = (info.get("kind", ""), info.get("reason", ""))
             if info.get("parts"):
                 self.parts[path] = info["parts"]
             else:
@@ -2034,7 +2112,10 @@ class App:
         if note:
             return f"확인 필요 · {note}", "bad"
         if not self.invoice_like.get(path, True):
-            return "인보이스 아님 의심 · 내용 확인", "muted"
+            kind, reason = getattr(self, "reasons", {}).get(path, ("", ""))
+            if kind == "customs":
+                return f"통관·배송 서류 · {reason}", "muted"
+            return "인보이스 아님 의심 · " + (reason or "내용 확인") + " · 맞으면 우클릭 ‘인보이스 맞음’", "muted"
         missing = [label for label, value in zip(("발행일", "업체명", "총액"), fields) if not value]
         small = False
         if not number:
@@ -2558,6 +2639,7 @@ class App:
             self.rows[key] = (target, *self.rows[key][1:])
             self.invoice_like[target] = self.invoice_like.pop(path, True)
             self.checks[target] = self.checks.pop(path, {})
+            self.reasons[target] = self.reasons.pop(path, ("", ""))
             history.append((path, target, checksum))
         busy.close()
         if history:
