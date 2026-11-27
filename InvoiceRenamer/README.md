@@ -13,6 +13,7 @@
 | 폴더 감시 | 변경 막대(`change_bar`, 지금 읽기/나중에). 1단계 `file_stamp`, 3단계 `_INDEX_CACHE`로 바뀐 파일만 다시 읽음. 폴더 가져오기 하위 폴더 유지 옵션(`import_evidence(base=...)`). |
 | 3단계 | 연결 전 확인(`link_concerns`) + 연결 알림 되돌리기(`undo_link`), 이중 결제 의심(`double_payments`), 환불 찾기 기간 선택, 거래·인보이스 오른쪽 클릭 메뉴. 2·3단계 더보기 제거. |
 | 도구 | 오늘 할 일, 작업 이력, 백업·복원(`backup_now`, `restore_backup`, 닫을 때 `auto_backup`), 환경설정 탭(일반·폴더·메일·명세서·계좌·인보이스 양식·사유·자동 규칙), 도움말 ▾, F1 단축키, 표 칸 숨기기(`tables.hidden`). |
+| 배포 | 폴더형(`--onedir`)이 기본: Artifact `InvoiceRenamer-folder` = `InvoiceRenamer.exe` + `_internal/`(tessdata·예시·사용법) + 위쪽에 `사용법.html`·`사용법.txt`. 폴더째 두고 EXE 바로가기로 실행(EXE만 옮기면 실행 안 됨). 비교용 한 파일 EXE는 `InvoiceRenamer-single-exe`. 작업 기록은 `%LOCALAPPDATA%\InvoiceRenamer`라 형태를 바꿔도 이어짐. CI에서 폴더 안 필수 파일 확인. |
 | 알려진 한계 | 중국 인보이스처럼 표 총액이 다른 줄에 있으면 아직 못 읽음. 예전 최상위 `중복` 폴더는 자동으로 합치지 않음. 폴더 위치 설정은 v1.14. Windows 실기 검증 전(Linux/Xvfb에서만 확인). |
 
 ## v1.12.0 변경 사항 (2026-11-27)
