@@ -103,4 +103,7 @@ def pdf_tax_fields(text):
     if len(orders) == 1:
         fields["order"] = orders.pop()
     fields["special"] = "Reverse Charge" if re.search(r"reverse charge|steuerschuldnerschaft des leistungsempfängers", text, re.I) else ""
+    # Amazon marketplace invoice: paid to Amazon, issued by the seller (‘Verkauft von …’ / Amazon order number).
+    if re.search(r"(?i)\bamazon\b", text) and (re.search(r"(?i)verkauft von|sold by|\b\d{3}-\d{7}-\d{7}\b", text)):
+        fields["amazon"] = True
     return fields

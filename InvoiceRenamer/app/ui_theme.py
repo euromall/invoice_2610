@@ -93,7 +93,7 @@ def transaction_tag(status, follow_up=""):
         return "warn"
     if status == "금액 대조 완료":
         return "ok"
-    if status in ("내부이체 확인", "전액 환불 확인", "계약서 근거 확인") or status.startswith("일부 환불"):
+    if status in ("내부이체 확인", "전액 환불 확인", "계약서 근거 확인", "전월 결제 환불 확인", "일부 환불 · 증빙 연결됨"):
         return "transfer"
     if status in ("증빙 미연결", "연결 PDF 위치 확인"):
         return "bad"

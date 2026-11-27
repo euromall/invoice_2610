@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 from xml.etree.ElementTree import ParseError
@@ -582,6 +582,17 @@ def merchant_key(merchant):
     return "".join(char for char in merchant.casefold() if char.isalnum())
 
 
+def amazon_marketplace(merchant, invoice):
+    """Paid to Amazon (AMAZON EU, AMZN Mktp …) for an invoice of a marketplace seller: the names differ by design."""
+    key = merchant_key(merchant)
+    if "amazon" not in key and "amzn" not in key:
+        return False
+    fields = invoice.tax_fields or {}
+    order = f"{fields.get('order', '')} {invoice.number} {invoice.path.name}"
+    return bool(fields.get("amazon") or "amazon" in merchant_key(invoice.seller)
+                or re.search(r"\b\d{3}-\d{7}-\d{7}\b", order) or "amazon" in invoice.path.name.casefold())
+
+
 def signed_total(invoice):
     return -abs(invoice.amount) if invoice.credit and invoice.amount is not None else invoice.amount
 
@@ -606,7 +617,7 @@ def candidates(transaction, invoices, aliases):
             continue
         distance = abs((invoice.day - transaction.day).days) if invoice.day else 9999
         seller = merchant_key(invoice.seller)
-        named = bool(seller and (seller in known or seller in merchant or merchant in seller))
+        named = bool(seller and (seller in known or seller in merchant or merchant in seller)) or amazon_marketplace(transaction.merchant, invoice)
         ranked.append((not matching_reference(transaction.merchant, invoice), not named,
                        distance, invoice.path.name.casefold(), invoice))
     return [row[-1] for row in sorted(ranked, key=lambda row: row[:-1])]
@@ -824,7 +835,7 @@ def delivery_changes(state, keys):
         key: {
             "links": sorted(state["records"][key].get("links", [])),
             "record": {field: state["records"][key].get(field) for field in (
-                "advisor_note", "due", "follow_up", "allocations", "difference_reason", "transfer", "refund_group"
+                "advisor_note", "due", "follow_up", "allocations", "difference_reason", "transfer", "refund_group", "refund_of"
             )},
             "documents": {
                 link: [state.get("document_notes", {}).get(link, ""), state.get("hospitality", {}).get(link, {})]
@@ -1041,7 +1052,9 @@ def is_contract_reason(korean, reasons=None):
             return entry["contract"]
     return korean in DAUERBELEG_REASONS
 CONTRACT_STATUS = "계약서 근거 확인"
-DONE_STATES = ("금액 대조 완료", "내부이체 확인", "전액 환불 확인", CONTRACT_STATUS)
+EARLIER_REFUND = "전월 결제 환불 확인"
+PARTIAL_REFUND_DONE = "일부 환불 · 증빙 연결됨"
+DONE_STATES = ("금액 대조 완료", "내부이체 확인", "전액 환불 확인", CONTRACT_STATUS, EARLIER_REFUND, PARTIAL_REFUND_DONE)
 RECURRING_AUTO = ("아니요", "예 · 같은 거래처·같은 금액이면 자동 적용")
 
 
@@ -1114,7 +1127,8 @@ REVIEW_GERMAN = {"ok": "Geprüft", "recheck": "Erneut prüfen", "changed": "Nach
 def review_signature(record):
     """What a final check approved: a later change of links or reasons makes the check stale."""
     return json.dumps([sorted(record.get("links", [])), record.get("statement_evidence", ""), record.get("transfer", ""),
-                       sorted(record.get("refund_group", [])), record.get("allocations", {})], ensure_ascii=False, sort_keys=True)
+                       sorted(record.get("refund_group", [])), record.get("allocations", {}), record.get("refund_of", "")],
+                      ensure_ascii=False, sort_keys=True)
 
 
 def review_state(state, key):
@@ -1160,7 +1174,8 @@ def apply_recurring(state, transactions):
     count = 0
     for item in transactions:
         record = state["records"].get(item.key, {})
-        if record.get("links") or record.get("transfer") or record.get("refund_group") or record.get("statement_evidence"):
+        if record.get("links") or record.get("transfer") or record.get("refund_group") or record.get("refund_of") \
+                or record.get("statement_evidence"):
             continue
         for rule in rules:
             if rule["payee"] == payee_key(item.merchant) and rule["amount"] == str(item.amount) and rule["currency"] == item.currency:
@@ -1184,7 +1199,7 @@ def review_months(state, invoices):
         links = record.get("links", [])
         globally_linked.update(links)
         merchant = record.get("merchant", "")
-        if not (links or record.get("transfer") or record.get("refund_group") or record.get("statement_evidence")):
+        if not (links or record.get("transfer") or record.get("refund_group") or record.get("refund_of") or record.get("statement_evidence")):
             issues.append((REVIEW_KINDS[0], number, merchant))
         if (record.get("statement_evidence") and not is_contract_reason(record["statement_evidence"])) \
                 or record.get("follow_up") in ("세무사 확인 필요", "증빙 확보 불가"):
@@ -1460,6 +1475,8 @@ class MonthlyClose:
         for label, command in (("메일 검색", self.search_gmail), ("+ 증빙 파일 추가", self.add_evidence_for),
                                ("전체 증빙에서 고르기", lambda: (self.all_pdfs.set(True), self.show_invoices()))):
             ttk.Button(none_buttons, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 6))
+        self.refund_button = ttk.Button(none_buttons, text="환불의 원래 결제 찾기", style="Small.TButton",
+                                        command=lambda: self.link_refunds())
         self.best_doc = None
         self.pdfs = self.table(lower, ("증빙", "발행일", "총액", "번호", "추천·상태"), (210, 90, 90, 95, 150))
         self.pdfs.master.pack_configure(padx=1, pady=(0, 1))
@@ -2792,7 +2809,8 @@ class MonthlyClose:
         return f"{self.record(item.key).get('number', '')} · {item.day} · {item.merchant} · {item.amount} {item.currency}"
 
     def unlinked_transactions(self):
-        return [item for item in self.transactions.values() if not self.linked(item.key) and not self.record(item.key).get("transfer") and not self.record(item.key).get("refund_group") and not self.record(item.key).get("statement_evidence")]
+        return [item for item in self.transactions.values() if not self.linked(item.key)
+                and not any(self.record(item.key).get(field) for field in ("transfer", "refund_group", "refund_of", "statement_evidence"))]
 
     def batch_pairs(self):
         """1:1 transaction–evidence pairs for bulk linking: [(transaction key, document key, sure)].
@@ -2816,7 +2834,7 @@ class MonthlyClose:
                 continue
             doc = found[0]
             reason = self.match_reason(item, doc)
-            pairs.append((item.key, doc.key, "업체명" in reason or "번호" in reason))
+            pairs.append((item.key, doc.key, "업체명" in reason or "번호" in reason or "아마존 판매자" in reason))
         return pairs
 
     def batch_candidates(self):
@@ -2951,13 +2969,18 @@ class MonthlyClose:
             transactions.update(related)
 
     def status_for(self, key):
+        earlier = self.record(key).get("refund_of")
+        if earlier:
+            return EARLIER_REFUND if earlier in self.state["records"] else "환불 상대 명세서 필요"
         refunds = self.record(key).get("refund_group")
         if refunds:
             if any(other not in self.transactions for other in refunds):
                 return "환불 상대 명세서 필요"
             remaining = sum(self.transactions[other].amount for other in refunds)
             if remaining:
-                return f"일부 환불 · 잔액 {remaining:.2f} {self.transactions[key].currency}"
+                if any(self.linked(other) for other in refunds):
+                    return PARTIAL_REFUND_DONE  # the invoice of the purchase covers what was kept
+                return f"일부 환불 · 잔액 {remaining:.2f} {self.transactions[key].currency} · 증빙 필요"
             return "전액 환불 확인"
         peer = self.record(key).get("transfer")
         if peer:
@@ -3179,6 +3202,8 @@ class MonthlyClose:
                            or merchant_key(doc.seller) in self.state["aliases"].get(merchant_key(item.merchant), [])
                            or merchant_key(doc.seller) in merchant_key(item.merchant)):
             parts.append("업체명")
+        elif amazon_marketplace(item.merchant, doc):
+            parts.append("아마존 판매자")
         if matching_reference(item.merchant, doc):
             parts.append("번호")
         gap = abs((doc.day - item.day).days) if doc.day else None
@@ -3220,6 +3245,10 @@ class MonthlyClose:
             if not self.all_pdfs.get() and not self.record(key).get("statement_evidence") and not self.record(key).get("transfer") \
                     and not self.record(key).get("refund_group"):
                 self.none_card.pack(fill="x", before=self.pdfs.master)
+                if item.amount < 0:
+                    self.refund_button.pack(side="left", padx=(0, 6))
+                else:
+                    self.refund_button.pack_forget()
         self.next_name.set(package_filename(number, doc) if doc else "")
 
     def link_best(self):
@@ -3382,7 +3411,7 @@ class MonthlyClose:
         if locked:
             messagebox.showerror("마감 확정", f"{locked}은 확정된 달이에요. 변경하려면 ‘마감 확정·해제’에서 먼저 다시 여세요.", parent=self.root)
             return False
-        fields = {"links": "증빙 연결", "transfer": "내부이체", "refund_group": "환불 연결",
+        fields = {"links": "증빙 연결", "transfer": "내부이체", "refund_group": "환불 연결", "refund_of": "전월 결제 환불",
                   "advisor_note": "전달 메모", "follow_up": "후속 상태", "due": "후속 예정일",
                   "allocations": "배분 금액", "difference_reason": "차액 사유", "statement_evidence": "명세서 근거", "attachments": "보조 자료"}
         for key, record in state["records"].items():
@@ -3472,7 +3501,7 @@ class MonthlyClose:
         links = record.get("links", [])
         warnings = []
         if not links:
-            if record.get("transfer") or record.get("refund_group"):
+            if record.get("transfer") or record.get("refund_group") or record.get("refund_of"):
                 return warnings
             evidence = record.get("statement_evidence")
             if not evidence:
@@ -3502,7 +3531,8 @@ class MonthlyClose:
             words = [word for word in re.split(r"\W+", doc.seller.casefold()) if len(word) >= 4
                      and word not in ("gmbh", "kommanditgesellschaft", "europe", "germany", "deutschland", "services", "s.a.r.l")]
             if seller and not (seller in known or seller in merchant or merchant in seller
-                               or any(merchant_key(word) in merchant for word in words) or matching_reference(item.merchant, doc)):
+                               or any(merchant_key(word) in merchant for word in words) or matching_reference(item.merchant, doc)
+                               or amazon_marketplace(item.merchant, doc)):
                 warnings.append(f"업체명 다름 ({doc.seller[:24]})")
             if doc.day and abs((doc.day - item.day).days) > 7:
                 warnings.append(f"날짜 {abs((doc.day - item.day).days)}일 차이")
@@ -3632,7 +3662,7 @@ class MonthlyClose:
                 evidence = record.get("statement_evidence")
                 chooser.configure(values=[])
                 chooser.set(f"증빙 없이 처리: {evidence} → {reason_german(evidence)}" if evidence else
-                            "내부이체·환불 연결" if record.get("transfer") or record.get("refund_group") else "연결된 증빙 없음")
+                            "내부이체·환불 연결" if record.get("transfer") or record.get("refund_group") or record.get("refund_of") else "연결된 증빙 없음")
             draw()
 
         def draw(_event=None):
@@ -3906,12 +3936,12 @@ class MonthlyClose:
         if not cards or (not remove and not docs):
             self.notice("거래와 연결할 PDF를 선택하세요. 후보가 없다면 ‘전체 증빙 표시’를 켜세요.")
             return
-        if not remove and any(self.record(key).get("transfer") or self.record(key).get("refund_group") for key in cards):
-            self.notice("증빙을 연결하려면 먼저 이체 또는 환불 연결을 해제하세요.")
+        if not remove and any(self.record(key).get("transfer") for key in cards):
+            self.notice("증빙을 연결하려면 먼저 이체 연결을 해제하세요.")
             return
         keys = {doc.key for doc in docs}
         if remove:
-            if any(self.record(key).get("transfer") or self.record(key).get("refund_group") for key in cards):
+            if any(self.record(key).get("transfer") or self.record(key).get("refund_group") or self.record(key).get("refund_of") for key in cards):
                 prompt = "선택한 거래의 이체 또는 환불 연결을 해제할까요?"
             else:
                 prompt = "선택한 거래에서 선택한 PDF 연결을 해제할까요?" if keys else "선택한 거래의 모든 PDF 연결을 해제할까요?"
@@ -3932,6 +3962,7 @@ class MonthlyClose:
             if remove:
                 for related in record.pop("refund_group", []):
                     state["records"].get(related, {}).pop("refund_group", None)
+                record.pop("refund_of", None)
                 peer = record.pop("transfer", None)
                 if peer:
                     state["records"].get(peer, {}).pop("transfer", None)
@@ -3983,7 +4014,10 @@ class MonthlyClose:
         follow = record.get("follow_up", "")
         if follow == "요청 중" and due and due < date.today().isoformat():
             follow = "기한 지남"
-        text = [follow, f"예정 {due}" if due else "", record.get("difference_reason", ""), record.get("statement_evidence", "")]
+        refunded = [other.get("number", "") for other in self.state["records"].values() if other.get("refund_of") == key]
+        text = [follow, f"예정 {due}" if due else "", record.get("difference_reason", ""), record.get("statement_evidence", ""),
+                f"환불됨: {', '.join(refunded)}" if refunded else "",
+                f"환불 원거래: {self.state['records'].get(record['refund_of'], {}).get('number', '')}" if record.get("refund_of") else ""]
         text.append(record.get("advisor_note") or record.get("note", ""))
         return " · ".join(filter(None, text))
 
@@ -4350,24 +4384,127 @@ class MonthlyClose:
             history.insert("", "end", values=(change["at"], change.get("user", ""), change["number"], change["fields"]))
 
     def link_refunds(self):
+        """Purchase and refund: two or more loaded transactions are tied together; one refund alone opens a search
+        over every month (an earlier month may already be closed and sent, it is not changed)."""
         keys = list(self.cards.selection())
+        if len(keys) == 1:
+            self.find_refunded_purchase(keys[0])
+            return
         if len(keys) < 2:
-            self.notice("결제 한 건과 환불 한 건 이상을 Ctrl로 함께 선택하세요.")
+            self.notice("환불 거래 한 건을 고르면 원래 결제를 모든 달에서 찾아요.\n같은 화면의 결제와 환불은 Ctrl로 함께 고르세요.")
             return
         try:
             remaining = refund_balance([self.transactions[key] for key in keys])
-            if any(self.linked(key) or self.record(key).get("transfer") or self.record(key).get("refund_group") for key in keys):
-                raise ValueError("기존 연결이 있는 거래는 먼저 연결을 해제하세요.")
+            if any(self.record(key).get("transfer") or self.record(key).get("refund_group") or self.record(key).get("refund_of")
+                   for key in keys):
+                raise ValueError("기존 이체·환불 연결이 있는 거래는 먼저 연결을 해제하세요.")
         except ValueError as error:
             messagebox.showerror("결제·환불 연결", str(error), parent=self.root)
             return
         currency = self.transactions[keys[0]].currency
-        if not messagebox.askyesno("결제·환불 연결", f"선택한 거래 {len(keys)}건을 연결할까요?\n환불 후 잔액: {remaining:.2f} {currency}", parent=self.root):
+        prompt = f"선택한 거래 {len(keys)}건을 연결할까요?\n환불 후 잔액: {remaining:.2f} {currency}"
+        if remaining:
+            prompt += "\n\n일부 환불이에요. 남은 금액의 인보이스를 결제 거래에 연결해야 완료돼요."
+        if not messagebox.askyesno("결제·환불 연결", prompt, parent=self.root):
             return
         state = deepcopy(self.state)
         for key in keys:
             state["records"].setdefault(key, {})["refund_group"] = keys
         self.save(state)
+
+    def refund_candidates(self, key, query=""):
+        """Earlier payments a refund may belong to, from every month: [(score, record key, record)], best first.
+        Same payee and an amount at least as large rank first; query narrows by text."""
+        item = self.transactions[key]
+        payee = payee_key(item.merchant)
+        merchant = merchant_key(item.merchant)
+        tokens = query.casefold().replace(",", ".").split()
+        taken = {record.get("refund_of") for other, record in self.state["records"].items() if other != key}
+        rows = []
+        for other, record in self.state["records"].items():
+            if other == key or other in taken or record.get("refund_group") or record.get("currency") != item.currency:
+                continue
+            try:
+                amount = Decimal(record.get("amount", ""))
+                day = date.fromisoformat(record.get("day", ""))
+            except (InvalidOperation, ValueError):
+                continue
+            if amount * item.amount >= 0 or day > item.day or (item.day - day).days > 400:
+                continue
+            text = f"{record.get('number', '')} {record.get('merchant', '')} {amount} {day}".casefold().replace(",", ".")
+            if tokens and not all(token in text for token in tokens):
+                continue
+            same_payee = payee_key(record.get("merchant", "")) == payee or merchant_key(record.get("merchant", "")) == merchant
+            exact = abs(amount) == abs(item.amount)
+            covers = abs(amount) >= abs(item.amount)
+            if not tokens and not same_payee and not exact:
+                continue
+            rows.append(((not exact, not same_payee, not covers, (item.day - day).days), other, record))
+        return sorted(rows, key=lambda row: row[0])
+
+    def find_refunded_purchase(self, key):
+        """Panel: pick the earlier payment a refund belongs to (any month)."""
+        item = self.transactions[key]
+        record = self.record(key)
+        if self.linked(key) or record.get("transfer") or record.get("refund_group") or record.get("refund_of"):
+            self.notice("이미 증빙·이체·환불 연결이 있는 거래예요. 먼저 연결을 해제하세요.")
+            return
+        dialog = InlineDialog(self.root)
+        dialog.title("환불의 원래 결제 찾기")
+        dialog.geometry("980x560")
+        dialog.grab_set()
+        ttk.Label(dialog, text=f"{record.get('number', '')} · {item.day:%d.%m.%Y} · {item.merchant[:60]} · {german_amount(item.amount)} {item.currency}\n"
+                               "모든 달의 결제 중 같은 업체·같은 금액을 먼저 보여 줘요. 마감해서 이미 보낸 달은 바꾸지 않고, "
+                               "이 환불 거래에 ‘몇 번 결제의 환불’로 기록해 이번 달 세무사 자료에 독일어로 적어요.",
+                  wraplength=940, padding=(14, 10, 14, 6)).pack(anchor="w")
+        bar = ttk.Frame(dialog, padding=(14, 0, 14, 6))
+        bar.pack(fill="x")
+        query = ttk.Entry(bar, width=40)
+        query.pack(side="left")
+        footer = ttk.Frame(dialog, padding=(14, 8))
+        footer.pack(side="bottom", fill="x")
+        table = self.table(dialog, ("마감월", "번호", "거래일", "거래처", "금액", "상태"), (90, 100, 100, 380, 110, 160))
+        found = {}
+
+        def fill(_event=None):
+            table.delete(*table.get_children())
+            found.clear()
+            for index, (score, other, entry) in enumerate(self.refund_candidates(key, query.get())[:300]):
+                found[str(index)] = other
+                period = entry.get("period", "")
+                sent = "이미 보냄" if self.state.get("exports", {}).get(period) else ""
+                status = " · ".join(filter(None, ["금액 같음" if not score[0] else "", "같은 업체" if not score[1] else "", sent]))
+                table.insert("", "end", iid=str(index), values=(period, entry.get("number", ""), entry.get("day", ""),
+                                                                 entry.get("merchant", "")[:80], f"{entry.get('amount', '')} {entry.get('currency', '')}", status))
+
+        def choose():
+            selection = table.selection()
+            if len(selection) != 1:
+                show_notice(dialog, "원래 결제 한 건을 고르세요.")
+                return
+            other = found[selection[0]]
+            state = deepcopy(self.state)
+            same_month = state["records"][other].get("period") == record.get("period")
+            if other in self.transactions and same_month:  # an earlier month keeps what was sent; only the refund gets the note
+                try:
+                    refund_balance([self.transactions[other], item])
+                except ValueError as error:
+                    show_notice(dialog, str(error))
+                    return
+                for member in (other, key):
+                    state["records"][member]["refund_group"] = [other, key]
+            else:
+                state["records"].setdefault(key, {})["refund_of"] = other
+            if self.save(state):
+                dialog.destroy()
+
+        ttk.Button(bar, text="찾기", command=fill).pack(side="left", padx=6)
+        ttk.Label(bar, text="번호·업체·금액으로 찾을 수 있어요", foreground=COLORS["muted"]).pack(side="left")
+        ttk.Button(footer, text="이 결제의 환불로 연결", style="Primary.TButton", command=choose).pack(side="right")
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
+        query.bind("<Return>", fill)
+        table.bind("<Double-1>", lambda event: choose())
+        fill()
 
     def compare_documents(self):
         item = self.single_card()
@@ -5120,7 +5257,25 @@ class MonthlyClose:
             "이체 상대 명세서 필요": "Gegenkontoauszug fehlt",
             "환불 상대 명세서 필요": "Auszug zur Erstattung fehlt",
             "전액 환불 확인": "Vollständig erstattet · Belegprüfung offen",
-        }.get(status, status.replace("연결됨 · 차액", "Differenz").replace("일부 환불 · 잔액", "Teilerstattung · Restbetrag"))
+            PARTIAL_REFUND_DONE: "Teilerstattung · Beleg zum Kauf liegt bei",
+            EARLIER_REFUND: self.earlier_refund_german(key),
+        }.get(status, status.replace("연결됨 · 차액", "Differenz").replace("일부 환불 · 잔액", "Teilerstattung · Restbetrag")
+              .replace(" · 증빙 필요", " · Beleg fehlt"))
+
+    def earlier_refund_german(self, key):
+        """‘Erstattung zu 608-002 (Kauf 04.08.2026, 62,80 EUR) – Monat 08/2026 bereits übermittelt’."""
+        original = self.state["records"].get(self.record(key).get("refund_of", ""), {})
+        day = normalized_date(original.get("day", ""))
+        when = f"{day[8:10]}.{day[5:7]}.{day[:4]}" if day else ""
+        try:
+            amount = german_amount(Decimal(original.get("amount", "")))
+        except (InvalidOperation, ValueError):
+            amount = original.get("amount", "")
+        text = f"Erstattung zu {original.get('number', '')} (Kauf {when}, {amount} {original.get('currency', '')})"
+        period = original.get("period", "")
+        if self.state.get("exports", {}).get(period):
+            text += f" – Monat {period[5:7]}/{period[:4]} bereits übermittelt"
+        return text
 
     def package_sources(self, keys):
         """Statement files that hold at least one of the given transactions."""
@@ -5486,7 +5641,8 @@ class MonthlyClose:
                     row = [transaction_id, record["period"], item.day, export_value(self.accounts.get(key, "")),
                            export_value(item.merchant), item.amount, item.currency, german_status,
                            " | ".join(paths), export_value(delivery_text(record.get("advisor_note", ""))), record.get("due", ""),
-                           " | ".join(self.record(other).get("number", "") for other in record.get("refund_group", []) if other != key),
+                           " | ".join([self.record(other).get("number", "") for other in record.get("refund_group", []) if other != key]
+                                      + ([self.state["records"].get(record["refund_of"], {}).get("number", "")] if record.get("refund_of") else [])),
                            FOLLOW_UP.get(record.get("follow_up", ""), ""),
                            reason_german(record.get("statement_evidence", ""), reasons)]
                     reason = DIFFERENCE_REASONS.get(record.get("difference_reason", ""), "")
