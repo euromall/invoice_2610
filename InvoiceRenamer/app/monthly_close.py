@@ -386,6 +386,26 @@ def period_choices(today=None):
     return [PERIOD_AUTO, *months]
 
 
+def ordered_accounts(names, settings=None):
+    """Account order from settings.json → ‘account_order’, with accounts not listed yet added at the end."""
+    if settings is None:
+        try:
+            from invoice_renamer import load_settings
+            settings = load_settings()
+        except Exception:
+            settings = {}
+    order = [name for name in settings.get("account_order") or [] if isinstance(name, str) and name]
+    for name in names:
+        if name and name not in order:
+            order.append(name)
+    return order
+
+
+def save_account_order(order):
+    from invoice_renamer import save_settings
+    save_settings({"account_order": [name for name in order if name]})
+
+
 def assign_numbers(records, transactions, period=""):
     counts = Counter()
     for record in records.values():
@@ -1200,17 +1220,18 @@ class MonthlyClose:
         self.bar_area = ttk.Frame(container, padding=(18, 6, 18, 2))
         self.bar_area.pack(fill="x")
         steps = {
-            2: [("은행·카드 명세서 추가", self.open_csv, "Primary.TButton"), ("여러 명세서 한 번에 추가", self.open_batch, None),
-                ("이어서 작업", self.resume, None), ("지난 달 열기", self.open_past_month, None)],
-            3: [("증빙 폴더 선택", self.select_folder, None), ("일괄 매칭", self.batch_candidates, None),
-                ("매칭완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
-            4: [("최종 검수", self.final_review, "Primary.TButton"), ("월별 누락 점검표", self.monthly_review, None), ("미연결 증빙", self.show_unlinked_invoices, None),
-                ("후속 목록", self.followup_list, None), ("명세서 기간 점검", self.show_statement_periods, None),
-                ("전체 월 검색", self.search_all_months, None)],
-            5: [("세무사용 ZIP 만들기", self.export_zip, "Primary.TButton"),
-                ("추가 제출 ZIP", lambda: self.export_zip(supplemental=True), None),
-                ("마감본 이력·전달 상태", self.export_history, None), ("월 마감 확정·재열기", self.manage_period, None),
-                ("CSV 내보내기", self.export_csv, None)],
+            2: [("명세서 추가", self.open_csv, "Primary.TButton"), ("여러 개 추가", self.open_batch, None),
+                ("이어서 작업", self.resume, None), ("지난 달", self.open_past_month, None),
+                ("번호 명세서", self.open_numbered_statements, None)],
+            3: [("증빙 폴더", self.select_folder, None), ("일괄 매칭", self.batch_candidates, None),
+                ("완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
+            4: [("최종 검수", self.final_review, "Primary.TButton"), ("누락 점검표", self.monthly_review, None), ("미연결 증빙", self.show_unlinked_invoices, None),
+                ("후속 할 일", self.followup_list, None), ("기간 점검", self.show_statement_periods, None),
+                ("전체 검색", self.search_all_months, None)],
+            5: [("세무사 ZIP", self.export_zip, "Primary.TButton"),
+                ("추가 ZIP", lambda: self.export_zip(supplemental=True), None),
+                ("전달 이력", self.export_history, None), ("마감 확정·해제", self.manage_period, None),
+                ("CSV 저장", self.export_csv, None)],
         }
         if practice_folder:
             steps[2].insert(0, ("예시 명세서 불러오기", lambda: self.load_practice_statement(practice_folder), "Success.TButton"))
@@ -1221,7 +1242,6 @@ class MonthlyClose:
                 ttk.Button(frame, text=label, command=command, style=style or "TButton").pack(side="left", padx=(0, 6))
             if number == 2:
                 more_menu(frame, "더보기 ▾", [("명세서 양식 관리", self.manage_formats),
-                                             ("번호 표시 PDF 명세서 보기", self.open_numbered_statements),
                                              ("명세서 기간 점검", self.show_statement_periods)]).pack(side="left")
             if number == 3:
                 self.unmatched_button = ttk.Button(frame, text="연결 안 된 증빙", command=self.manage_unmatched)
@@ -1504,10 +1524,12 @@ class MonthlyClose:
             except (OSError, ValueError, csv.Error, RuntimeError) as error:
                 return ("", "", str(error))
 
-        for i, name in enumerate(names):
-            key, path = str(i), Path(name)
-            by_path[key] = path
-            table.insert("", "end", iid=key, values=(path.name, *inspect(key, path)))
+        with Busy(window, "명세서를 확인하고 있어요") as busy:
+            for i, name in enumerate(names):
+                key, path = str(i), Path(name)
+                busy.step(i + 1, len(names), path.name)
+                by_path[key] = path
+                table.insert("", "end", iid=key, values=(path.name, *inspect(key, path)))
 
         def edit_selected(_event=None):
             selection = table.selection()
@@ -1526,12 +1548,36 @@ class MonthlyClose:
             self.open_csv(path, on_review=configure, owner=window,
                           initial_spec=prepared[key][1] if key in prepared else None)
 
+        def move(step):
+            selection = table.selection()
+            if not selection:
+                self.notice("옮길 명세서를 선택하세요.")
+                return
+            rows = list(table.get_children())
+            picked = [rows.index(key) for key in selection]
+            for index in (sorted(picked) if step < 0 else sorted(picked, reverse=True)):
+                target = index + step
+                if 0 <= target < len(rows) and rows[target] not in selection:
+                    rows[index], rows[target] = rows[target], rows[index]
+            for position, key in enumerate(rows):
+                table.move(key, "", position)
+            table.see(selection[0])
+
+        def sort_by_account():
+            accounts = [table.set(key, "계좌·카드") for key in table.get_children()]
+            order = ordered_accounts(accounts)
+            rank = {name: index for index, name in enumerate(order)}
+            rows = sorted(table.get_children(), key=lambda key: (rank.get(table.set(key, "계좌·카드"), len(rank)), int(key)))
+            for position, key in enumerate(rows):
+                table.move(key, "", position)
+
         def apply():
-            chosen = [key for key in table.selection() if key in prepared]
+            selection = set(table.selection())
+            chosen = [key for key in table.get_children() if key in selection and key in prepared]  # screen order = number order
             if not chosen:
                 messagebox.showinfo("명세서 가져오기", "검토가 끝난 행을 선택하세요.", parent=window)
                 return
-            pending = [key for key in table.selection() if key not in prepared]
+            pending = [key for key in selection if key not in prepared]
             prompt = f"준비된 명세서 {len(chosen)}개를 가져올까요?"
             if pending:
                 prompt += f"\n설정이 필요한 {len(pending)}개는 가져오지 않아요."
@@ -1564,7 +1610,66 @@ class MonthlyClose:
 
         self.buttons(bar, [("선택 파일 설정", edit_selected), ("선택 가져오기", apply),
                            ("준비된 파일 모두 선택", lambda: table.selection_set(tuple(prepared)))])
+        order_bar = ttk.Frame(window, padding=(8, 0, 8, 6))
+        order_bar.pack(fill="x", after=bar)
+        self.buttons(order_bar, [("▲ 위로", lambda: move(-1)), ("▼ 아래로", lambda: move(1)),
+                           ("계좌 순서로 정렬", sort_by_account),
+                           ("계좌 순서 정하기", lambda: self.edit_account_order(
+                               [table.set(key, "계좌·카드") for key in table.get_children()], sort_by_account, window))])
+        ttk.Label(window, text="번호는 위에 있는 명세서부터 매겨져요. ▲▼로 순서를 바꾸거나 ‘계좌 순서로 정렬’을 누르세요.",
+                  foreground=COLORS["muted"], padding=(8, 0, 8, 6)).pack(anchor="w", after=order_bar)
+        sort_by_account()
         table.bind("<Double-1>", edit_selected)
+
+    def edit_account_order(self, extra=(), on_save=None, owner=None):
+        """Panel: the order of bank accounts and cards used to number transactions (saved in settings.json)."""
+        order = ordered_accounts([*self.known_accounts(), *extra])
+        dialog = InlineDialog(self.root)
+        dialog.title("계좌 순서 정하기")
+        dialog.center(520, 420)
+        dialog.grab_set()
+        ttk.Label(dialog, text="여러 명세서를 가져올 때 이 순서대로 번호를 매겨요. 새 계좌는 맨 아래에 붙어요.",
+                  wraplength=480, padding=(14, 10, 14, 6)).pack(anchor="w")
+        box = tk.Listbox(dialog, activestyle="none", height=10, exportselection=False)
+        box.pack(fill="both", expand=True, padx=14)
+        for name in order:
+            box.insert("end", name)
+
+        def shift(step):
+            picked = box.curselection()
+            if not picked:
+                return
+            index = picked[0]
+            target = index + step
+            if 0 <= target < box.size():
+                name = box.get(index)
+                box.delete(index)
+                box.insert(target, name)
+                box.selection_set(target)
+
+        def save():
+            save_account_order(list(box.get(0, "end")))
+            dialog.destroy()
+            if on_save:
+                on_save()
+
+        footer = ttk.Frame(dialog, padding=(14, 10))
+        footer.pack(fill="x")
+        self.buttons(footer, [("▲ 위로", lambda: shift(-1)), ("▼ 아래로", lambda: shift(1))])
+        ttk.Button(footer, text="저장", style="Primary.TButton", command=save).pack(side="right")
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
+
+        def give_back(event):
+            if event.widget is dialog and owner is not None and owner.winfo_exists():
+                owner.after_idle(owner.grab_set)
+        dialog.bind("<Destroy>", give_back)
+
+    def known_accounts(self):
+        names = list(self.state.get("source_accounts", {}).values())
+        for profiles in self.state.get("import_profiles", {}).values():
+            names.extend(profile.get("account", "") for profile in profiles.values())
+        names.extend(self.accounts.values())
+        return names
 
     def read_import(self, source):
         is_pdf = source.suffix.lower() == ".pdf"
@@ -1921,8 +2026,10 @@ class MonthlyClose:
     def reload_sources(self, sources, folder=None):
         """Read saved statements again with their saved settings. Returns the number loaded."""
         prepared, problems = {}, []
-        for checksum, spec in sources.items():
+        busy = Busy(self.root, "명세서를 다시 읽고 있어요")
+        for position, (checksum, spec) in enumerate(sources.items(), 1):
             path = Path(spec["path"])
+            busy.step(position, len(sources), path.name)
             try:
                 if digest(path) != checksum:
                     raise ValueError("명세서 내용이 변경됐어요.")
@@ -1936,6 +2043,7 @@ class MonthlyClose:
                 prepared[checksum] = (spec, transactions, errors)
             except (OSError, ValueError, RuntimeError, csv.Error) as error:
                 problems.append(f"{path.name}: {error}")
+        busy.close()
         if prepared:
             self.transactions.clear()
             self.accounts.clear()
@@ -2069,7 +2177,7 @@ class MonthlyClose:
         dialog.title("지난 달 열기")
         dialog.geometry("900x560")
         dialog.grab_set()
-        ttk.Label(dialog, text="월을 고르면 그달 명세서를 다시 불러와요. 연결·메모·번호·제출 이력은 그대로 이어져요. 확정한 달은 ‘월 마감 확정·재열기’에서 다시 열어야 수정할 수 있어요.",
+        ttk.Label(dialog, text="월을 고르면 그달 명세서를 다시 불러와요. 연결·메모·번호·제출 이력은 그대로 이어져요. 확정한 달은 ‘마감 확정·해제’에서 다시 열어야 수정할 수 있어요.",
                   wraplength=840, padding=(14, 10, 14, 4)).pack(anchor="w")
         top = tk.Frame(dialog, background=COLORS["bg"])
         top.pack(fill="x", padx=14, pady=(4, 8))
@@ -2553,7 +2661,7 @@ class MonthlyClose:
                 dialog.destroy()
                 self.refresh()
                 self.notice(f"{len(selected)}건을 한 번에 연결했어요.\n연결된 거래는 ‘확인 필요’ 목록에서 빠져요. "
-                            "끝나면 ‘매칭완료 폴더로 이동’을 누르세요.", title="일괄 연결 완료")
+                            "끝나면 ‘완료 폴더로 이동’을 누르세요.", title="일괄 연결 완료")
 
         def open_selected(_event=None):
             selection = table.selection()
@@ -3148,7 +3256,7 @@ class MonthlyClose:
     def save(self, state):
         locked = affected_locked_month(self.state, state)
         if locked:
-            messagebox.showerror("마감 확정", f"{locked}은 확정된 달이에요. 변경하려면 ‘월 마감 확정·재열기’에서 먼저 다시 여세요.", parent=self.root)
+            messagebox.showerror("마감 확정", f"{locked}은 확정된 달이에요. 변경하려면 ‘마감 확정·해제’에서 먼저 다시 여세요.", parent=self.root)
             return False
         fields = {"links": "증빙 연결", "transfer": "내부이체", "refund_group": "환불 연결",
                   "advisor_note": "전달 메모", "follow_up": "후속 상태", "due": "후속 예정일",
@@ -4466,7 +4574,9 @@ class MonthlyClose:
             return
         folder = Path(tempfile.mkdtemp(prefix="invoice-numbered-"))
         summary = []
-        for source_key, path in sources:
+        busy = Busy(self.root, "명세서에 번호를 찍고 있어요")
+        for position, (source_key, path) in enumerate(sources, 1):
+            busy.step(position, len(sources), path.name)
             entries = [(self.record(key)["number"], item) for key, item in self.transactions.items()
                        if source_key in self.state.get("transaction_sources", {}).get(key, {})]
             try:
@@ -4479,6 +4589,7 @@ class MonthlyClose:
                 continue
             summary.append(f"{path.name}: {marked}/{len(entries)}건 표시")
             self.open_evidence_file(target)
+        busy.close()
         if summary:
             self.status.set(" · ".join(summary) + " · 세무사 ZIP에도 같은 사본이 들어가요.")
 
@@ -4806,7 +4917,7 @@ class MonthlyClose:
                 saved = self.save(state)
                 dialog.destroy()
                 if saved:
-                    self.notice(f"세무사용 ZIP을 저장했어요.\n{path}\n다음: 세무사에게 보낸 뒤 ‘마감본 이력·전달 상태’에서 ‘전달함’으로 표시하세요.",
+                    self.notice(f"세무사용 ZIP을 저장했어요.\n{path}\n다음: 세무사에게 보낸 뒤 ‘전달 이력’에서 ‘전달함’으로 표시하세요.",
                                 title="ZIP 저장 완료")
                 else:
                     self.status.set(f"ZIP 저장 완료 · 이력 저장 실패 · {path}")

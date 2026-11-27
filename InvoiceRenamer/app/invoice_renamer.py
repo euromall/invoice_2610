@@ -260,6 +260,20 @@ def read_pdf_pages(path):
             yield text, sorted_text, note
 
 
+def text_layer(path):
+    """Text of all pages without OCR (fast), '' when unreadable or XML."""
+    if Path(path).suffix.lower() == ".xml":
+        try:
+            return Path(path).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return ""
+    try:
+        with open_evidence(path) as document:
+            return "\n".join(page.get_text() for page in document)
+    except (OSError, RuntimeError, ValueError):
+        return ""
+
+
 INVOICE_NUMBER = (r"(?im)\b(?:Rechnungsnummer|Rechnungs-?Nr\.?|Rechnung\s+Nr\.?|Beleg-?Nr\.?|Invoice\s+(?:No\.?|Number|#)|인보이스\s*번호)"
                   r"\s*[:#]?[ \t]*(?:\n[ \t]*)?([\w/-]*\d[\w/-]*)\b")
 
@@ -1045,9 +1059,11 @@ def save_invoice_edit(path, fields):
             temporary.unlink(missing_ok=True)
 
 
-def undo_moves(history):
+def undo_moves(history, progress=None):
     restored, failed = [], []
-    for original, current, checksum in reversed(history):
+    for position, (original, current, checksum) in enumerate(reversed(history), 1):
+        if progress:
+            progress(position, len(history), current.name)
         try:
             if current.is_symlink() or digest(current) != checksum:
                 raise OSError("이동한 파일이 변경됐어요.")
@@ -1622,9 +1638,12 @@ class App:
             self.notice("먼저 증빙 폴더를 여세요.")
             return
         entries = []
-        for key, (path, fields, note, number) in self.rows.items():
-            checksum = cached_digest(path)
-            entries.append((key, path, fields, number, checksum))
+        with Busy(self.root, "같은 인보이스를 찾고 있어요") as busy:
+            for position, (key, (path, fields, note, number)) in enumerate(list(self.rows.items()), 1):
+                if position % 10 == 1 or position == len(self.rows):
+                    busy.step(position, len(self.rows), path.name)
+                checksum = cached_digest(path)
+                entries.append((key, path, fields, number, checksum))
         groups = duplicate_groups(entries)
         if not groups:
             self.notice("중복으로 보이는 인보이스가 없어요.\n내용이 같거나, 업체·발행일·총액·번호가 모두 같은 파일을 찾아요.")
@@ -1700,8 +1719,10 @@ class App:
             except OSError as error:
                 messagebox.showerror("중복 폴더 만들기 실패", str(error), parent=dialog)
                 return
-            for key in chosen:
+            busy = Busy(dialog, "중복 폴더로 옮기고 있어요")
+            for position, key in enumerate(chosen, 1):
                 _, path, fields, invoice_number, _ = rows[key]
+                busy.step(position, len(chosen), path.name)
                 name = proposed_name(fields, path, invoice_number) or path.name  # same naming rule as 파일명 변경
                 target = reserve_name(target_folder, name, path, occupied)
                 try:
@@ -1713,6 +1734,7 @@ class App:
                     history.append((path, target, checksum))
                 except OSError as error:
                     errors.append(f"{path.name}: {error}")
+            busy.close()
             if history:
                 self.last_moves = history
             dialog.destroy()
@@ -1747,8 +1769,10 @@ class App:
         except OSError as error:
             messagebox.showerror("제외 폴더 만들기 실패", str(error), parent=self.root)
             return
-        for key in selection:
+        busy = Busy(self.root, "제외 폴더로 옮기고 있어요")
+        for position, key in enumerate(selection, 1):
             path = self.rows[key][0]
+            busy.step(position, len(selection), path.name)
             target = reserve_name(target_folder, path.name, path, occupied)
             try:
                 if target is None:
@@ -1758,6 +1782,7 @@ class App:
                 history.append((path, target, checksum))
             except OSError as error:
                 errors.append(f"{path.name}: {error}")
+        busy.close()
         if history:
             self.last_moves = history
         self.load_folder()
@@ -1780,28 +1805,37 @@ class App:
         if not entry:
             self.status.set(f"수정값을 저장했어요 · {reason}")
             return
-        updated = self.reread_incomplete()
+        updated = self.reread_incomplete(entry["marker"])
         known = {"date": "발행일", "total": "총액", "number": "번호"}
         words = " · ".join(f"{known[key]} ‘{label}’" for key, label in entry["labels"].items())
         self.notice(f"수정값을 저장하고 ‘{entry['marker']}’ 인보이스 양식을 배웠어요.\n찾는 단어: {words}\n"
                     f"같은 업체 파일 {updated}개를 다시 읽어 채웠어요. 다음부터 이 업체는 자동으로 읽어요.",
                     title="양식 학습 완료")
 
-    def reread_incomplete(self):
-        """Read again the files that still miss a required field (after a layout was learned)."""
+    def reread_incomplete(self, marker=""):
+        """Read again the files that still miss a required field (after a layout was learned).
+
+        marker: only files whose text layer contains it are read again (the text layer is checked first
+        without OCR, which is fast); scans without a text layer are skipped. Shows progress."""
+        todo = [(key, row) for key, row in self.rows.items() if not (all(row[1]) and row[3])]
         updated = 0
-        for key, (path, fields, note, number) in list(self.rows.items()):
-            if all(fields) and number:
-                continue
-            info = {}
-            try:
-                new_fields, new_note, new_number, _ = read_invoice_details(path, info)
-            except (OSError, RuntimeError, ValueError):
-                continue
-            if info.get("learned") and (new_fields, new_number) != (fields, number):
-                self.rows[key] = (path, new_fields, new_note, new_number)
-                self.invoice_like[path] = True
-                updated += 1
+        if not todo:
+            return 0
+        folded = marker.casefold()
+        with Busy(self.root, "같은 업체 인보이스를 다시 읽고 있어요") as busy:
+            for index, (key, (path, fields, note, number)) in enumerate(todo, 1):
+                busy.step(index, len(todo), path.name)
+                if folded and folded not in text_layer(path).casefold():
+                    continue
+                info = {}
+                try:
+                    new_fields, new_note, new_number, _ = read_invoice_details(path, info)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                if info.get("learned") and (new_fields, new_number) != (fields, number):
+                    self.rows[key] = (path, new_fields, new_note, new_number)
+                    self.invoice_like[path] = True
+                    updated += 1
         self.refresh()
         return updated
 
@@ -1993,7 +2027,9 @@ class App:
         errors = []
         history = []
         markdown = 0
-        for key, path, target in changes:
+        busy = Busy(self.root, "파일명을 바꾸고 있어요")
+        for position, (key, path, target) in enumerate(changes, 1):
+            busy.step(position, count, path.name)
             try:
                 if path.is_symlink() or not target.resolve().is_relative_to(self.folder.resolve()):
                     raise OSError("선택한 인보이스 폴더 안의 파일과 경로만 정리할 수 있어요.")
@@ -2008,6 +2044,7 @@ class App:
             self.rows[key] = (target, *self.rows[key][1:])
             self.invoice_like[target] = self.invoice_like.pop(path, True)
             history.append((path, target, checksum))
+        busy.close()
         if history:
             self.last_moves = history
         self.refresh()
@@ -2024,7 +2061,8 @@ class App:
             return
         if not messagebox.askyesno("정리 되돌리기", f"마지막 작업에서 옮긴 PDF {len(self.last_moves)}개를 되돌릴까요?"):
             return
-        restored, failed = undo_moves(self.last_moves)
+        with Busy(self.root, "정리를 되돌리고 있어요") as busy:
+            restored, failed = undo_moves(self.last_moves, busy.step)
         self.last_moves = [item[:3] for item in reversed(failed)]
         paths = dict(restored)
         if self.folder:
