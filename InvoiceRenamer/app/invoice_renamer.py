@@ -1821,7 +1821,7 @@ class App:
         self.practice_folder = practice_folder
         self.on_change = on_change
         self.on_work_folder = None  # set by the main window to keep steps 2-5 on the same work folder
-        self.on_manage_reasons = None  # set by the main window: ‘증빙 없이 처리’ reasons (step 3)
+        self.on_manage_reasons = None  # set by the main window: ‘인보이스 없이 처리’ reasons (step 3)
         self.on_manage_mail = None  # mailboxes for the mail search
         self.on_account_order = None  # order of bank accounts and cards for numbering
         self.on_import_statements = None  # step 1 right-click ‘명세서로 불러오기’ → step 2 import
@@ -1835,7 +1835,7 @@ class App:
             self.root.report_callback_exception = self.report_callback_error
         head = ttk.Frame(container, padding=(18, 14, 18, 4))
         head.pack(fill="x")
-        ttk.Label(head, text="1. 증빙 모으기·정리", style="Title.TLabel", font=FONT_TITLE).pack(anchor="w")
+        ttk.Label(head, text="1. 인보이스 모으기·정리", style="Title.TLabel", font=FONT_TITLE).pack(anchor="w")
         ttk.Label(head, style="Muted.TLabel", text=(
             "가져온 파일은 작업 폴더에 모아 발행일·업체명·총액·번호를 읽어요. "
             "빨간 행은 필수 누락, 회색 행은 인보이스가 아닌 것 같은 파일이에요.")).pack(anchor="w")
@@ -1917,7 +1917,7 @@ class App:
         if practice_folder:
             self.folder = practice_folder / "Belege"
             self.load_folder()
-            self.status.set("연습 모드 · 예시 증빙을 열었어요. 왼쪽 ‘2. 명세서 불러오기’에서 예시 명세서도 불러올 수 있어요.")
+            self.status.set("연습 모드 · 예시 인보이스를 열었어요. 왼쪽 ‘2. 명세서 불러오기’에서 예시 명세서도 불러올 수 있어요.")
         else:
             self.root.after_idle(self.first_check)
 
@@ -2038,7 +2038,7 @@ class App:
 
     def import_files(self, names=None):
         if self.practice_folder:
-            self.notice("연습 모드에서는 파일을 가져오지 않아요. 예시 증빙으로 연습하세요.")
+            self.notice("연습 모드에서는 파일을 가져오지 않아요. 예시 인보이스로 연습하세요.")
             return
         names = names or filedialog.askopenfilenames(parent=self.root, title="작업 폴더로 옮길 인보이스 고르기 (여러 개 가능)",
                                                     filetypes=[("인보이스 (PDF·사진·XML)", "*.pdf *.jpg *.jpeg *.png *.xml"),
@@ -2048,7 +2048,7 @@ class App:
 
     def import_folder(self, selected=None):
         if self.practice_folder:
-            self.notice("연습 모드에서는 파일을 가져오지 않아요. 예시 증빙으로 연습하세요.")
+            self.notice("연습 모드에서는 파일을 가져오지 않아요. 예시 인보이스로 연습하세요.")
             return
         selected = selected or filedialog.askdirectory(parent=self.root, title="인보이스가 든 폴더 고르기 (하위 폴더 포함, 작업 폴더로 옮겨요)")
         if not selected:
@@ -2213,14 +2213,14 @@ class App:
         # 사유 ---------------------------------------------------------
         if self.on_manage_reasons:
             reasons = page("사유")
-            ttk.Label(reasons, text="증빙 없이 처리 사유", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
+            ttk.Label(reasons, text="인보이스 없이 처리 사유", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
             note(reasons, "세무사에게 가는 독일어 문장과 함께 관리해요. 제외 폴더 사유는 정해진 목록을 써요.", 1)
             launcher(reasons, 2, "사유 관리 (한국어·독일어·추가)", self.on_manage_reasons)
         # 자동 규칙 -------------------------------------------------------
         if getattr(self, "on_manage_rules", None):
             rules = page("자동 규칙")
             ttk.Label(rules, text="정기 결제 자동 처리 규칙", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
-            note(rules, "월세·할부·수수료처럼 매달 같은 거래를 등록한 사유로 ‘증빙 없이 처리’하는 규칙이에요.", 1)
+            note(rules, "월세·할부·수수료처럼 매달 같은 거래를 등록한 사유로 ‘인보이스 없이 처리’하는 규칙이에요.", 1)
             launcher(rules, 2, "자동 적용 규칙 보기·삭제", self.on_manage_rules)
         titles = [tabs.tab(index, "text") for index in tabs.tabs()]
         if tab in titles:
@@ -2297,7 +2297,7 @@ class App:
             return
         self.status.set("PDF를 읽고 있어요…")
         self.root.update_idletasks()
-        busy = Busy(self.root, "증빙을 읽고 있어요") if len(paths) > 3 else None
+        busy = Busy(self.root, "인보이스를 읽고 있어요") if len(paths) > 3 else None
         for index, path in enumerate(paths):
             if path in scanned:
                 self.rows[str(index)] = scanned[path]
@@ -2333,7 +2333,7 @@ class App:
         groups = duplicate_groups((key, path, fields, number, cached_digest(path))
                                   for key, (path, fields, _, number) in self.rows.items())
         hint = f"  |  중복 의심 {len(groups)}묶음 · ‘중복 정리’를 눌러 확인하세요" if groups else ""
-        self.status.set(f"{self.folder}  |  증빙 {len(paths)}개{hint}")
+        self.status.set(f"{self.folder}  |  인보이스 {len(paths)}개{hint}")
 
     def row_check(self, path, fields, note, number):
         """Return (text, tag) describing how well the evidence was read."""
@@ -2443,7 +2443,7 @@ class App:
     def clean_duplicates(self):
         """Show invoices saved more than once and move the extra copies into the 중복 folder."""
         if self.folder is None or not self.rows:
-            self.notice("먼저 증빙 폴더를 여세요.")
+            self.notice("먼저 인보이스 폴더를 여세요.")
             return
         entries = []
         with Busy(self.root, "같은 인보이스를 찾고 있어요") as busy:

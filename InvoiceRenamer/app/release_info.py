@@ -10,7 +10,7 @@ import sys
 
 VERSION = (Path(__file__).resolve().parent / "VERSION").read_text(encoding="ascii").strip()
 STAGES = {
-    "pdf_read": "증빙을 읽는 중 오류",
+    "pdf_read": "인보이스를 읽는 중 오류",
     "file_move": "파일을 정리하는 중 오류",
     "markdown": "마크다운을 저장하는 중 오류",
     "statement": "명세서를 가져오는 중 오류",

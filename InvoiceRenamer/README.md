@@ -2,6 +2,19 @@
 
 독일 세무 월마감용 프로그램입니다. 은행·카드 명세서 거래에 인보이스를 연결하고, 세무사에게 전달할 독일어 ZIP과 Excel 대조표를 만듭니다.
 
+## v1.13.0 변경 사항 (2026-11-27)
+
+| 구분 | 내용 |
+|---|---|
+| 용어 | 화면의 ‘증빙’ → ‘인보이스’(독일어 출력 Beleg, ‘보조 자료’는 그대로). 저장된 후속 상태 `증빙 확보 불가`는 읽을 때 `인보이스 확보 불가`로 바꿈(`update_terms`). 버튼 `+ 파일 추가`, `전체에서 고르기`. |
+| 제외 | `EXCLUDE_REASONS`, `exclude_files` → `제외/<사유>`, `exclusion-log.json`, 확인 카드(`ask_yes_no(..., warnings, choices)`)와 되돌리기 알림(`show_toast`). 3단계 `exclude_documents` 경고: 연결된 거래, 명세서 없는 달, 이미 보낸 달, 8년 보관. 나누기 원본은 `제외/나누기 원본`. |
+| 1단계 | 보기 칩(`VIEWS`), 오른쪽 클릭 메뉴(`row_menu`), 더블클릭, Delete·F2. 인보이스 맞음·보류 표시(`invoice-flags.json`, 파일 이동 시 `follow_flags`). 통관 서류(`customs_document`), 충돌 사본(`CONFLICTED_COPY`), 표 머리글 `Total Price(EUR)` 총액, 파일 이름의 번호(`number_from_filename`). |
+| 값 고치기 | `ValueForm`(누락 칸 먼저, 상태 표시), `show_source_locations` 다시 작성(고른 칸 추적, 근처 라벨로 칸 자동 전환, 오른쪽 클릭 ‘이 값으로 넣기’). 배우기 전 확인(`learn(..., save=False)` + 읽어 보기 확인). |
+| 폴더 감시 | 변경 막대(`change_bar`, 지금 읽기/나중에). 1단계 `file_stamp`, 3단계 `_INDEX_CACHE`로 바뀐 파일만 다시 읽음. 폴더 가져오기 하위 폴더 유지 옵션(`import_evidence(base=...)`). |
+| 3단계 | 연결 전 확인(`link_concerns`) + 연결 알림 되돌리기(`undo_link`), 이중 결제 의심(`double_payments`), 환불 찾기 기간 선택, 거래·인보이스 오른쪽 클릭 메뉴. 2·3단계 더보기 제거. |
+| 도구 | 오늘 할 일, 작업 이력, 백업·복원(`backup_now`, `restore_backup`, 닫을 때 `auto_backup`), 환경설정 탭(일반·폴더·메일·명세서·계좌·인보이스 양식·사유·자동 규칙), 도움말 ▾, F1 단축키, 표 칸 숨기기(`tables.hidden`). |
+| 알려진 한계 | 중국 인보이스처럼 표 총액이 다른 줄에 있으면 아직 못 읽음. 예전 최상위 `중복` 폴더는 자동으로 합치지 않음. 폴더 위치 설정은 v1.14. Windows 실기 검증 전(Linux/Xvfb에서만 확인). |
+
 ## v1.12.0 변경 사항 (2026-11-27)
 
 | 구분 | 내용 |

@@ -68,7 +68,7 @@ def create_backup(target, state, evidence_folder, attachments, edits):
                 if path.resolve().is_relative_to(root) and path.relative_to(evidence_folder).parts[0] != STATEMENT_FOLDER:
                     include(path, f"Belege/{path.relative_to(evidence_folder).as_posix()}")
     else:
-        missing.append("Belege/ (증빙 폴더를 열지 않음)")
+        missing.append("Belege/ (인보이스 폴더를 열지 않음)")
     for index, (key, path) in enumerate(sources.items(), 1):
         source = Path(path)
         member = f"Kontoauszuege/{index:04d}_{source.name}"

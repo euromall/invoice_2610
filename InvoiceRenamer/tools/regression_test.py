@@ -200,7 +200,7 @@ def run():
         from ui_theme import help_key, sort_value
         check(sorted(["-5176.50 EUR", "40.51 EUR", "", "9.46 EUR", "800.00 EUR"], key=sort_value)
               == ["-5176.50 EUR", "9.46 EUR", "40.51 EUR", "800.00 EUR", ""], "v1.10: amounts sort by value")
-        check(help_key("파일 가져오기 (복사)") == "파일 가져오기" and help_key("연결 안 된 증빙 (234)") == "연결 안 된 증빙", "v1.10: help keys")
+        check(help_key("파일 가져오기 (복사)") == "파일 가져오기" and help_key("연결 안 된 인보이스 (234)") == "연결 안 된 인보이스", "v1.10: help keys")
         reasons = reason_list({})
         rent_reason = next(entry for entry in reasons if entry["ko"].startswith("임대료"))
         check(rent_reason["contract"] and not next(entry for entry in reasons if entry["ko"] == "은행 수수료")["contract"],
@@ -227,9 +227,9 @@ def run():
             state={"records": review_records, "aliases": {}}, by_key={"doc": invoice, "doc2": other})
         stub.record = lambda key: review_records[key]
         found = {key: MonthlyClose.final_checks(stub, key) for key in stub.transactions}
-        check(found["t1"] == [] and "증빙 없음" in found["t4"] and any(w.startswith("금액 차이") for w in found["t2"])
+        check(found["t1"] == [] and "인보이스 없음" in found["t4"] and any(w.startswith("금액 차이") for w in found["t2"])
               and any("업체명 다름" in w for w in found["t2"]) and any("날짜" in w for w in found["t2"])
-              and "같은 증빙이 다른 거래에도 연결" in found["t3"], f"v1.11: final check warnings {found}")
+              and "같은 인보이스가 다른 거래에도 연결" in found["t3"], f"v1.11: final check warnings {found}")
         review_records["t1"]["links"] = ["doc"]
         checked_state = {"records": review_records, "final_review": {"t1": {"status": "ok", "signature": review_signature(review_records["t1"])}}}
         before = review_state(checked_state, "t1")
@@ -465,7 +465,7 @@ def run():
         mc.transactions["q"] = Transaction("q", day(2026, 8, 6), "SHOP X", Decimal("-20.00"), "EUR")
         mc.state["records"]["p"] = {"number": "608-006", "period": "2026-08", "refund_group": ["p", "q"]}
         mc.state["records"]["q"] = {"number": "608-007", "period": "2026-08", "refund_group": ["p", "q"]}
-        check("증빙 필요" in mc.status_for("p") and "Beleg fehlt" in mc.german_status("p"), f"v1.12: partial refund needs evidence {mc.status_for('p')}")
+        check("인보이스 필요" in mc.status_for("p") and "Beleg fehlt" in mc.german_status("p"), f"v1.12: partial refund needs evidence {mc.status_for('p')}")
         mc.state["records"]["p"]["links"] = ["d0"]
         check(mc.status_for("q") == PARTIAL_REFUND_DONE, "v1.12: partial refund with purchase invoice is done")
     print("PASS: v1.12 amount input, value picking, DHL total, mail search, account order, Amazon sellers, print bundle, refunds, v1.11 final check, v1.10 statement text, sort, reasons, v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
@@ -476,6 +476,11 @@ def run_v113():
     import learned_formats
     from invoice_renamer import field_from_label, invoice_likeness, number_from_filename, value_problems
     from pdf_view import PdfView
+
+    from monthly_close import FOLLOW_UP, update_terms
+    saved = update_terms({"records": {"a": {"follow_up": "증빙 확보 불가"}, "b": {"follow_up": "요청 중"}, "c": "x"}})
+    check(saved["records"]["a"]["follow_up"] == "인보이스 확보 불가" and saved["records"]["b"]["follow_up"] == "요청 중"
+          and "인보이스 확보 불가" in FOLLOW_UP, f"v1.13: old ‘증빙’ follow-up renamed {saved}")
 
     with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
         root = Path(scratch)

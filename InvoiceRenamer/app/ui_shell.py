@@ -14,9 +14,9 @@ from ui_theme import COLORS, FONT, FONT_BOLD, FONT_SMALL, apply_style, attach_he
 
 APP_TITLE = "InvoiceRenamer · 독일 월마감"
 STEPS = (
-    (1, "증빙 모으기·정리"),
+    (1, "인보이스 모으기·정리"),
     (2, "명세서 불러오기"),
-    (3, "증빙 매칭"),
+    (3, "인보이스 매칭"),
     (4, "누락 점검"),
     (5, "세무사 제출"),
 )
@@ -237,7 +237,7 @@ class Shell:
         self.kpi_labels = {}
         for key, label, color in (("total", "거래", "#ffffff"), ("ok", "대조 완료", "#9be7b5"),
                                   ("transfer", "이체·환불", "#d6bcfa"), ("warn", "확인 필요", "#fbd38d"),
-                                  ("bad", "증빙 없음", "#feb2b2")):
+                                  ("bad", "인보이스 없음", "#feb2b2")):
             widget = tk.Label(self.kpi, background=COLORS["navy"], foreground=color, font=FONT_BOLD)
             widget.pack(side="left", padx=(12, 0))
             self.kpi_labels[key] = (widget, label)
@@ -333,9 +333,9 @@ class Shell:
             ("원본 창", "끌기", "상자 안 글자를 지금 항목 값으로 (옆 글자를 보고 항목을 바꾸기도 해요)"),
             ("원본 창", "글자 오른쪽 클릭", "이 값으로 넣기 ▸ 항목"), ("원본 창", "Ctrl+휠", "확대·축소"),
             ("3단계 거래", "Enter", "추천 1순위 연결 (이상하면 먼저 물어요)"),
-            ("3단계 거래", "더블클릭 / 오른쪽 클릭", "명세서에서 보기 / 메모·증빙 없이 처리·메일 검색·환불 찾기…"),
-            ("3단계 증빙", "더블클릭 / 오른쪽 클릭", "열기 / 연결·해제·나란히 보기·값 고치기·제외…"),
-            ("4단계 점검표", "더블클릭", "그 달 3단계로 · 항목이면 그 거래·증빙으로"),
+            ("3단계 거래", "더블클릭 / 오른쪽 클릭", "명세서에서 보기 / 메모·인보이스 없이 처리·메일 검색·환불 찾기…"),
+            ("3단계 인보이스", "더블클릭 / 오른쪽 클릭", "열기 / 연결·해제·나란히 보기·값 고치기·제외…"),
+            ("4단계 점검표", "더블클릭", "그 달 3단계로 · 항목이면 그 거래·인보이스로"),
             ("전달 이력", "더블클릭", "ZIP이 있는 폴더 열기"),
         ]
         frame = ttk.Frame(dialog, padding=14)
@@ -484,9 +484,9 @@ class Shell:
             close = self.close
             if not close.transactions:
                 items.append(("2단계", "불러온 명세서가 없어요", lambda: self.show(2)))
-            missing = [key for key in close.transactions if "증빙 없음" in close.status_for(key) or close.status_for(key) == "증빙 미연결"]
+            missing = [key for key in close.transactions if "인보이스 없음" in close.status_for(key) or close.status_for(key) == "인보이스 미연결"]
             if missing:
-                items.append(("3단계", f"증빙이 없는 거래 {len(missing)}건", lambda: self.show(3)))
+                items.append(("3단계", f"인보이스가 없는 거래 {len(missing)}건", lambda: self.show(3)))
             if close.invoices:
                 unmatched = len(close.unmatched_documents(near_only=True))
                 if unmatched:
@@ -607,7 +607,7 @@ class Shell:
         notes, done = {}, set()
         summary = getattr(self.app, "summary", None)
         if self.app.rows and summary:
-            notes[1] = f"증빙 {len(self.app.rows)}개 · 필수 누락 {summary.get('bad', 0)}"
+            notes[1] = f"인보이스 {len(self.app.rows)}개 · 필수 누락 {summary.get('bad', 0)}"
             if not summary.get("bad"):
                 done.add(1)
         else:

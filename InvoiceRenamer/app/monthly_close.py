@@ -770,8 +770,17 @@ FOLLOW_UP = {
     "요청 중": "Beleg angefordert",
     "수신 완료": "Beleg erhalten",
     "세무사 확인 필요": "Steuerliche Prüfung erforderlich",
-    "증빙 확보 불가": "Beleg nicht beschaffbar",
+    "인보이스 확보 불가": "Beleg nicht beschaffbar",
 }
+OLD_FOLLOW_UP = {"증빙 확보 불가": "인보이스 확보 불가"}  # v1.13 renamed 증빙 → 인보이스 on screen
+
+
+def update_terms(state):
+    """Bring follow-up values saved before v1.13 (‘증빙 확보 불가’) to the new name. Returns the state."""
+    for record in (state.get("records") or {}).values():
+        if isinstance(record, dict) and record.get("follow_up") in OLD_FOLLOW_UP:
+            record["follow_up"] = OLD_FOLLOW_UP[record["follow_up"]]
+    return state
 DIFFERENCE_REASONS = {
     "": "", "부분결제": "Teilzahlung", "수수료": "Gebühr", "환율 차이": "Kursdifferenz",
     "조기결제 할인": "Skonto", "기타": "Sonstiges",
@@ -786,20 +795,20 @@ GERMAN_TEMPLATES = {
 
 # What goes into the advisor ZIP: (id, name shown, Korean description, required)
 PACKAGE_PARTS = [
-    ("Belege", "Belege/ (증빙 폴더)", "거래에 연결된 인보이스·영수증. 파일명 앞 [거래번호]로 거래와 연결돼요.", True),
-    ("Abgleich.xlsx", "Abgleich.xlsx", "엑셀 대조표. 아래 표들이 모두 시트로 들어 있고, 증빙 파일로 바로 가는 링크가 있어요.", True),
+    ("Belege", "Belege/ (인보이스 폴더)", "거래에 연결된 인보이스·영수증. 파일명 앞 [거래번호]로 거래와 연결돼요.", True),
+    ("Abgleich.xlsx", "Abgleich.xlsx", "엑셀 대조표. 아래 표들이 모두 시트로 들어 있고, 인보이스 파일로 바로 가는 링크가 있어요.", True),
     ("01_Abgleich.csv", "01_Abgleich.csv", "거래별 대조 결과: 거래번호·날짜·금액·상태·세무사 전달 메모.", True),
     ("Kontoauszuege", "Kontoauszuege/ (명세서 원본)", "은행·카드 명세서 원본 파일.", False),
     ("nummeriert", "Kontoauszuege/…_nummeriert.pdf", "PDF 명세서에 거래번호를 찍은 사본 (원본은 그대로).", False),
     ("Druckmappe.pdf", "Druckmappe.pdf", "인쇄용 PDF 한 개: 명세서 쪽마다 그 쪽 번호의 인보이스(번호 찍힌 사본)를 이어 붙였어요. 원본은 Belege/에 그대로.", False),
     ("Anlagen", "Anlagen/ (보조 자료)", "메모·기록에서 거래에 붙인 보조 자료 (확인 메일 등).", False),
-    ("02_Belegdetails.csv", "02_Belegdetails.csv", "증빙별 상세: 발행일·업체·인보이스 번호·순액·세액.", False),
-    ("03_Offene_Posten.csv", "03_Offene_Posten.csv", "미해결 거래: 증빙 없음·확인 필요인 거래만 모은 표.", False),
-    ("04_Importfehler.csv", "04_Importfehler.csv", "명세서에서 읽지 못한 행, 끝까지 읽지 못한 증빙 PDF.", False),
+    ("02_Belegdetails.csv", "02_Belegdetails.csv", "인보이스별 상세: 발행일·업체·인보이스 번호·순액·세액.", False),
+    ("03_Offene_Posten.csv", "03_Offene_Posten.csv", "미해결 거래: 인보이스 없음·확인 필요인 거래만 모은 표.", False),
+    ("04_Importfehler.csv", "04_Importfehler.csv", "명세서에서 읽지 못한 행, 끝까지 읽지 못한 인보이스 PDF.", False),
     ("05_Kontoauszuege.csv", "05_Kontoauszuege.csv", "ZIP에 든 명세서 파일 목록과 위변조 확인용 해시(SHA-256).", False),
     ("06_Nachreichungen.csv", "06_Nachreichungen.csv", "지난 제출 이후 바뀐 거래 (추가 제출용).", False),
-    ("07_Bewirtung.csv", "07_Bewirtung.csv", "접대비(Bewirtung) 증빙의 날짜·장소·참석자·목적.", False),
-    ("08_Betragszuordnung.csv", "08_Betragszuordnung.csv", "한 증빙을 여러 거래에 나눈 금액과 차액 사유.", False),
+    ("07_Bewirtung.csv", "07_Bewirtung.csv", "접대비(Bewirtung) 인보이스의 날짜·장소·참석자·목적.", False),
+    ("08_Betragszuordnung.csv", "08_Betragszuordnung.csv", "한 인보이스를 여러 거래에 나눈 금액과 차액 사유.", False),
     ("09_Rechnungskorrekturen.csv", "09_Rechnungskorrekturen.csv", "수정 인보이스(Gutschrift·Storno)와 원래 인보이스 연결.", False),
     ("10_Anlagen.csv", "10_Anlagen.csv", "보조 자료 목록.", False),
     ("11_Endkontrolle.csv", "11_Endkontrolle.csv", "최종 검수 기록: 검수한 거래의 결과(검수 완료·다시 확인)와 날짜.", False),
@@ -829,7 +838,7 @@ def german_draft(source, due, follow_up):
         lines.append("Der Beleg wurde angefordert.")
     if follow_up == "세무사 확인 필요":
         lines.append("Bitte steuerlich prüfen.")
-    if follow_up == "증빙 확보 불가":
+    if follow_up == "인보이스 확보 불가":
         lines.append("Der Beleg konnte nicht beschafft werden.")
     if due:
         when = date.fromisoformat(due).strftime("%d.%m.%Y")
@@ -856,13 +865,13 @@ def german_import_error(value):
 
 
 GERMAN_TO_KOREAN = {
-    "Abgeglichen": "금액 대조 완료", "Beleg fehlt": "증빙 없음",
+    "Abgeglichen": "금액 대조 완료", "Beleg fehlt": "인보이스 없음",
     "Auszug als Nachweis · steuerlich prüfen": "명세서 근거 · 세무사 확인",
     "Dauerbeleg – Vertrag liegt vor": "계약서 근거 확인",
     "Verknüpfte Datei fehlt": "연결 파일 없음", "Rechnungsbetrag prüfen": "인보이스 총액 확인",
     "Währung prüfen": "통화 확인", "Gegenkontoauszug fehlt": "이체 상대 명세서 필요",
     "Auszug zur Erstattung fehlt": "환불 상대 명세서 필요",
-    "Vollständig erstattet · Belegprüfung offen": "전액 환불 · 증빙 확인 필요",
+    "Vollständig erstattet · Belegprüfung offen": "전액 환불 · 인보이스 확인 필요",
     "Übersetzung der Notiz ausstehend.": "메모 번역 대기",
     "Enthalten": "포함", "Bereits übermittelt": "이미 전달함", "Zuordnung aufgehoben": "연결 해제됨",
 }
@@ -871,7 +880,7 @@ GERMAN_PREFIXES = (("Interner Transfer zu", "내부이체"), ("Differenz", "차�
 
 
 def german_with_korean(text):
-    """Show a German export value with its Korean meaning, e.g. 'Beleg fehlt (증빙 없음)'."""
+    """Show a German export value with its Korean meaning, e.g. 'Beleg fehlt (인보이스 없음)'."""
     korean = GERMAN_TO_KOREAN.get(text)
     if korean is None:
         for german, meaning in GERMAN_PREFIXES:
@@ -1114,7 +1123,7 @@ _REASON_CACHE = []
 
 
 def reason_list(settings=None):
-    """Reasons for ‘증빙 없이 처리’: built-in ones (German text editable, can be hidden) and the user's own.
+    """Reasons for ‘인보이스 없이 처리’: built-in ones (German text editable, can be hidden) and the user's own.
 
     [{"ko", "de", "contract", "hidden", "builtin"}]. Kept in settings.json → ‘no_evidence_reasons’.
     """
@@ -1183,7 +1192,7 @@ def is_contract_reason(korean, reasons=None):
     return korean in DAUERBELEG_REASONS
 CONTRACT_STATUS = "계약서 근거 확인"
 EARLIER_REFUND = "전월 결제 환불 확인"
-PARTIAL_REFUND_DONE = "일부 환불 · 증빙 연결됨"
+PARTIAL_REFUND_DONE = "일부 환불 · 인보이스 연결됨"
 DONE_STATES = ("금액 대조 완료", "내부이체 확인", "전액 환불 확인", CONTRACT_STATUS, EARLIER_REFUND, PARTIAL_REFUND_DONE)
 RECURRING_AUTO = ("아니요", "예 · 같은 거래처·같은 금액이면 자동 적용")
 
@@ -1317,7 +1326,7 @@ def apply_recurring(state, transactions):
     return count
 
 
-REVIEW_KINDS = ("증빙 없는 거래", "거래 없는 증빙", "번역 대기", "세무사 확인", "명세서 공백")
+REVIEW_KINDS = ("인보이스 없는 거래", "거래 없는 인보이스", "번역 대기", "세무사 확인", "명세서 공백")
 
 
 def review_months(state, invoices):
@@ -1332,7 +1341,7 @@ def review_months(state, invoices):
         if not (links or record.get("transfer") or record.get("refund_group") or record.get("refund_of") or record.get("statement_evidence")):
             issues.append((REVIEW_KINDS[0], number, merchant))
         if (record.get("statement_evidence") and not is_contract_reason(record["statement_evidence"])) \
-                or record.get("follow_up") in ("세무사 확인 필요", "증빙 확보 불가"):
+                or record.get("follow_up") in ("세무사 확인 필요", "인보이스 확보 불가"):
             issues.append((REVIEW_KINDS[3], number, merchant))
         texts = [record.get("advisor_note", ""), *(state.get("document_notes", {}).get(key, "") for key in links)]
         if any(delivery_text(value) != value for value in texts):
@@ -1431,6 +1440,9 @@ class MonthlyClose:
         try:
             if self.state_path.exists():
                 self.state = json.loads(self.state_path.read_text(encoding="utf-8"))
+                if not isinstance(self.state, dict):
+                    raise ValueError("저장 형식 오류")
+                update_terms(self.state)
                 if not isinstance(self.state["records"], dict) or not isinstance(self.state["aliases"], dict):
                     raise ValueError("저장 형식 오류")
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -1459,9 +1471,9 @@ class MonthlyClose:
             2: [("명세서 추가", self.open_csv, "Primary.TButton"), ("여러 개 추가", self.open_batch, None),
                 ("이어서 작업", self.resume, None), ("지난 달", self.open_past_month, None),
                 ("번호 명세서", self.open_numbered_statements, None)],
-            3: [("증빙 폴더", self.select_folder, None), ("일괄 매칭", self.batch_candidates, None),
+            3: [("인보이스 폴더", self.select_folder, None), ("일괄 매칭", self.batch_candidates, None),
                 ("완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
-            4: [("최종 검수", self.final_review, "Primary.TButton"), ("인쇄 묶음", self.open_print_bundle, None), ("누락 점검표", self.monthly_review, None), ("미연결 증빙", self.show_unlinked_invoices, None),
+            4: [("최종 검수", self.final_review, "Primary.TButton"), ("인쇄 묶음", self.open_print_bundle, None), ("누락 점검표", self.monthly_review, None), ("미연결 인보이스", self.show_unlinked_invoices, None),
                 ("후속 할 일", self.followup_list, None), ("기간 점검", self.show_statement_periods, None),
                 ("전체 검색", self.search_all_months, None)],
             5: [("세무사 ZIP", self.export_zip, "Primary.TButton"),
@@ -1476,19 +1488,19 @@ class MonthlyClose:
             frame = ttk.Frame(self.bar_area)
             for label, command, style in items:
                 ttk.Button(frame, text=label, command=command, style=style or "TButton").pack(side="left", padx=(0, 6))
-            if number == 3:  # v1.13: no 더보기 here; ‘이동 되돌리기’ is the toast after moving, 명세서 근거 is in 증빙 없이 처리
-                self.unmatched_button = ttk.Button(frame, text="연결 안 된 증빙", command=self.manage_unmatched)
+            if number == 3:  # v1.13: no 더보기 here; ‘이동 되돌리기’ is the toast after moving, 명세서 근거 is in 인보이스 없이 처리
+                self.unmatched_button = ttk.Button(frame, text="연결 안 된 인보이스", command=self.manage_unmatched)
                 self.unmatched_button.pack(side="left", padx=(0, 6))
             self.step_bars[number] = frame
         chips = ttk.Frame(container, padding=(18, 4, 18, 4))
         chips.pack(fill="x")
         self.chip_buttons = {}
-        for label in ("확인 필요", "전체", "증빙 없음", "대조 완료"):
+        for label in ("확인 필요", "전체", "인보이스 없음", "대조 완료"):
             chip = ttk.Radiobutton(chips, text=label, value=label, variable=self.view, command=self.refresh,
                                    style="Chip.TRadiobutton")
             chip.pack(side="left", padx=(0, 6))
             self.chip_buttons[label] = chip
-        self.status = tk.StringVar(value="은행·카드 명세서와 증빙 폴더를 선택하세요.")
+        self.status = tk.StringVar(value="은행·카드 명세서와 인보이스 폴더를 선택하세요.")
         ttk.Label(chips, textvariable=self.status, style="Muted.TLabel").pack(side="right")
 
         self.batch_bar = tk.Frame(container, background="#e8f1fd", highlightthickness=1, highlightbackground="#b6cdee",
@@ -1529,7 +1541,7 @@ class MonthlyClose:
         card_header(upper, "은행·카드 거래", self.cards_caption)
         self.left_footer = tk.Frame(upper, background="#fafbfc", padx=10, pady=8)
         self.left_footer.pack(side="bottom", fill="x")
-        more_menu(self.left_footer, "증빙 없이 처리 ▾", [
+        more_menu(self.left_footer, "인보이스 없이 처리 ▾", [
             ("월세·할부·대출·수수료 (계약서·명세서 근거)", self.mark_statement_evidence),
             ("자동 적용 규칙 보기·삭제", self.manage_recurring),
             ("사유 관리 (한국어·독일어·추가)", self.manage_reasons),
@@ -1538,7 +1550,7 @@ class MonthlyClose:
         for label, command in (("메모·기록", self.edit_note), ("인보이스 요청 초안", self.draft_invoice_request),
                                ("메일 검색", self.search_gmail)):
             ttk.Button(self.left_footer, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 4))
-        self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태", "메모", "구분"),
+        self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "인보이스 상태", "메모", "구분"),
                                 (72, 92, 220, 100, 120, 160, 120))
         self.cards.column("가맹점·거래처", minwidth=140)
         self.cards.master.pack_configure(padx=1, pady=(0, 1))
@@ -1558,11 +1570,11 @@ class MonthlyClose:
         self.excerpt_cache = {}
 
         self.pdfs_caption = tk.StringVar(value="거래를 고르세요")
-        self.pdfs_header = card_header(lower, "추천 증빙", self.pdfs_caption)
+        self.pdfs_header = card_header(lower, "추천 인보이스", self.pdfs_caption)
         right_footer = tk.Frame(lower, background="#fafbfc", padx=10, pady=8)
         right_footer.pack(side="bottom", fill="x")
         ttk.Button(right_footer, text="선택 연결", command=self.link, style="Success.TButton").pack(side="left", padx=(0, 6))
-        for label, command in (("+ 증빙 파일 추가", self.add_evidence_for), ("해제", self.unlink), ("나란히 보기", self.compare_documents),
+        for label, command in (("+ 파일 추가", self.add_evidence_for), ("해제", self.unlink), ("나란히 보기", self.compare_documents),
                                ("열기", self.open_pdf)):
             ttk.Button(right_footer, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 4))
         more_menu(right_footer, "연결 상세 ▾", [
@@ -1571,7 +1583,7 @@ class MonthlyClose:
             ("인보이스 값 고치기", self.edit_document_values),
         ]).pack(side="left")
         self.all_pdfs = tk.BooleanVar()
-        ttk.Checkbutton(self.pdfs_header, text="전체 증빙에서 고르기", variable=self.all_pdfs, command=self.show_invoices,
+        ttk.Checkbutton(self.pdfs_header, text="전체에서 고르기", variable=self.all_pdfs, command=self.show_invoices,
                         style="Panel.TCheckbutton").pack(side="right", padx=(0, 10))
         self.show_far = tk.BooleanVar()
         self.far_text = tk.StringVar(value="다른 달 후보")
@@ -1595,19 +1607,19 @@ class MonthlyClose:
         tk.Frame(self.none_card, background=COLORS["amber"], width=4).pack(side="left", fill="y")
         none_body = tk.Frame(self.none_card, background="#fff8eb", padx=12, pady=8)
         none_body.pack(side="left", fill="both", expand=True)
-        tk.Label(none_body, text="금액이 같은 증빙이 없어요. 이렇게 찾아보세요:", font=FONT_BOLD, background="#fff8eb",
+        tk.Label(none_body, text="금액이 같은 인보이스가 없어요. 이렇게 찾아보세요:", font=FONT_BOLD, background="#fff8eb",
                  anchor="w").pack(fill="x")
         none_buttons = tk.Frame(none_body, background="#fff8eb")
         none_buttons.pack(fill="x", pady=(6, 0))
-        for label, command in (("메일 검색", self.search_gmail), ("+ 증빙 파일 추가", self.add_evidence_for),
-                               ("전체 증빙에서 고르기", lambda: (self.all_pdfs.set(True), self.show_invoices()))):
+        for label, command in (("메일 검색", self.search_gmail), ("+ 파일 추가", self.add_evidence_for),
+                               ("전체에서 고르기", lambda: (self.all_pdfs.set(True), self.show_invoices()))):
             ttk.Button(none_buttons, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 6))
         self.refund_button = ttk.Button(none_buttons, text="환불의 원래 결제 찾기", style="Small.TButton",
                                         command=lambda: self.link_refunds())
         self.best_doc = None
-        self.pdfs = self.table(lower, ("증빙", "발행일", "총액", "번호", "추천·상태"), (210, 90, 90, 95, 150))
+        self.pdfs = self.table(lower, ("인보이스", "발행일", "총액", "번호", "추천·상태"), (210, 90, 90, 95, 150))
         self.pdfs.master.pack_configure(padx=1, pady=(0, 1))
-        self.pdfs.configure(displaycolumns=("증빙", "발행일", "총액", "추천·상태"))
+        self.pdfs.configure(displaycolumns=("인보이스", "발행일", "총액", "추천·상태"))
         configure_tags(self.pdfs)
         self.pdfs.bind("<Double-1>", lambda event: self.open_pdf())
         self.pdfs.bind("<Button-3>", self.evidence_menu, add="+")
@@ -1630,8 +1642,8 @@ class MonthlyClose:
 
     STEP_TEXT = {
         2: ("2. 명세서 불러오기", "Amex·DKB·Deutsche Bank PDF 또는 은행·카드 CSV를 불러와요. 같은 파일을 다시 열면 거래번호가 유지돼요."),
-        3: ("3. 증빙 매칭", "거래를 고르면 금액이 같은 증빙이 오른쪽에 추천 순서로 나와요. 초록 카드가 가장 유력한 후보예요."),
-        4: ("4. 누락 점검", "증빙 없는 거래, 거래 없는 증빙, 번역 대기, 명세서 기간 공백을 확인해요."),
+        3: ("3. 인보이스 매칭", "거래를 고르면 금액이 같은 인보이스가 오른쪽에 추천 순서로 나와요. 초록 카드가 가장 유력한 후보예요."),
+        4: ("4. 누락 점검", "인보이스 없는 거래, 거래 없는 인보이스, 번역 대기, 명세서 기간 공백을 확인해요."),
         5: ("5. 세무사 제출", "독일어 ZIP·Excel 대조표를 만들고 전달 상태를 기록해요. 내부 메모는 들어가지 않아요."),
     }
 
@@ -1643,11 +1655,11 @@ class MonthlyClose:
     def announce_import(self, statements, transactions, problems=0):
         """Tell the user the statements are in and offer the next step."""
         moved = [path for path in self.statement_sources.values() if self.folder and STATEMENT_FOLDER in path.parts]
-        where = f"\n원본은 증빙 폴더 ‘{STATEMENT_FOLDER}/월’ 폴더로 옮겼어요." if moved else ""
+        where = f"\n원본은 인보이스 폴더 ‘{STATEMENT_FOLDER}/월’ 폴더로 옮겼어요." if moved else ""
         check = f"\n읽지 못한 행 {problems}개는 4단계 누락 점검에서 확인하세요." if problems else ""
         self.notice(f"명세서 {statements}개를 불러왔어요 · 거래 {transactions}건.{where}{check}\n"
-                    "다음: 3. 증빙 매칭에서 거래마다 인보이스를 연결하세요.", title="명세서 불러오기 완료",
-                    action=("증빙 매칭으로 이동 →", lambda: self.navigate(3)) if self.navigate else None)
+                    "다음: 3. 인보이스 매칭에서 거래마다 인보이스를 연결하세요.", title="명세서 불러오기 완료",
+                    action=("인보이스 매칭으로 이동 →", lambda: self.navigate(3)) if self.navigate else None)
 
     def show_step(self, number):
         if number in (2, 3) and getattr(self, "step", None) != number:
@@ -2203,7 +2215,7 @@ class MonthlyClose:
                     record_error("statement-move", error)
             return 0
         self.refresh()
-        show_notice(self.root, f"명세서 {len(moved)}개를 증빙 폴더 안 ‘{STATEMENT_FOLDER}/월’ 폴더로 옮겼어요.\n"
+        show_notice(self.root, f"명세서 {len(moved)}개를 인보이스 폴더 안 ‘{STATEMENT_FOLDER}/월’ 폴더로 옮겼어요.\n"
                     "내용은 바꾸지 않았고, 원래 위치도 기록해 두었어요.")
         return len(moved)
 
@@ -2262,7 +2274,7 @@ class MonthlyClose:
         if moved_from:
             self.status.set(f"명세서를 ‘{source.parent.relative_to(self.folder).as_posix()}’ 폴더로 옮겼어요 · {source.name}")
         if recurring:
-            self.status.set(f"정기 결제(월세·할부 등) {recurring}건은 등록한 규칙대로 ‘증빙 없이 처리’했어요.")
+            self.status.set(f"정기 결제(월세·할부 등) {recurring}건은 등록한 규칙대로 ‘인보이스 없이 처리’했어요.")
         return True
 
     def resume(self):
@@ -2506,7 +2518,7 @@ class MonthlyClose:
         toolbar.pack(fill="x")
         entry = ttk.Entry(toolbar, width=46)
         entry.pack(side="left")
-        table = self.table(dialog, ("마감월", "거래번호", "거래처·증빙", "금액", "파일"), (100, 105, 245, 130, 490))
+        table = self.table(dialog, ("마감월", "거래번호", "거래처·인보이스", "금액", "파일"), (100, 105, 245, 130, 490))
         hits = {}
 
         def search(_event=None):
@@ -2525,7 +2537,7 @@ class MonthlyClose:
             if selection and hits[selection[0]]:
                 self.open_evidence_file(hits[selection[0]])
 
-        self.buttons(toolbar, [("검색", search), ("증빙 열기", open_found)])
+        self.buttons(toolbar, [("검색", search), ("인보이스 열기", open_found)])
         entry.bind("<Return>", search)
         table.bind("<Double-1>", open_found)
         entry.focus_set()
@@ -2596,14 +2608,14 @@ class MonthlyClose:
             if not self.folder:
                 return
         dialog = InlineDialog(self.root)
-        dialog.title("거래에 연결되지 않은 증빙")
+        dialog.title("거래에 연결되지 않은 인보이스")
         dialog.geometry("1080x460")
         controls = ttk.Frame(dialog, padding=8)
         controls.pack(fill="x")
         status = ttk.Combobox(controls, values=UNLINKED_REASONS, state="readonly", width=16)
         status.current(0)
         status.pack(side="left", padx=5)
-        table = self.table(dialog, ("발행일", "업체명", "총액", "분류", "증빙"), (100, 180, 120, 145, 500))
+        table = self.table(dialog, ("발행일", "업체명", "총액", "분류", "인보이스"), (100, 180, 120, 145, 500))
         linked = {key for record in self.state["records"].values() for key in record.get("links", [])}
         items = {key: doc for key, doc in self.by_key.items() if key not in linked}
 
@@ -2632,14 +2644,14 @@ class MonthlyClose:
             if len(selected) == 1:
                 self.open_evidence_file(items[selected[0]].path)
 
-        self.buttons(controls, [("선택 분류 저장", save), ("증빙 열기", open_file)])
+        self.buttons(controls, [("선택 분류 저장", save), ("인보이스 열기", open_file)])
         table.bind("<Double-1>", open_file)
         fill()
 
     def manage_reasons(self):
-        """Edit the ‘증빙 없이 처리’ reasons: Korean label, German text for the advisor, counted as done or not."""
+        """Edit the ‘인보이스 없이 처리’ reasons: Korean label, German text for the advisor, counted as done or not."""
         dialog = InlineDialog(self.root)
-        dialog.title("증빙 없이 처리 사유 관리 (한국어·독일어)")
+        dialog.title("인보이스 없이 처리 사유 관리 (한국어·독일어)")
         dialog.geometry("980x560")
         dialog.grab_set()
         ttk.Label(dialog, wraplength=930, padding=(14, 10, 14, 4), text=(
@@ -2771,7 +2783,7 @@ class MonthlyClose:
         dialog.title("자동 적용 규칙 (월세·할부·대출 등)")
         dialog.grab_set()
         ttk.Label(dialog, padding=(14, 10, 14, 4), wraplength=760, text=(
-            "같은 거래처·같은 금액 거래가 명세서에 나오면 아래 사유로 ‘증빙 없이 처리’해요. "
+            "같은 거래처·같은 금액 거래가 명세서에 나오면 아래 사유로 ‘인보이스 없이 처리’해요. "
             "금액이 바뀌면(월세 인상 등) 자동 적용되지 않으니, 새 금액 거래에서 다시 등록하세요. "
             "규칙을 지워도 이미 처리한 거래는 그대로예요.")).pack(anchor="w")
         table = self.table(dialog, ("거래처 예", "금액", "사유", "등록한 거래일"), (300, 110, 230, 110))
@@ -2803,7 +2815,7 @@ class MonthlyClose:
             return
         record = self.record(item.key)
         if self.linked(item.key) or record.get("transfer") or record.get("refund_group"):
-            self.notice("증빙 또는 별도 거래 연결이 없는 거래를 선택하세요.")
+            self.notice("인보이스 또는 별도 거래 연결이 없는 거래를 선택하세요.")
             return
 
         def commit(state, values):
@@ -2824,11 +2836,11 @@ class MonthlyClose:
 
         known = any(rule["payee"] == payee_key(item.merchant) and rule["amount"] == str(item.amount)
                     for rule in self.state.get("recurring_rules", []))
-        self.edit_fields("증빙 없이 처리 · 세무사 확인", self.card_label(item) + (
+        self.edit_fields("인보이스 없이 처리 · 세무사 확인", self.card_label(item) + (
                              "\n월세·할부·대출처럼 계약서를 이미 세무사에게 냈다면 해당 사유를 고르세요. "
                              "‘다음부터 자동 적용’을 고르면 같은 거래처·같은 금액 거래는 다음 달부터 자동으로 처리돼요. "
-                             "세무사에게 가는 독일어 문장과 사유 추가는 ‘증빙 없이 처리 ▾ → 사유 관리’에서 해요."),
-                         [("증빙 없이 검토하는 사유", record.get("statement_evidence", ""),
+                             "세무사에게 가는 독일어 문장과 사유 추가는 ‘인보이스 없이 처리 ▾ → 사유 관리’에서 해요."),
+                         [("인보이스 없이 검토하는 사유", record.get("statement_evidence", ""),
                            [""] + [entry["ko"] for entry in reason_list() if not entry["hidden"]]),
                           ("다음부터 자동 적용", RECURRING_AUTO[1] if known else RECURRING_AUTO[0], list(RECURRING_AUTO))], commit)
 
@@ -2847,7 +2859,7 @@ class MonthlyClose:
     def load_pdfs(self, folder):
         self.status.set("PDF를 읽고 있어요…")
         try:
-            with Busy(self.root, "증빙을 읽고 있어요") as busy:
+            with Busy(self.root, "인보이스를 읽고 있어요") as busy:
                 self.invoices, self.read_issues = index_pdfs(folder, busy.step)
         except OSError as error:
             messagebox.showerror("PDF 폴더 열기 실패", str(error), parent=self.root)
@@ -2881,7 +2893,7 @@ class MonthlyClose:
     def review_pairs(self, title, rows, commit, hint=""):
         """Checkbox list of (first, second, first label, second label[, reason, checked]) pairs to link at once."""
         if not rows:
-            self.notice("한 번에 연결할 후보가 없어요. 거래를 하나씩 골라 오른쪽 추천 증빙을 확인하세요.")
+            self.notice("한 번에 연결할 후보가 없어요. 거래를 하나씩 골라 오른쪽 추천 인보이스를 확인하세요.")
             return
         dialog = InlineDialog(self.root)
         dialog.title(title)
@@ -2889,7 +2901,7 @@ class MonthlyClose:
         dialog.transient(self.root)
         dialog.grab_set()
         ttk.Label(dialog, text=hint or "연결할 행에 체크하세요.", wraplength=980, padding=(14, 10, 14, 4)).pack(anchor="w")
-        table = self.table(dialog, ("선택", "거래", "연결할 증빙", "판정"), (50, 340, 320, 300))
+        table = self.table(dialog, ("선택", "거래", "연결할 인보이스", "판정"), (50, 340, 320, 300))
         checked = {str(index): bool(row[5]) if len(row) > 5 else False for index, row in enumerate(rows)}
         info = tk.StringVar()
 
@@ -2939,7 +2951,7 @@ class MonthlyClose:
         footer.pack(fill="x", padx=14, pady=10)
         ttk.Button(footer, text="전체 선택", command=lambda: set_all(True)).pack(side="left")
         ttk.Button(footer, text="전체 해제", command=lambda: set_all(False)).pack(side="left", padx=(6, 0))
-        ttk.Button(footer, text="증빙 열기", command=open_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(footer, text="인보이스 열기", command=open_selected).pack(side="left", padx=(6, 0))
         tk.Label(footer, textvariable=info, background=COLORS["bg"], foreground=COLORS["muted"]).pack(side="left", padx=12)
         ttk.Button(footer, text="체크한 후보 연결", style="Primary.TButton", command=apply).pack(side="right")
         fill()
@@ -3039,13 +3051,13 @@ class MonthlyClose:
             self.load_pdfs(self.folder)  # file names may have changed in step 1 since the folder was read
         moves, skipped = self.matched_moves()
         if not moves:
-            self.notice(f"옮길 매칭완료 증빙이 없어요. 중복 또는 마감월 확인 필요 {skipped}개.")
+            self.notice(f"옮길 매칭완료 인보이스가 없어요. 중복 또는 마감월 확인 필요 {skipped}개.")
             return
         preview = "\n".join(str(target.relative_to(self.folder)) for _, target in moves[:5])
         more = f"\n… 외 {len(moves) - 5}개" if len(moves) > 5 else ""
         sent = sorted({target.parent.name for _doc, target in moves
                        if self.state.get("exports", {}).get("20" + target.parent.name[-4:-2] + "-" + target.parent.name[-2:])})
-        if not ask_yes_no("매칭완료 증빙 이동", f"거래에 연결된 인보이스 {len(moves)}개를 ‘매칭완료_YYMM’ 폴더로 옮길까요?\n\n{preview}{more}",
+        if not ask_yes_no("매칭완료 인보이스 이동", f"거래에 연결된 인보이스 {len(moves)}개를 ‘매칭완료_YYMM’ 폴더로 옮길까요?\n\n{preview}{more}",
                           parent=self.root, ok="옮기기", undo="옮긴 바로 뒤 아래 ‘되돌리기’로 되돌릴 수 있어요.",
                           warnings=[f"{', '.join(sent)}은 이미 세무사에게 전달한 달이에요. 파일 위치만 바뀌어요."] if sent else ()):
             return
@@ -3056,9 +3068,9 @@ class MonthlyClose:
             busy.step(position, len(moves), doc.path.name)
             try:
                 if doc.path.is_symlink() or not target.resolve().is_relative_to(self.folder.resolve()):
-                    raise OSError("선택한 증빙 폴더 밖으로 이동할 수 없어요.")
+                    raise OSError("선택한 인보이스 폴더 밖으로 이동할 수 없어요.")
                 if digest(doc.path) != doc.key:
-                    raise OSError("증빙이 변경됐어요. 증빙 폴더를 다시 불러오세요.")
+                    raise OSError("인보이스가 변경됐어요. 인보이스 폴더를 다시 불러오세요.")
                 remember_original_name(doc.path, doc.key)
                 target.parent.mkdir(exist_ok=True)
                 move_evidence(doc.path, target)
@@ -3067,7 +3079,7 @@ class MonthlyClose:
                 errors.append(f"{doc.path.name}: {error}")
         if history:
             self.last_moves = history
-        busy.step(text="증빙 목록을 새로 읽고 있어요")
+        busy.step(text="인보이스 목록을 새로 읽고 있어요")
         self.load_pdfs(self.folder)
         busy.close()
         moved = len(moves) - len(errors)
@@ -3078,7 +3090,7 @@ class MonthlyClose:
             messagebox.showwarning("이동 결과", "\n".join(errors[:8]), parent=self.root)
             return
         remaining = len(self.cards.get_children())
-        skipped_text = f"\n중복·마감월 확인이 필요해 옮기지 않은 증빙 {skipped}개가 있어요." if skipped else ""
+        skipped_text = f"\n중복·마감월 확인이 필요해 옮기지 않은 인보이스 {skipped}개가 있어요." if skipped else ""
         self.status.set(f"인보이스 {moved}개를 ‘매칭완료_월’ 폴더로 옮겼어요.{skipped_text.replace(chr(10), ' ')} "
                         f"남은 거래 {remaining}건 · 끝난 거래는 ‘대조 완료’에서 봐요.")
         show_toast(self.root, f"{moved}개를 매칭완료 폴더로 옮겼어요", action=("되돌리기", lambda: self.undo_archive(ask=False)),
@@ -3088,9 +3100,9 @@ class MonthlyClose:
 
     def undo_archive(self, ask=True):
         if not self.last_moves:
-            self.notice("되돌릴 증빙 이동이 없어요.")
+            self.notice("되돌릴 인보이스 이동이 없어요.")
             return
-        if ask and not ask_yes_no("이동 되돌리기", f"증빙 {len(self.last_moves)}개를 원래 폴더로 되돌릴까요?", parent=self.root):
+        if ask and not ask_yes_no("이동 되돌리기", f"인보이스 {len(self.last_moves)}개를 원래 폴더로 되돌릴까요?", parent=self.root):
             return
         restored, failed = undo_moves(self.last_moves)
         self.last_moves = [item[:3] for item in reversed(failed)]
@@ -3125,7 +3137,7 @@ class MonthlyClose:
             if remaining:
                 if any(self.linked(other) for other in refunds):
                     return PARTIAL_REFUND_DONE  # the invoice of the purchase covers what was kept
-                return f"일부 환불 · 잔액 {remaining:.2f} {self.transactions[key].currency} · 증빙 필요"
+                return f"일부 환불 · 잔액 {remaining:.2f} {self.transactions[key].currency} · 인보이스 필요"
             return "전액 환불 확인"
         peer = self.record(key).get("transfer")
         if peer:
@@ -3137,7 +3149,7 @@ class MonthlyClose:
             evidence = self.record(key).get("statement_evidence")
             if is_contract_reason(evidence):
                 return CONTRACT_STATUS
-            return "명세서 근거 · 세무사 확인" if evidence else "증빙 미연결"
+            return "명세서 근거 · 세무사 확인" if evidence else "인보이스 미연결"
         transactions, invoices = self.group(key)
         if not invoices <= self.by_key.keys():
             return "연결 PDF 위치 확인"
@@ -3171,13 +3183,13 @@ class MonthlyClose:
                 continue
             follow = record.get("follow_up")
             tag = transaction_tag(state, follow or "")
-            unresolved = follow in ("요청 중", "세무사 확인 필요", "증빙 확보 불가") or state not in DONE_STATES
-            matches = {"전체": True, "확인 필요": unresolved, "증빙 없음": state == "증빙 미연결",
+            unresolved = follow in ("요청 중", "세무사 확인 필요", "인보이스 확보 불가") or state not in DONE_STATES
+            matches = {"전체": True, "확인 필요": unresolved, "인보이스 없음": state == "인보이스 미연결",
                        "대조 완료": tag in ("ok", "transfer")}
             chip_counts.update(name for name, hit in matches.items() if hit)
             if matches.get(view, True):
                 shown = state
-                if state == "증빙 미연결" and key in candidates:
+                if state == "인보이스 미연결" and key in candidates:
                     shown = "후보 있음 · 확실" if candidates[key] else "후보 있음 · 거의 일치"
                 kind, payee = split_merchant(item.merchant)
                 self.cards.insert("", "end", iid=key, values=(
@@ -3198,7 +3210,7 @@ class MonthlyClose:
         self.status.set(
             f"거래 {len(self.transactions)}건 · 확인 완료 {counts['금액 대조 완료']}건 · "
             + (f"계약서 근거(월세·할부 등) {counts[CONTRACT_STATUS]}건 · " if counts[CONTRACT_STATUS] else "") +
-            f"미연결 {counts['증빙 미연결']}건 · CSV 오류 {len(self.errors)}행 · "
+            f"미연결 {counts['인보이스 미연결']}건 · CSV 오류 {len(self.errors)}행 · "
             f"PDF {len(self.invoices)}개 · PDF 읽기 오류 {len(self.read_issues)}개"
         )
         if self.on_change:
@@ -3327,7 +3339,7 @@ class MonthlyClose:
         pairs = self.batch_pairs()
         columns = self.cards["columns"]
         for key, _, clear in pairs:  # mark the candidates in the list, also when it was filled before the PDFs were read
-            if self.cards.exists(key) and self.cards.set(key, columns[4]) == "증빙 미연결":
+            if self.cards.exists(key) and self.cards.set(key, columns[4]) == "인보이스 미연결":
                 self.cards.set(key, columns[4], "후보 있음 · 확실" if clear else "후보 있음 · 거의 일치")
         if not pairs:
             self.batch_bar.pack_forget()
@@ -3386,7 +3398,7 @@ class MonthlyClose:
             self.best_card.pack(fill="x", before=self.pdfs.master)
             self.next_text.set("연결하고 매칭완료 폴더로 옮기면 이 이름이 돼요")
         else:
-            self.next_text.set("금액이 같은 증빙이 없어요 · ‘전체 증빙에서 고르기’나 ‘증빙 없이 처리’를 쓰세요")
+            self.next_text.set("금액이 같은 인보이스가 없어요 · ‘전체에서 고르기’나 ‘인보이스 없이 처리’를 쓰세요")
             if not self.all_pdfs.get() and not self.record(key).get("statement_evidence") and not self.record(key).get("transfer") \
                     and not self.record(key).get("refund_group"):
                 self.none_card.pack(fill="x", before=self.pdfs.master)
@@ -3481,7 +3493,7 @@ class MonthlyClose:
         """Step 3 hides the memo column and ‘구분’ (SEPA Lastschrift …, shown in the detail box below) so the payee
         has room; other steps show ‘구분’ when the statements have it."""
         kinds = getattr(self, "step", None) != 3 and any(split_merchant(item.merchant)[0] for item in self.transactions.values())
-        columns = ("번호", "거래일") + (("구분",) if kinds else ()) + ("가맹점·거래처", "금액", "증빙 상태")
+        columns = ("번호", "거래일") + (("구분",) if kinds else ()) + ("가맹점·거래처", "금액", "인보이스 상태")
         if getattr(self, "step", None) != 3:
             columns += ("메모",)
         if tuple(self.cards["displaycolumns"]) != columns:
@@ -3538,7 +3550,7 @@ class MonthlyClose:
         if locked:
             messagebox.showerror("마감 확정", f"{locked}은 확정된 달이에요. 변경하려면 ‘마감 확정·해제’에서 먼저 다시 여세요.", parent=self.root)
             return False
-        fields = {"links": "증빙 연결", "transfer": "내부이체", "refund_group": "환불 연결", "refund_of": "전월 결제 환불",
+        fields = {"links": "인보이스 연결", "transfer": "내부이체", "refund_group": "환불 연결", "refund_of": "전월 결제 환불",
                   "advisor_note": "전달 메모", "follow_up": "후속 상태", "due": "후속 예정일",
                   "allocations": "배분 금액", "difference_reason": "차액 사유", "statement_evidence": "명세서 근거", "attachments": "보조 자료"}
         for key, record in state["records"].items():
@@ -3632,18 +3644,18 @@ class MonthlyClose:
                 return warnings
             evidence = record.get("statement_evidence")
             if not evidence:
-                return ["증빙 없음"]
+                return ["인보이스 없음"]
             if not is_contract_reason(evidence):
-                warnings.append("증빙 없이 처리 · 세무사 확인")
+                warnings.append("인보이스 없이 처리 · 세무사 확인")
             return warnings
         documents = [self.by_key.get(link) for link in links]
         if not all(documents):
-            warnings.append("증빙 파일을 찾지 못함")
+            warnings.append("인보이스 파일을 찾지 못함")
         documents = [doc for doc in documents if doc]
         if link_counts is None:
             link_counts = Counter(link for other in self.state["records"].values() for link in other.get("links", []))
         if any(link_counts[doc.key] > 1 for doc in documents) and not record.get("allocations"):
-            warnings.append("같은 증빙이 다른 거래에도 연결")
+            warnings.append("같은 인보이스가 다른 거래에도 연결")
         if any(doc.currency and doc.currency != item.currency for doc in documents):
             warnings.append("통화 다름")
         totals = [signed_total(doc) for doc in documents if doc.amount is not None and doc.currency == item.currency]
@@ -3785,15 +3797,15 @@ class MonthlyClose:
             else:
                 evidence = record.get("statement_evidence")
                 chooser.configure(values=[])
-                chooser.set(f"증빙 없이 처리: {evidence} → {reason_german(evidence)}" if evidence else
-                            "내부이체·환불 연결" if record.get("transfer") or record.get("refund_group") or record.get("refund_of") else "연결된 증빙 없음")
+                chooser.set(f"인보이스 없이 처리: {evidence} → {reason_german(evidence)}" if evidence else
+                            "내부이체·환불 연결" if record.get("transfer") or record.get("refund_group") or record.get("refund_of") else "연결된 인보이스 없음")
             draw()
 
         def draw(_event=None):
             docs = current["docs"]
             if not docs:
                 doc_caption.set("")
-                viewer.message("연결된 증빙이 없어요.")
+                viewer.message("연결된 인보이스가 없어요.")
                 return
             doc = docs[max(0, chooser.current())]
             doc_caption.set(f"발행일 {doc.day or '없음'} · {doc.seller or '업체명 없음'} · "
@@ -3854,14 +3866,14 @@ class MonthlyClose:
     def monthly_review(self):
         rows = review_months(self.state, self.invoices)
         if not rows:
-            self.notice("먼저 증빙이나 명세서를 불러오세요.")
+            self.notice("먼저 인보이스나 명세서를 불러오세요.")
             return
         dialog = InlineDialog(self.root)
         dialog.title("월별 누락 점검표")
         dialog.geometry("1100x480")
         controls = ttk.Frame(dialog, padding=8)
         controls.pack(fill="x")
-        summary = self.table(dialog, ("월", "증빙 없는 거래", "거래 없는 증빙", "번역 대기", "세무사 확인", "명세서 공백"),
+        summary = self.table(dialog, ("월", "인보이스 없는 거래", "거래 없는 인보이스", "번역 대기", "세무사 확인", "명세서 공백"),
                              (125, 175, 175, 150, 175, 175))
         detail = self.table(dialog, ("구분", "거래번호·파일", "확인할 내용"), (180, 270, 530))
         for month, items in sorted(rows.items(), reverse=True):
@@ -3896,11 +3908,11 @@ class MonthlyClose:
 
         summary.bind("<Double-1>", open_month)
         detail.bind("<Double-1>", open_issue)
-        ttk.Label(controls, text="월을 더블클릭하면 그 달 3단계로, 아래 항목을 더블클릭하면 그 거래·증빙으로 가요.",
+        ttk.Label(controls, text="월을 더블클릭하면 그 달 3단계로, 아래 항목을 더블클릭하면 그 거래·인보이스로 가요.",
                   foreground=COLORS["muted"]).pack(side="right")
         summary.selection_set(summary.get_children()[0])
-        self.buttons(controls, [("미연결 증빙 열기", self.show_unlinked_invoices),
-                                ("명세서 기간 점검", self.show_statement_periods), ("증빙 후속 목록", self.followup_list)])
+        self.buttons(controls, [("미연결 인보이스 열기", self.show_unlinked_invoices),
+                                ("명세서 기간 점검", self.show_statement_periods), ("인보이스 후속 목록", self.followup_list)])
         show()
 
     def go_to_month(self, month):
@@ -3976,7 +3988,7 @@ class MonthlyClose:
         except (OSError, ValueError, KeyError, TypeError, BadZipFile, RuntimeError) as error:
             messagebox.showerror("전체 작업 복원 실패", str(error), parent=self.root)
             return
-        self.state = state
+        self.state = update_terms(state)
         self.transactions.clear()
         self.accounts.clear()
         self.statement_sources.clear()
@@ -4046,7 +4058,7 @@ class MonthlyClose:
         except OSError as error:
             messagebox.showerror("작업 기록 복원 실패", str(error), parent=self.root)
             return
-        self.state = state
+        self.state = update_terms(state)
         self.transactions.clear()
         self.accounts.clear()
         self.statement_sources.clear()
@@ -4084,11 +4096,11 @@ class MonthlyClose:
             if bool(current.get("locked")) == locked:
                 return
             if locked:
-                if not ask_yes_no("마감 확정", f"{chosen} 거래와 연결 증빙을 잠글까요?", parent=dialog):
+                if not ask_yes_no("마감 확정", f"{chosen} 거래와 연결 인보이스를 잠글까요?", parent=dialog):
                     return
                 reason = ""
             else:
-                reason = simpledialog.askstring("마감 재열기", "추가 증빙 등 다시 여는 사유를 적어 주세요.", parent=dialog)
+                reason = simpledialog.askstring("마감 재열기", "추가 인보이스 등 다시 여는 사유를 적어 주세요.", parent=dialog)
                 if not reason or not reason.strip():
                     return
                 reason = reason.strip()
@@ -4112,10 +4124,10 @@ class MonthlyClose:
         cards = self.cards.selection()
         docs = [self.visible_pdfs[key] for key in self.pdfs.selection()]
         if not cards or (not remove and not docs):
-            self.notice("거래와 연결할 PDF를 선택하세요. 후보가 없다면 ‘전체 증빙 표시’를 켜세요.")
+            self.notice("거래와 연결할 PDF를 선택하세요. 후보가 없다면 ‘전체에서 고르기’를 켜세요.")
             return
         if not remove and any(self.record(key).get("transfer") for key in cards):
-            self.notice("증빙을 연결하려면 먼저 이체 연결을 해제하세요.")
+            self.notice("인보이스를 연결하려면 먼저 이체 연결을 해제하세요.")
             return
         keys = {doc.key for doc in docs}
         if remove:
@@ -4282,7 +4294,7 @@ class MonthlyClose:
         tk.Label(log, text="새 기록 · 예) 인보이스 요청 메일 보냄 (저장할 때 추가돼요)", font=FONT_SMALL,
                  background=COLORS["panel"], foreground=COLORS["muted"], anchor="w").pack(fill="x", pady=(4, 0))
 
-        follow = card(1, 0, "후속 처리", "상태가 ‘세무사 확인 필요’나 ‘증빙 확보 불가’면 주황색으로 표시돼요.")
+        follow = card(1, 0, "후속 처리", "상태가 ‘세무사 확인 필요’나 ‘인보이스 확보 불가’면 주황색으로 표시돼요.")
         follow_row = tk.Frame(follow, background=COLORS["panel"])
         follow_row.pack(fill="x")
         tk.Label(follow_row, text="상태", background=COLORS["panel"]).grid(row=0, column=0, sticky="w")
@@ -4364,7 +4376,7 @@ class MonthlyClose:
         body.pack(fill="both", expand=True)
         ttk.Label(body, text=self.card_label(item)).pack(anchor="w")
         ttk.Label(body, text=f"한국어 원문 · {source or follow_up}", wraplength=520, padding=(0, 8)).pack(anchor="w")
-        ttk.Label(body, text="정해진 증빙 문구로 만든 초안이에요. 보낼 내용을 확인하세요.").pack(anchor="w")
+        ttk.Label(body, text="정해진 인보이스 문구로 만든 초안이에요. 보낼 내용을 확인하세요.").pack(anchor="w")
         text = tk.Text(body, width=62, height=5, wrap="word")
         text.insert("1.0", draft)
         text.pack(fill="both", expand=True)
@@ -4389,17 +4401,17 @@ class MonthlyClose:
     def edit_document_note(self):
         selected = self.pdfs.selection()
         if len(selected) != 1:
-            self.notice("세무사 메모를 남길 증빙 한 개를 선택하세요.")
+            self.notice("세무사 메모를 남길 인보이스 한 개를 선택하세요.")
             return
         doc = self.visible_pdfs[selected[0]]
         dialog = InlineDialog(self.root)
-        dialog.title("증빙 전달 메모")
+        dialog.title("인보이스 전달 메모")
         dialog.transient(self.root)
         dialog.grab_set()
         form = ttk.Frame(dialog, padding=12)
         form.pack(fill="both", expand=True)
         ttk.Label(form, text=doc.path.name, wraplength=540).pack(anchor="w")
-        ttk.Label(form, text="이 증빙을 연결하면 세무사용 ZIP의 증빙 목록에 포함돼요.").pack(anchor="w", pady=(4, 8))
+        ttk.Label(form, text="이 인보이스를 연결하면 세무사용 ZIP의 인보이스 목록에 포함돼요.").pack(anchor="w", pady=(4, 8))
         box = tk.Text(form, width=66, height=8, wrap="word")
         box.insert("1.0", self.state.get("document_notes", {}).get(doc.key, ""))
         box.pack(fill="both", expand=True)
@@ -4462,9 +4474,9 @@ class MonthlyClose:
         allocations = record.get("allocations", {})
         fields = [("차액 사유", record.get("difference_reason", ""), list(DIFFERENCE_REASONS))]
         if doc:
-            fields.append((f"선택 증빙 배분 ({item.currency})", allocations.get(doc.key, ""), None))
+            fields.append((f"선택 인보이스 배분 ({item.currency})", allocations.get(doc.key, ""), None))
         elif len(docs) > 1:
-            self.status.set("증빙별로 배분하려면 아래에서 연결된 증빙 한 장을 선택하세요.")
+            self.status.set("인보이스별로 배분하려면 아래에서 연결된 인보이스 한 장을 선택하세요.")
 
         def commit(state, values):
             updated = state["records"][item.key]
@@ -4488,7 +4500,7 @@ class MonthlyClose:
     def edit_hospitality(self):
         selected = self.pdfs.selection()
         if len(selected) != 1:
-            self.notice("접대비 정보를 입력할 증빙 한 장을 선택하세요.")
+            self.notice("접대비 정보를 입력할 인보이스 한 장을 선택하세요.")
             return
         doc = self.visible_pdfs[selected[0]]
         saved = self.state.get("hospitality", {}).get(doc.key, {})
@@ -4514,7 +4526,7 @@ class MonthlyClose:
     def followup_list(self):
         today = date.today().isoformat()
         dialog = InlineDialog(self.root)
-        dialog.title("증빙 후속 목록")
+        dialog.title("인보이스 후속 목록")
         dialog.geometry("890x370")
         ttk.Label(dialog, text="미수신·기한 경과·세무 검토 또는 추가 전달이 필요한 거래", padding=8).pack(anchor="w")
         table = self.table(dialog, ("거래번호", "마감월", "상태", "예정일", "거래처"), (100, 115, 240, 110, 290))
@@ -4668,7 +4680,7 @@ class MonthlyClose:
         item = self.transactions[key]
         record = self.record(key)
         if self.linked(key) or record.get("transfer") or record.get("refund_group") or record.get("refund_of"):
-            self.notice("이미 증빙·이체·환불 연결이 있는 거래예요. 먼저 연결을 해제하세요.")
+            self.notice("이미 인보이스·이체·환불 연결이 있는 거래예요. 먼저 연결을 해제하세요.")
             return
         dialog = InlineDialog(self.root)
         dialog.title("환불의 원래 결제 찾기")
@@ -4744,10 +4756,10 @@ class MonthlyClose:
             return
         entries = list(self.visible_pdfs.items())
         if not entries:
-            self.notice("표시할 증빙이 없어요. ‘전체 증빙 표시’를 켜서 확인하세요.")
+            self.notice("표시할 인보이스가 없어요. ‘전체에서 고르기’를 켜서 확인하세요.")
             return
         window = InlineDialog(self.root)
-        window.title("거래와 증빙 나란히 보기")
+        window.title("거래와 인보이스 나란히 보기")
         window.geometry("1110x720")
         window.transient(self.root)
         window.grab_set()
@@ -4806,7 +4818,7 @@ class MonthlyClose:
 
         actions = ttk.Frame(right, padding=(0, 8, 0, 0))
         actions.pack(fill="x")
-        self.buttons(actions, [("이 증빙 선택", select_on_main), ("원본 위치 확인", locate),
+        self.buttons(actions, [("이 인보이스 선택", select_on_main), ("원본 위치 확인", locate),
                                ("원본 열기", lambda: self.open_evidence_file(entries[selector.current()][1].path))])
         selector.bind("<<ComboboxSelected>>", draw)
         draw()
@@ -4847,13 +4859,13 @@ class MonthlyClose:
         if self.practice_folder or not self.folder:
             self.notice("작업 폴더가 없어 파일을 추가할 수 없어요. 1단계에서 작업 폴더를 확인하세요.")
             return
-        names = filedialog.askopenfilenames(parent=self.root, title=f"{self.card_label(item)} · 증빙 파일 고르기",
+        names = filedialog.askopenfilenames(parent=self.root, title=f"{self.card_label(item)} · 인보이스 파일 고르기",
                                             filetypes=[("인보이스 (PDF·사진·XML)", "*.pdf *.jpg *.jpeg *.png *.xml"), ("모든 파일", "*.*")])
         if not names:
             return
         from invoice_renamer import import_evidence
         copy = import_mode() == "copy"
-        with Busy(self.root, "증빙을 작업 폴더에 넣고 있어요") as busy:
+        with Busy(self.root, "인보이스를 작업 폴더에 넣고 있어요") as busy:
             history, _, errors = import_evidence([Path(name) for name in names], self.folder, copy=copy, progress=busy.step)
             inside = [Path(name) for name in names if Path(name).resolve().is_relative_to(self.folder.resolve())]
             keys = []
@@ -4873,8 +4885,8 @@ class MonthlyClose:
         record.pop("statement_evidence", None)
         if self.save(state):
             failed = f"\n넣지 못한 파일 {len(errors)}개: " + " / ".join(errors[:3]) if errors else ""
-            self.notice(f"{self.card_label(item)}에 증빙 {len(keys)}개를 연결했어요."
-                        f"\n파일은 작업 폴더에 {'복사' if copy else '이동'}했어요.{failed}", title="증빙 추가 완료")
+            self.notice(f"{self.card_label(item)}에 인보이스 {len(keys)}개를 연결했어요."
+                        f"\n파일은 작업 폴더에 {'복사' if copy else '이동'}했어요.{failed}", title="인보이스 추가 완료")
 
     def unmatched_documents(self, near_only=False):
         """Evidence no transaction uses. near_only: only dated within CANDIDATE_DAYS of the loaded statements (or undated)."""
@@ -4889,7 +4901,7 @@ class MonthlyClose:
     def chosen_document(self):
         selection = self.pdfs.selection()
         if len(selection) != 1 or selection[0] not in self.visible_pdfs:
-            self.notice("오른쪽 증빙 목록에서 증빙 한 개를 고르세요.")
+            self.notice("오른쪽 인보이스 목록에서 인보이스 한 개를 고르세요.")
             return None
         return self.visible_pdfs[selection[0]]
 
@@ -4900,7 +4912,7 @@ class MonthlyClose:
         if doc is None:
             return
         form = InlineDialog(self.root)
-        form.title("증빙 값 고치기")
+        form.title("인보이스 값 고치기")
         form.grab_set()
         body = ttk.Frame(form, padding=16)
         body.pack(fill="x")
@@ -4948,8 +4960,8 @@ class MonthlyClose:
         linked = [doc for doc in docs if doc.key in used]
         docs = [doc for doc in docs if doc.key not in used]
         if not docs:
-            show_notice(parent, f"{linked[0].path.name}\n거래 {used[linked[0].key]}에 연결된 증빙이에요. 먼저 ‘해제’한 뒤 제외하세요."
-                        if linked else "제외할 증빙을 고르세요.")
+            show_notice(parent, f"{linked[0].path.name}\n거래 {used[linked[0].key]}에 연결된 인보이스예요. 먼저 ‘해제’한 뒤 제외하세요."
+                        if linked else "제외할 인보이스를 고르세요.")
             return False
         warnings = []
         if linked:
@@ -4966,7 +4978,7 @@ class MonthlyClose:
         if reason is None:
             choices = [(f"{name} · {EXCLUDE_HELP[name]}", name) for name in EXCLUDE_REASONS if name != "나누기 원본"]
         names = "\n".join(f"• {doc.path.name[:60]}" for doc in docs[:5]) + (f"\n… 외 {len(docs) - 5}개" if len(docs) > 5 else "")
-        answer = ask_yes_no("제외 폴더로", f"증빙 {len(docs)}개를 ‘{EXCLUDED_FOLDER}/{reason or '사유'}’ 폴더로 옮길까요?\n{names}",
+        answer = ask_yes_no("제외 폴더로", f"인보이스 {len(docs)}개를 ‘{EXCLUDED_FOLDER}/{reason or '사유'}’ 폴더로 옮길까요?\n{names}",
                             parent=parent, warnings=warnings, undo="1단계 ‘정리 되돌리기’나 ‘제외 기록 보기’에서 되돌릴 수 있어요.",
                             ok="옮기기", choices=choices)
         if not answer:
@@ -5032,7 +5044,7 @@ class MonthlyClose:
         without = tk.Menu(menu, tearoff=False)
         without.add_command(label="사유 고르기 (세무사 확인)…", command=self.mark_statement_evidence)
         without.add_command(label="사유 관리", command=self.manage_reasons)
-        menu.add_cascade(label="증빙 없이 처리", menu=without)
+        menu.add_cascade(label="인보이스 없이 처리", menu=without)
         menu.add_command(label="메일 검색", command=self.search_gmail)
         menu.add_command(label="인보이스 요청 초안", command=self.draft_invoice_request)
         if item.amount < 0:
@@ -5091,7 +5103,7 @@ class MonthlyClose:
     def manage_unmatched(self):
         """Evidence that no transaction uses yet: look, fix the values, set aside, or link to a transaction."""
         dialog = InlineDialog(self.root)
-        dialog.title("연결 안 된 증빙")
+        dialog.title("연결 안 된 인보이스")
         dialog.geometry("980x600")
         dialog.grab_set()
         caption = tk.StringVar()
@@ -5099,7 +5111,7 @@ class MonthlyClose:
         footer = ttk.Frame(dialog, padding=(14, 8))
         footer.pack(side="bottom", fill="x")
         near_only = tk.BooleanVar(value=True)
-        ttk.Checkbutton(dialog, text=f"불러온 명세서 기간 앞뒤 {CANDIDATE_DAYS}일 안의 증빙만 (날짜 없는 증빙 포함)", variable=near_only,
+        ttk.Checkbutton(dialog, text=f"불러온 명세서 기간 앞뒤 {CANDIDATE_DAYS}일 안의 인보이스만 (날짜 없는 인보이스 포함)", variable=near_only,
                         command=lambda: fill()).pack(anchor="w", padx=14)
         older = ttk.Frame(dialog, padding=(14, 2))
         older.pack(fill="x")
@@ -5124,7 +5136,7 @@ class MonthlyClose:
             table.selection_set(rows)
             if rows:
                 table.see(rows[0])
-            caption.set(f"{limit} 이전 발행 증빙 {len(rows)}개를 골랐어요. ‘제외 폴더로’를 누르면 사유를 고르고 한 번에 옮겨요.")
+            caption.set(f"{limit} 이전 발행 인보이스 {len(rows)}개를 골랐어요. ‘제외 폴더로’를 누르면 사유를 고르고 한 번에 옮겨요.")
 
         ttk.Button(older, text="모두 고르기", command=pick_older).pack(side="left", padx=6)
         ttk.Button(older, text="전체 선택", command=lambda: table.selection_set(table.get_children())).pack(side="left")
@@ -5140,13 +5152,13 @@ class MonthlyClose:
                 table.insert("", "end", iid=str(index), values=(
                     doc.path.name, doc.day or "", doc.seller, f"{doc.amount} {doc.currency}" if doc.amount is not None else "",
                     doc.number, f"{len(fits)}건" if fits else ""))
-            caption.set(f"아직 어떤 거래에도 연결되지 않은 증빙 {len(shown)}개예요. 다른 달 거래의 증빙이거나, 개인 지출·중복·인보이스가 아닌 "
+            caption.set(f"아직 어떤 거래에도 연결되지 않은 인보이스 {len(shown)}개예요. 다른 달 거래의 인보이스이거나, 개인 지출·중복·인보이스가 아닌 "
                         "파일일 수 있어요. 골라서 열어 보고, 값을 고치거나, 거래에 연결하거나, ‘제외’ 폴더로 보내세요.")
 
         def chosen():
             selection = table.selection()
             if len(selection) != 1:
-                show_notice(dialog, "증빙 한 개를 고르세요.")
+                show_notice(dialog, "인보이스 한 개를 고르세요.")
                 return None
             return shown[selection[0]]
 
@@ -5163,7 +5175,7 @@ class MonthlyClose:
         def exclude_selected():
             docs = [shown[key][0] for key in table.selection()]
             if not docs:
-                show_notice(dialog, "제외할 증빙을 고르세요. Ctrl·Shift로 여러 개, ‘N개월보다 오래된 것’으로 한 번에 고를 수 있어요.")
+                show_notice(dialog, "제외할 인보이스를 고르세요. Ctrl·Shift로 여러 개, ‘N개월보다 오래된 것’으로 한 번에 고를 수 있어요.")
                 return
             if self.exclude_documents(docs, dialog):
                 fill()
@@ -5209,7 +5221,7 @@ class MonthlyClose:
         button = getattr(self, "unmatched_button", None)
         if button is not None and button.winfo_exists():
             count = len(self.unmatched_documents(near_only=True)) if self.invoices else 0
-            button.configure(text=f"연결 안 된 증빙 ({count})" if self.invoices else "연결 안 된 증빙")
+            button.configure(text=f"연결 안 된 인보이스 ({count})" if self.invoices else "연결 안 된 인보이스")
 
     def open_pdf(self):
         selected = self.pdfs.selection()
@@ -5355,7 +5367,7 @@ class MonthlyClose:
             raise ValueError("인쇄할 거래가 없어요.")
         data = bundle.tobytes(garbage=3, deflate=True)
         bundle.close()
-        summary = (f"명세서 {counts['statement_pages']}쪽 · 증빙 {counts['evidence']}개 · 안내 {counts['notes']}쪽"
+        summary = (f"명세서 {counts['statement_pages']}쪽 · 인보이스 {counts['evidence']}개 · 안내 {counts['notes']}쪽"
                    + (f" · 명세서에서 위치 못 찾음 {counts['unplaced']}건" if counts["unplaced"] else "")
                    + (f" · 읽기 실패 {counts['failed']}개" if counts["failed"] else ""))
         return data, summary
@@ -5376,7 +5388,7 @@ class MonthlyClose:
                                "인보이스 아래 가운데에 거래번호가 찍혀요(원본 파일은 그대로).",
                   wraplength=520, padding=(14, 12, 14, 6)).pack(anchor="w")
         notes = tk.BooleanVar(value=True)
-        ttk.Checkbutton(dialog, text="증빙 없는 번호에 안내 쪽 넣기 (사유 한 줄)", variable=notes).pack(anchor="w", padx=14, pady=4)
+        ttk.Checkbutton(dialog, text="인보이스 없는 번호에 안내 쪽 넣기 (사유 한 줄)", variable=notes).pack(anchor="w", padx=14, pady=4)
 
         def build():
             dialog.destroy()
@@ -5582,13 +5594,13 @@ class MonthlyClose:
         if not self.transactions and not self.errors:
             self.notice("먼저 은행·카드 명세서를 불러오세요.")
             return
-        path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".csv", initialfile="월마감_증빙.csv", filetypes=[("CSV", "*.csv")])
+        path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".csv", initialfile="월마감_인보이스.csv", filetypes=[("CSV", "*.csv")])
         if not path:
             return
         try:
             with open(path, "w", encoding="utf-8-sig", newline="") as file:
                 writer = csv.writer(file)
-                writer.writerow(["거래번호", "마감월", "거래일", "가맹점", "금액", "통화", "증빙 상태", "증빙 파일명", "세무사 전달 메모", "후속 예정일"])
+                writer.writerow(["거래번호", "마감월", "거래일", "가맹점", "금액", "통화", "인보이스 상태", "인보이스 파일명", "세무사 전달 메모", "후속 예정일"])
                 for key, item in self.transactions.items():
                     names = " | ".join(self.by_key[link].path.name if link in self.by_key else "(파일 위치 확인)"
                                        for link in self.linked(key))
@@ -5633,7 +5645,7 @@ class MonthlyClose:
             if not supplemental or (baseline is not None and old != snapshot):
                 keys.append(key)
         if supplemental and not keys:
-            self.notice("전달한 마감본을 이력에서 표시한 뒤, 새 증빙이나 변경된 거래가 있는지 확인하세요.")
+            self.notice("전달한 마감본을 이력에서 표시한 뒤, 새 인보이스나 변경된 거래가 있는지 확인하세요.")
             return
         self.choose_package(keys, lambda chosen: self.preview_package(chosen, supplemental, previous, current),
                             supplemental)
@@ -5642,7 +5654,7 @@ class MonthlyClose:
         """German reconciliation text written to the advisor files for one transaction."""
         status, record = self.status_for(key), self.record(key)
         return {
-            "금액 대조 완료": "Abgeglichen", "증빙 미연결": "Beleg fehlt",
+            "금액 대조 완료": "Abgeglichen", "인보이스 미연결": "Beleg fehlt",
             "명세서 근거 · 세무사 확인": "Auszug als Nachweis · steuerlich prüfen",
             CONTRACT_STATUS: "Dauerbeleg – Vertrag liegt vor",
             "연결 PDF 위치 확인": "Verknüpfte Datei fehlt",
@@ -5655,7 +5667,7 @@ class MonthlyClose:
             PARTIAL_REFUND_DONE: "Teilerstattung · Beleg zum Kauf liegt bei",
             EARLIER_REFUND: self.earlier_refund_german(key),
         }.get(status, status.replace("연결됨 · 차액", "Differenz").replace("일부 환불 · 잔액", "Teilerstattung · Restbetrag")
-              .replace(" · 증빙 필요", " · Beleg fehlt"))
+              .replace(" · 인보이스 필요", " · Beleg fehlt"))
 
     def earlier_refund_german(self, key):
         """‘Erstattung zu 608-002 (Kauf 04.08.2026, 62,80 EUR) – Monat 08/2026 bereits übermittelt’."""
@@ -5694,7 +5706,7 @@ class MonthlyClose:
         month_vars = {month: tk.BooleanVar(value=chosen_month in ("전체", month)) for month in months}
         source_vars = {checksum: tk.BooleanVar(value=True) for checksum in names}
         picked = {key: True for key in keys}
-        ttk.Label(dialog, text="월과 명세서를 고른 뒤, 빼고 싶은 거래는 체크를 눌러 해제하세요. 선택한 거래에 연결된 증빙과 그 거래가 들어 있는 명세서만 ZIP에 들어가요.\n"
+        ttk.Label(dialog, text="월과 명세서를 고른 뒤, 빼고 싶은 거래는 체크를 눌러 해제하세요. 선택한 거래에 연결된 인보이스와 그 거래가 들어 있는 명세서만 ZIP에 들어가요.\n"
                        "Monate und Auszüge wählen, nicht gewünschte Buchungen abwählen. Nur zugehörige Belege und Auszüge kommen in die ZIP-Datei.",
                   wraplength=940, padding=(14, 10, 14, 4)).pack(anchor="w")
         filters = tk.Frame(dialog, background=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"],
@@ -5806,7 +5818,7 @@ class MonthlyClose:
             dialog.transient(self.root)
             dialog.grab_set()
             ttk.Label(dialog, text=f"{filename}\n"
-                      f"거래 {len(summary)}건 · 증빙 파일 {evidence_count}개 · 첨부 {attachment_count}개 · 미해결 {len(unresolved)}건 · 번역 대기 메모 {translation_count}개\n"
+                      f"거래 {len(summary)}건 · 인보이스 파일 {evidence_count}개 · 첨부 {attachment_count}개 · 미해결 {len(unresolved)}건 · 번역 대기 메모 {translation_count}개\n"
                       f"{len(summary)} Buchungen · {evidence_count} Belege · {attachment_count} Anlagen · {len(unresolved)} offene Posten · {translation_count} Notizen ohne Übersetzung",
                       padding=10).pack(anchor="w")
             footer = tk.Frame(dialog, background=COLORS["bg"])
@@ -6004,7 +6016,7 @@ class MonthlyClose:
                         arcname = f"Belege/{record['period']}/{filename}"
                         data = doc.path.read_bytes()
                         if hashlib.sha256(data).hexdigest() != doc.key:
-                            raise ValueError(f"증빙이 변경됐어요. 증빙 폴더를 다시 불러오세요. {doc.path.name}")
+                            raise ValueError(f"인보이스가 변경됐어요. 인보이스 폴더를 다시 불러오세요. {doc.path.name}")
                         metadata = [self.state.get("document_notes", {}).get(link, ""), self.state.get("hospitality", {}).get(link, {})]
                         include_file = baselines is None or link not in already_delivered or metadata != old_documents.get(link)
                         if include_file:
@@ -6062,7 +6074,7 @@ class MonthlyClose:
                             export_value(original.path.name if original else relation["original_name"]),
                             export_value(original.number if original else relation["original_number"])])
                     summary_writer.writerow(row)
-                    if record.get("follow_up") in ("요청 중", "세무사 확인 필요", "증빙 확보 불가") or status not in DONE_STATES:
+                    if record.get("follow_up") in ("요청 중", "세무사 확인 필요", "인보이스 확보 불가") or status not in DONE_STATES:
                         unmatched_writer.writerow(row)
                 errors = io.StringIO(newline="")
                 error_writer = csv.writer(errors, delimiter=";")
