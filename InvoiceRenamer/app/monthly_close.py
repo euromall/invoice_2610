@@ -23,7 +23,7 @@ import pymupdf
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import quote, urlencode
 
-from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, import_mode, make_copyable, open_file, source_preview, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
+from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MoneyEntry, pick_value, import_mode, make_copyable, open_file, source_preview, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
@@ -3274,7 +3274,7 @@ class MonthlyClose:
                     (exact if near else far).append(invoice)
                     seen.add(invoice.key)
         if far:
-            self.far_text.set(f"다른 달 후보 {len(far)}개도 보기")
+            self.far_text.set(f"다른 달 {len(far)}")
             if not self.far_check.winfo_ismapped():
                 self.far_check.pack(side="right", padx=(0, 10))
         elif self.far_check.winfo_ismapped():
@@ -3369,41 +3369,23 @@ class MonthlyClose:
             return
         window = InlineDialog(self.root)
         window.title(f"명세서에서 보기 · {self.record(item.key).get('number', '')}")
-        window.geometry("820x640")
+        window.geometry("900x720")
         window.grab_set()
         top = ttk.Frame(window, padding=(12, 10))
         top.pack(fill="x")
         ttk.Label(top, text=f"{Path(source).name}" + (f" · {page + 1}페이지" if page is not None else ""), font=FONT_BOLD).pack(side="left")
         ttk.Button(top, text="파일 열기", command=lambda: open_file(source)).pack(side="right")
-        whole = tk.BooleanVar()
-        canvas = tk.Canvas(window, background="#eeeeee", highlightthickness=0)
-        text = tk.Text(window, height=8, wrap="word", font=FONT_SMALL)
+        text = tk.Text(window, height=6, wrap="word", font=FONT_SMALL)
         text.insert("1.0", "\n".join(lines) if lines else "명세서에서 이 거래 줄을 찾지 못했어요. ‘파일 열기’로 확인하세요.")
         make_copyable(text)
         text.pack(side="bottom", fill="x", padx=12, pady=(4, 10))
         if Path(source).suffix.lower() != ".pdf" or page is None:
             return
-        ttk.Checkbutton(top, text="페이지 전체", variable=whole, command=lambda: draw()).pack(side="right", padx=10)
-        bar = ttk.Scrollbar(window, command=canvas.yview)
-        canvas.configure(yscrollcommand=bar.set)
-        bar.pack(side="right", fill="y")
-        canvas.pack(fill="both", expand=True, padx=(12, 0))
-
-        def draw():
-            try:
-                data = source_preview(Path(source), page, rect) if not whole.get() else whole_page(Path(source), page, rect)
-            except (OSError, ValueError, RuntimeError) as error:
-                canvas.delete("all")
-                canvas.create_text(12, 12, anchor="nw", text=f"미리보기를 만들지 못했어요: {error}")
-                return
-            canvas.delete("all")
-            canvas.image = tk.PhotoImage(data=base64.b64encode(data).decode("ascii"))
-            canvas.create_image(0, 0, image=canvas.image, anchor="nw")
-            canvas.configure(scrollregion=(0, 0, canvas.image.width(), canvas.image.height()))
-            if whole.get():
-                canvas.yview_moveto(max(0.0, rect[1] / max(1.0, page_height(Path(source), page)) - 0.15))
-
-        draw()
+        from pdf_view import PdfView
+        view = PdfView(window)
+        view.pack(fill="both", expand=True, padx=12)
+        box = pymupdf.Rect(rect) if rect else None
+        view.load(Path(source), page, {page: [box]} if box else {}, box)
 
 
     def save(self, state):
@@ -3585,17 +3567,14 @@ class MonthlyClose:
                  anchor="w").pack(fill="x", padx=12, pady=(4, 0))
         extras = tk.Frame(right, background="#fafbfc", padx=10, pady=4)
         extras.pack(side="bottom", fill="x")
+        tools = tk.Frame(right, background="#fafbfc", padx=10, pady=2)
+        tools.pack(side="bottom", fill="x")
         buttons = tk.Frame(right, background="#fafbfc", padx=10, pady=8)
         buttons.pack(side="bottom", fill="x")
         note = ttk.Entry(extras, width=40)
-        canvas_frame = tk.Frame(right, background="#eeeeee")
-        canvas_frame.pack(fill="both", expand=True, padx=12, pady=6)
-        canvas = tk.Canvas(canvas_frame, background="#eeeeee", highlightthickness=0)
-        bar = ttk.Scrollbar(canvas_frame, command=canvas.yview)
-        canvas.configure(yscrollcommand=bar.set)
-        bar.pack(side="right", fill="y")
-        canvas.pack(fill="both", expand=True)
-        canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
+        from pdf_view import PdfView
+        viewer = PdfView(right, compact=True)
+        viewer.pack(fill="both", expand=True, padx=12, pady=6)
         current = {"key": None, "docs": []}
 
         def label_for(key):
@@ -3666,30 +3645,18 @@ class MonthlyClose:
             draw()
 
         def draw(_event=None):
-            canvas.delete("all")
-            canvas.image = None
             docs = current["docs"]
             if not docs:
                 doc_caption.set("")
+                viewer.message("연결된 증빙이 없어요.")
                 return
             doc = docs[max(0, chooser.current())]
             doc_caption.set(f"발행일 {doc.day or '없음'} · {doc.seller or '업체명 없음'} · "
                             f"{signed_total(doc) if doc.amount is not None else '총액 없음'} {doc.currency} · 번호 {doc.number or '없음'}")
             if doc.path.suffix.lower() == ".xml":
-                canvas.create_text(12, 12, anchor="nw", text="XRechnung/ZUGFeRD XML이에요. ‘인보이스 열기’로 원본을 보세요.")
+                viewer.message("XRechnung/ZUGFeRD XML이에요. ‘인보이스 열기’로 원본을 보세요.")
                 return
-            width = max(300, canvas.winfo_width() - 8)
-            try:
-                data, pages = evidence_image(doc.path, width)
-            except (OSError, ValueError, RuntimeError) as error:
-                canvas.create_text(12, 12, anchor="nw", text=f"미리보기를 만들지 못했어요: {error}")
-                return
-            canvas.image = tk.PhotoImage(data=base64.b64encode(data).decode("ascii"))
-            canvas.create_image(0, 0, image=canvas.image, anchor="nw")
-            if pages > 1:
-                canvas.create_text(8, canvas.image.height() + 6, anchor="nw",
-                                   text=f"1/{pages}페이지만 보여요. 나머지는 ‘인보이스 열기’로 보세요.")
-            canvas.configure(scrollregion=(0, 0, canvas.image.width(), canvas.image.height() + 30))
+            viewer.load(doc.path, 0)
 
         def mark(status):
             key = current["key"]
@@ -3723,15 +3690,14 @@ class MonthlyClose:
         ttk.Button(buttons, text="✓ 검수 완료 (Enter)", style="Success.TButton", command=lambda: mark("ok")).pack(side="left")
         ttk.Button(buttons, text="다시 확인 (R)", command=lambda: mark("recheck")).pack(side="left", padx=6)
         ttk.Button(buttons, text="검수 취소", command=lambda: mark(None)).pack(side="left")
-        ttk.Button(buttons, text="인보이스 열기",
-                   command=lambda: current["docs"] and open_file(current["docs"][max(0, chooser.current())].path)).pack(side="right")
-        ttk.Button(extras, text="명세서에서 보기",
-                   command=lambda: current["key"] and self.show_in_statement(self.transactions[current["key"]])).pack(side="right", padx=(6, 0))
+        ttk.Button(tools, text="인보이스 열기", style="Small.TButton",
+                   command=lambda: current["docs"] and open_file(current["docs"][max(0, chooser.current())].path)).pack(side="left")
+        ttk.Button(tools, text="명세서에서 보기", style="Small.TButton",
+                   command=lambda: current["key"] and self.show_in_statement(self.transactions[current["key"]])).pack(side="left", padx=(6, 0))
         ttk.Label(extras, text="검수 메모 (내부용)", background="#fafbfc").pack(side="left", padx=(0, 4))
         note.pack(side="left", fill="x", expand=True)
         table.bind("<<TreeviewSelect>>", show)
         chooser.bind("<<ComboboxSelected>>", draw)
-        canvas.bind("<Configure>", lambda event: dialog.after_idle(draw) if current["docs"] else None)
         order.trace_add("write", lambda *_: fill(current["key"]))
         dialog.bind("<Return>", lambda event: key_mark(event, "ok"))
         dialog.bind("<r>", lambda event: key_mark(event, "recheck"))
@@ -4537,8 +4503,9 @@ class MonthlyClose:
         selector.current(next((i for i, (key, _) in enumerate(entries) if key in selection), 0))
         caption = ttk.Label(right, wraplength=650)
         caption.pack(anchor="w", pady=6)
-        canvas = tk.Canvas(right, background="#eeeeee", highlightthickness=0)
-        canvas.pack(fill="both", expand=True)
+        from pdf_view import PdfView
+        viewer = PdfView(right)
+        viewer.pack(fill="both", expand=True)
 
         def draw(_event=None):
             _, doc = entries[selector.current()]
@@ -4547,22 +4514,13 @@ class MonthlyClose:
             if reference:
                 info += f" · {reference} 일치"
             caption.configure(text=info)
-            canvas.delete("all")
-            canvas.image = None
-            try:
-                if doc.path.suffix.lower() == ".xml":
-                    meta = doc.tax_fields or {}
-                    values = [doc.path.name, f"인보이스 번호: {doc.number}", f"주문번호: {meta.get('order', '')}",
-                              f"원본 참조: {meta.get('reference', '')}", f"공급가액: {meta.get('net', '')}", f"부가세: {meta.get('tax', '')}"]
-                    canvas.create_text(12, 12, text="\n\n".join(values), anchor="nw", width=max(120, canvas.winfo_width() - 24))
-                else:
-                    width = max(180, canvas.winfo_width() - 16)
-                    height = max(180, canvas.winfo_height() - 16)
-                    data = first_page_preview(doc.path, width, height)
-                    canvas.image = tk.PhotoImage(data=base64.b64encode(data).decode("ascii"))
-                    canvas.create_image(canvas.winfo_width() / 2, 8, image=canvas.image, anchor="n")
-            except (OSError, ValueError, RuntimeError, tk.TclError) as error:
-                canvas.create_text(12, 12, text=f"미리보기를 열 수 없어요.\n{error}", anchor="nw")
+            if doc.path.suffix.lower() == ".xml":
+                meta = doc.tax_fields or {}
+                values = [doc.path.name, f"인보이스 번호: {doc.number}", f"주문번호: {meta.get('order', '')}",
+                          f"원본 참조: {meta.get('reference', '')}", f"공급가액: {meta.get('net', '')}", f"부가세: {meta.get('tax', '')}"]
+                viewer.message("\n\n".join(values))
+            else:
+                viewer.load(doc.path, 0)
 
         def select_on_main():
             key, _ = entries[selector.current()]
@@ -4585,7 +4543,7 @@ class MonthlyClose:
         self.buttons(actions, [("이 증빙 선택", select_on_main), ("원본 위치 확인", locate),
                                ("원본 열기", lambda: self.open_evidence_file(entries[selector.current()][1].path))])
         selector.bind("<<ComboboxSelected>>", draw)
-        canvas.bind("<Configure>", draw)
+        draw()
 
     def edit_correction(self):
         selection = self.pdfs.selection()
@@ -4684,21 +4642,30 @@ class MonthlyClose:
         values = (doc.day.isoformat() if doc.day else "", doc.seller,
                   f"{doc.amount} {doc.currency}" if doc.amount is not None else "", doc.number)
         entries = []
-        for row, (label, value) in enumerate(zip(("발행일 (YYYY-MM-DD)", "업체명", "총액 (예: 58.39 EUR)", "인보이스 번호"), values), 1):
+        for row, (label, value) in enumerate(zip(("발행일 (YYYY-MM-DD)", "업체명", "총액 (숫자만, 예: 7,87)", "인보이스 번호"), values), 1):
             ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
-            entry = ttk.Entry(body, width=40)
-            entry.insert(0, value)
-            entry.grid(row=row, column=1)
+            entry = MoneyEntry(body, value, width=30) if row == 3 else ttk.Entry(body, width=40)
+            if row != 3:
+                entry.insert(0, value)
+            entry.grid(row=row, column=1, sticky="w")
             entries.append(entry)
+
+        def put(kind, value):
+            index = {"발행일": 0, "업체명": 1, "총액": 2, "인보이스 번호": 3}[kind]
+            if index == 2:
+                entries[2].set(value)
+            else:
+                entries[index].delete(0, "end")
+                entries[index].insert(0, value)
 
         def save():
             day, seller, total, number = (entry.get().strip() for entry in entries)
-            money = re.fullmatch(MONEY, total, re.IGNORECASE)
-            if not re.fullmatch(DATE, day) or not normalized_date(day) or not seller or not money:
-                show_notice(form, "발행일(2026-07-02), 업체명, 통화가 있는 총액(58.39 EUR)을 적어 주세요.")
+            day = normalized_date(day) if re.fullmatch(DATE, day) else pick_value("발행일", day)
+            if not day or not seller or not total:
+                show_notice(form, "발행일(2026-07-02), 업체명, 총액(숫자, 예: 7,87)을 적어 주세요. 통화는 옆 칸에서 골라요.")
                 return
             try:
-                save_invoice_edit(doc.path, (normalized_date(day), seller, normalized_money(money), number))
+                save_invoice_edit(doc.path, (day, seller, total, number))
             except (OSError, ValueError) as error:
                 show_notice(form, f"저장하지 못했어요: {error}", kind="error")
                 return
@@ -4707,6 +4674,11 @@ class MonthlyClose:
             if after:
                 after()
 
+        if doc.path.suffix.lower() != ".xml":
+            ttk.Button(body, text="원본에서 보기·값 고르기", command=lambda: show_source_locations(
+                form, doc.path, {"발행일": entries[0].get().strip(), "총액": entries[2].get() or entries[2].entry.get().strip(),
+                                 "인보이스 번호": entries[3].get().strip(), "업체명": entries[1].get().strip()}, on_value=put,
+            )).grid(row=5, column=0, sticky="w", pady=(10, 0))
         ttk.Button(body, text="저장", command=save).grid(row=5, column=1, sticky="e", pady=(10, 0))
 
     def exclude_document(self, doc=None, parent=None):

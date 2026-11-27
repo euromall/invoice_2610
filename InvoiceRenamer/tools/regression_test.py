@@ -383,7 +383,92 @@ def run():
         parts = split_pdf(combined, info["parts"])
         check([read_invoice_details(path)[0][1:] for path in parts] == [("Shop Eins GmbH", "18.99 EUR"), ("Shop Zwei GmbH", "11.00 EUR")]
               and not combined.exists() and (combined.parent / "제외" / "order__나누기전_원본.pdf").exists(), "Combined PDF split")
-    print("PASS: v1.11 final check, v1.10 statement text, sort, reasons, v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
+
+        # 15. v1.12: amount input, picking values, mail search, account order, Amazon sellers, print bundle, refunds.
+        from datetime import date as day
+        from decimal import Decimal
+        from types import SimpleNamespace
+        from invoice_renamer import money_text, pick_value
+        from monthly_close import (EARLIER_REFUND, PARTIAL_REFUND_DONE, amazon_marketplace, mail_search_url, ordered_accounts,
+                                   stamp_page, Invoice)
+        check(money_text("7,87") == "7.87 EUR" and money_text("7.87", "USD") == "7.87 USD" and money_text("1.234,56") == "1234.56 EUR"
+              and money_text("7,8") == "7.80 EUR" and money_text("12,00 CHF") == "12.00 CHF" and money_text("abc") == "", "v1.12: amount input")
+        check(pick_value("발행일", "Rechnungsdatum 31.07.2026") == "2026-07-31" and pick_value("총액", "Summe 6,61 EUR 7,87 EUR") == "7.87 EUR"
+              and pick_value("총액", "Betrag 7,87") == "7.87 EUR", "v1.12: picked value")
+        check(invoice_fields(["DHL Paket GmbH\nRechnungsdatum: 31.07.2026\nRechnungsbetrag (inklusive Umsatzsteuer)    7,87 EUR\n"])[2] == "7.87 EUR",
+              "v1.12: total label with a note in brackets")
+        daum = mail_search_url({"kind": "daum"}, Decimal("-30.27"), "", day(2026, 8, 5))
+        check(daum == "https://mail.daum.net/top/SEARCH?after=20260722&before=20260820&body=30%2C27&cc=30%2C27&file=30%2C27&folderId=ALL"
+              "&from=30%2C27&subject=30%2C27&to=30%2C27", f"v1.12: Daum search {daum}")
+        gmail = mail_search_url({"kind": "gmail", "index": 1}, Decimal("30.27"), "DHL", day(2026, 8, 5))
+        check(gmail.startswith("https://mail.google.com/mail/u/1/#search/") and "30%2C27" in gmail and "%22DHL%22" in gmail, f"v1.12: Gmail {gmail}")
+        check(ordered_accounts(["Amex", "Deutsche Bank", "DKB"], {"account_order": ["Deutsche Bank", "Amex"]}) == ["Deutsche Bank", "Amex", "DKB"],
+              "v1.12: account order, new accounts last")
+        seller_doc = Invoice("x", Path("a.pdf"), None, "Aktuell Vertriebs-GmbH", Decimal("62.80"), "EUR", "RE212140", False, {"amazon": True})
+        other_doc = Invoice("y", Path("b.pdf"), None, "Aktuell Vertriebs-GmbH", Decimal("62.80"), "EUR", "RE212140", False, {})
+        check(amazon_marketplace("SEPA Lastschrift | AMAZON EU S.A R.L.", seller_doc) and not amazon_marketplace("Shop GmbH", seller_doc)
+              and not amazon_marketplace("AMAZON EU", other_doc), "v1.12: Amazon marketplace seller")
+        rotated = pymupdf.open()
+        rotated.new_page().set_rotation(90)
+        stamp_page(rotated[0], "608-004")
+        check("608-004" in rotated[0].get_text(), "v1.12: number stamped on a rotated page")
+        rotated.close()
+
+        bundle_root = root / "bundle"
+        bundle_root.mkdir()
+        statement2 = bundle_root / "db.pdf"
+        with pymupdf.open() as document:
+            for page_index in range(2):
+                page = document.new_page()
+                rows_text = ["Deutsche Bank AG", "Alter Saldo per 31.07.2026        1.000,00",
+                             f"0{page_index + 1}.08. 0{page_index + 1}.08.   SHOP {page_index}A BERLIN                 - 10,00", "2026   2026     Kartenzahlung",
+                             f"0{page_index + 1}.08. 0{page_index + 1}.08.   SHOP {page_index}B BERLIN                 - 20,00", "2026   2026     Kartenzahlung"]
+                for row, line in enumerate(rows_text):
+                    page.insert_text((40, 60 + 14 * row), line, fontname="cour", fontsize=9)
+            document.save(statement2)
+        documents = {}
+        for index in range(2):
+            path = bundle_root / f"inv{index}.pdf"
+            with pymupdf.open() as document:
+                document.new_page().insert_text((72, 100), f"Rechnung {index}")
+                document.save(path)
+            documents[f"d{index}"] = SimpleNamespace(path=path)
+        _, rows = read_statement_pdf(statement2)
+        mc = MonthlyClose.__new__(MonthlyClose)
+        mc.transactions = {f"k{i}": Transaction(f"k{i}", day.fromisoformat(row[0]), row[1], Decimal(row[2].replace(",", ".")), "EUR")
+                           for i, row in enumerate(rows)}
+        mc.accounts = {key: "Deutsche Bank" for key in mc.transactions}
+        mc.statement_sources = {"s1": statement2}
+        mc.by_key = documents
+        records = {key: {"number": f"608-{i + 1:03d}", "period": "2026-08"} for i, key in enumerate(mc.transactions)}
+        records["k0"]["links"], records["k2"]["links"] = ["d0"], ["d1"]
+        mc.state = {"records": records, "aliases": {}, "transaction_sources": {key: {"s1": "db.pdf"} for key in mc.transactions}}
+        data, summary = mc.print_bundle()
+        with pymupdf.open("pdf", data) as document:
+            order = [" ".join(page.get_text().split())[:40] for page in document]
+        check(len(order) == 6 and order[0].startswith("Deutsche Bank") and order[1].startswith("Rechnung 0")
+              and "608-002" in order[2] and order[3].startswith("Deutsche Bank") and order[4].startswith("Rechnung 1")
+              and "608-004" in order[5], f"v1.12: print bundle order {order} {summary}")
+        check(statement2.read_bytes() and all(b"608-" not in documents[key].path.read_bytes() for key in documents), "v1.12: originals unchanged")
+
+        # refunds: an earlier, already sent month is not changed; partial refunds need the purchase invoice
+        mc.state["records"]["old"] = {"number": "607-010", "period": "2026-07", "day": "2026-07-20", "amount": "62.80",
+                                      "currency": "EUR", "merchant": "SHOP 0A BERLIN | Kartenzahlung"}
+        mc.state["exports"] = {"2026-07": [{"version": 1}]}
+        mc.transactions["r"] = Transaction("r", day(2026, 8, 9), "SHOP 0A BERLIN | Gutschrift", Decimal("-62.80"), "EUR")
+        mc.state["records"]["r"] = {"number": "608-005", "period": "2026-08"}
+        check([row[1] for row in mc.refund_candidates("r")] == ["old"], "v1.12: refund candidate from an earlier month")
+        mc.state["records"]["r"]["refund_of"] = "old"
+        check(mc.status_for("r") == EARLIER_REFUND and "607-010" in mc.german_status("r") and "bereits übermittelt" in mc.german_status("r"),
+              f"v1.12: earlier refund status {mc.german_status('r')}")
+        mc.transactions["p"] = Transaction("p", day(2026, 8, 3), "SHOP X", Decimal("50.00"), "EUR")
+        mc.transactions["q"] = Transaction("q", day(2026, 8, 6), "SHOP X", Decimal("-20.00"), "EUR")
+        mc.state["records"]["p"] = {"number": "608-006", "period": "2026-08", "refund_group": ["p", "q"]}
+        mc.state["records"]["q"] = {"number": "608-007", "period": "2026-08", "refund_group": ["p", "q"]}
+        check("증빙 필요" in mc.status_for("p") and "Beleg fehlt" in mc.german_status("p"), f"v1.12: partial refund needs evidence {mc.status_for('p')}")
+        mc.state["records"]["p"]["links"] = ["d0"]
+        check(mc.status_for("q") == PARTIAL_REFUND_DONE, "v1.12: partial refund with purchase invoice is done")
+    print("PASS: v1.12 amount input, value picking, DHL total, mail search, account order, Amazon sellers, print bundle, refunds, v1.11 final check, v1.10 statement text, sort, reasons, v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
 if __name__ == "__main__":

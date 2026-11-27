@@ -36,6 +36,8 @@ TOTAL_LABEL_FALLBACK = (
     r"Total\s+(?:due|amount)|Amount\s+due|Balance\s+due"
 )
 # v1.6: weaker words, used only when the fallback labels above find nothing (‘USt. Gesamt’ is often the VAT line).
+# ‘Rechnungsbetrag (inklusive Umsatzsteuer) 7,87 EUR’ (DHL) or ‘Gesamtbetrag inkl. MwSt.: …’: a short note after the label.
+LABEL_NOTE = r"(?:[ \t]*\([^()\n]{1,60}\)|[ \t]+inkl\.?[ \t]*(?:MwSt|USt|Umsatzsteuer)\.?)?"
 TOTAL_LABEL_WEAK = r"Gesamt|Summe(?:\s+brutto)?|Total"
 MONTH_WORDS = (r"Januar|Februar|März|Maerz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember|"
                r"January|February|March|May|June|July|October|December|"
@@ -146,9 +148,9 @@ def invoice_fields(layouts):
             fallback = re.search(rf"(?i)^\s*Rechnung\b(?:\s+Nr\.?\s*:?\s*[\w/-]+)?[ \t]+(?:[^\d\n]+?\bden[ \t]+)?({DATE})\b", line)
             if fallback:
                 alternate_dates.append(fallback[1])
-        for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL})\b[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
+        for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL})\b{LABEL_NOTE}[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
             amounts.append(normalized_money(match))
-        for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL_FALLBACK})\b[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
+        for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL_FALLBACK})\b{LABEL_NOTE}[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
             fallback_amounts.append(normalized_money(match))
         for match in re.finditer(rf"(?im)\b(?:{TOTAL_LABEL_WEAK})\b[ \t]*[:：]?[ \t]*(?:\n[ \t]*)?{MONEY}", layout):
             weak_amounts.append(normalized_money(match))
@@ -391,6 +393,67 @@ def source_search_terms(value, kind):
     return (value,)
 
 
+CURRENCY_CHOICES = ("EUR", "USD", "GBP", "CHF", "KRW")
+
+
+def money_text(raw, currency="EUR"):
+    """‘7,87’ / ‘7.87’ / ‘1.234,56’ / ‘7,87 EUR’ → ‘7.87 EUR’ (currency from the text, else the chosen one); '' if not a number."""
+    raw = " ".join(str(raw).replace("\u00a0", " ").split())
+    if not raw:
+        return ""
+    match = re.fullmatch(MONEY, raw, re.IGNORECASE)
+    if not match and re.fullmatch(r"-?[\d.,'’ ]+", raw):
+        number = re.sub(r"([.,])(\d)$", r"\g<1>\g<2>0", raw)  # 7,8 → 7,80
+        match = re.fullmatch(MONEY, f"{number} {currency}", re.IGNORECASE)
+    return normalized_money(match) if match else ""
+
+
+class MoneyEntry(ttk.Frame):
+    """Amount box (numbers only, 7,87 or 7.87) with a currency choice that starts at EUR."""
+
+    def __init__(self, parent, value="", width=22):
+        super().__init__(parent)
+        self.entry = ttk.Entry(self, width=width)
+        self.entry.pack(side="left")
+        self.currency = ttk.Combobox(self, values=CURRENCY_CHOICES, width=6)
+        self.currency.pack(side="left", padx=(6, 0))
+        self.set(value)
+
+    def set(self, value):
+        text = money_text(value) if value else ""
+        number, _, code = text.partition(" ")
+        self.entry.delete(0, "end")
+        self.entry.insert(0, number.replace(".", ",") if number else str(value or "").strip())
+        self.currency.set(code or "EUR")
+
+    def get(self):
+        """‘7.87 EUR’ or '' when the box does not hold a number."""
+        return money_text(self.entry.get(), self.currency.get().strip().upper() or "EUR")
+
+    def focus_set(self):
+        self.entry.focus_set()
+
+
+def pick_value(kind, text):
+    """The value of one field inside text picked from the PDF with the mouse."""
+    text = " ".join(text.split())
+    if kind == "발행일":
+        for token in re.findall(rf"{DATE}|{LONG_DATE}", text):
+            value = normalized_date(token) or learned_formats.parse_date(token)
+            if value:
+                return value
+        return ""
+    if kind == "총액":
+        match = None
+        for match in re.finditer(MONEY, text, re.IGNORECASE):
+            pass
+        if match:
+            return normalized_money(match)
+        numbers = re.findall(r"-?\d{1,3}(?:[.,']\d{3})*[.,]\d{2}|-?\d+[.,]\d{2}", text)
+        return money_text(numbers[-1]) if numbers else ""
+    return text
+
+
 def source_locations(path, value, kind):
     if Path(path).suffix.lower() == ".xml":
         return []
@@ -476,68 +539,137 @@ def make_copyable(text):
     text.bind("<Button-3>", lambda event: menu.tk_popup(event.x_root, event.y_root))
 
 
-def show_source_locations(parent, path, fields):
+def show_source_locations(parent, path, fields, on_value=None):
+    """Where a value was read in the original, with page buttons and zoom.
+
+    on_value(kind, value): when given, a box to type or pick (drag a box on the page) the value of the chosen
+    field; ‘편집 칸에 넣기’ hands it back to the edit form."""
+    from pdf_view import PdfView
+
     window = InlineDialog(parent)
-    window.title("추출값 원본 위치")
+    window.title("추출값 원본 위치" + (" · 값 넣기" if on_value else ""))
+    window.geometry("1000x720")
     window.transient(parent)
     window.grab_set()
-    controls = ttk.Frame(window, padding=10)
+    controls = ttk.Frame(window, padding=(10, 8))
     controls.pack(fill="x")
     choice = ttk.Combobox(controls, values=list(fields), state="readonly", width=13)
     choice.pack(side="left")
     choice.current(0)
-    display = ttk.Label(window, width=85, padding=8)
-    display.pack(fill="x")
-    image_label = ttk.Label(window, padding=8)
-    image_label.pack()
+    display = tk.StringVar()
     hits = []
     position = 0
+    inputs = ttk.Frame(window, padding=(10, 0, 10, 6))
+    value_box = ttk.Entry(inputs, width=40)
+    money_box = MoneyEntry(inputs)
+    picked = tk.StringVar()
+
+    def picked_text(page, area, text):
+        kind = choice.get()
+        value = pick_value(kind, text)
+        if not text:
+            picked.set("상자 안에서 글자를 찾지 못했어요. 스캔 문서면 직접 적어 주세요.")
+            return
+        picked.set(f"고른 글자: {text[:80]}")
+        if not on_value:
+            return
+        if kind == "총액":
+            money_box.set(value or text)
+        else:
+            value_box.delete(0, "end")
+            value_box.insert(0, value or text)
+
+    view = PdfView(window, on_pick=picked_text)
+
+    def show_input():
+        if not on_value:
+            return
+        kind = choice.get()
+        value_box.pack_forget()
+        money_box.pack_forget()
+        if kind == "총액":
+            money_box.set(fields.get(kind, ""))
+            money_box.pack(side="left", after=input_label)
+        else:
+            value_box.delete(0, "end")
+            value_box.insert(0, fields.get(kind, ""))
+            value_box.pack(side="left", after=input_label)
+
+    def hand_over():
+        kind = choice.get()
+        value = money_box.get() if kind == "총액" else value_box.get().strip()
+        if kind == "총액" and not value:
+            show_notice(window, "총액은 숫자로 적어 주세요. 예: 7,87", kind="warn")
+            return
+        if kind == "발행일" and value and not normalized_date(value):
+            value = pick_value(kind, value)
+            if not value:
+                show_notice(window, "발행일은 2026-07-31 또는 31.07.2026처럼 적어 주세요.", kind="warn")
+                return
+            value_box.delete(0, "end")
+            value_box.insert(0, value)
+        fields[kind] = value
+        on_value(kind, value)
+        picked.set(f"‘{kind}’ 칸에 넣었어요: {value}")
+
+    if on_value:
+        inputs.pack(fill="x")
+        input_label = ttk.Label(inputs, text="값")
+        input_label.pack(side="left", padx=(0, 8))
+        ttk.Button(inputs, text="편집 칸에 넣기", style="Primary.TButton", command=hand_over).pack(side="left", padx=8)
+        ttk.Label(inputs, textvariable=picked, foreground=COLORS["muted"]).pack(side="left")
+    else:
+        ttk.Label(window, textvariable=picked, foreground=COLORS["muted"], padding=(10, 0)).pack(anchor="w")
+    ttk.Label(window, textvariable=display, padding=(10, 0, 10, 4)).pack(anchor="w")
+    view.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+    def all_boxes():
+        boxes = {}
+        for page, box, _ in hits:
+            boxes.setdefault(page, []).append(pymupdf.Rect(box))
+        return boxes
 
     def show(delta=0):
         nonlocal position
-        display.configure(text="")
         if not hits:
-            image_label.configure(image="")
-            image_label.image = None
-            display.configure(text="원본에서 같은 표기를 찾지 못했어요. 아래 1페이지를 보거나 ‘PDF 열기’로 원본을 확인하세요.")
-            try:
-                image_label.image = tk.PhotoImage(data=base64.b64encode(source_preview(path, 0, None)).decode("ascii"))
-                image_label.configure(image=image_label.image)
-            except (OSError, ValueError, RuntimeError, IndexError, tk.TclError):
-                pass
+            display.set("원본에서 이 값을 찾지 못했어요. 쪽을 넘겨 보며 값을 마우스로 끌어 고르거나 직접 적으세요."
+                        if on_value else "원본에서 같은 표기를 찾지 못했어요. 쪽을 넘겨 확인하세요.")
+            if view.path != path:
+                view.load(path, 0)
+            else:
+                view.show(view.page, boxes={})
             return
         position = (position + delta) % len(hits)
         page, box, matched = hits[position]
-        display.configure(text=f"{page + 1}페이지 · 표기 {matched} · 후보 {position + 1}/{len(hits)}")
-        try:
-            image_label.image = tk.PhotoImage(data=base64.b64encode(source_preview(path, page, box)).decode("ascii"))
-            image_label.configure(image=image_label.image)
-        except (OSError, ValueError, RuntimeError, tk.TclError) as error:
-            image_label.configure(image="")
-            display.configure(text=f"미리보기 실패 · {error}")
+        display.set(f"{page + 1}쪽 · 표기 {matched} · 찾은 곳 {position + 1}/{len(hits)}")
+        if view.path != path:
+            view.load(path, page, all_boxes(), pymupdf.Rect(box))
+        else:
+            view.show(page, pymupdf.Rect(box), all_boxes())
 
     def refresh(_event=None):
         nonlocal hits, position
         kind = choice.get()
         value = fields.get(kind)
         position = 0
+        show_input()
         try:
             hits = source_locations(path, value, kind) if value else []
         except (OSError, ValueError, RuntimeError) as error:
             hits = []
-            display.configure(text=f"원본 위치 검색 실패 · {error}")
-            image_label.configure(image="")
-            return
+            display.set(f"원본 위치 검색 실패 · {error}")
         show()
 
     for text, callback in (("이전 위치", lambda: show(-1)), ("다음 위치", lambda: show(1)), ("PDF 열기", lambda: open_file(path))):
         ttk.Button(controls, text=text, command=callback).pack(side="left", padx=4)
-    ttk.Label(window, text="같은 날짜나 금액이 여러 곳에 있으면 모두 표시해요. 주위 문구도 확인하세요.", padding=8).pack(anchor="w")
+    ttk.Label(controls, text="같은 값이 여러 곳에 있으면 모두 주황 상자로 보여요.", foreground=COLORS["muted"]).pack(side="left", padx=8)
 
     def close():
         window.destroy()
         if isinstance(parent, tk.Toplevel):
             parent.grab_set()
+        elif isinstance(parent, InlineDialog) and parent.winfo_exists():
+            parent.after_idle(parent.grab_set)
 
     window.protocol("WM_DELETE_WINDOW", close)
     choice.bind("<<ComboboxSelected>>", refresh)
@@ -1986,21 +2118,22 @@ class App:
         ttk.Label(body, text=path.name).grid(row=0, columnspan=2, sticky="w", pady=(0, 8))
         entries = []
         for index, (label, value) in enumerate(zip(
-            ("발행일 (YYYY-MM-DD)", "업체명", "총액 (예: 58.39 EUR)", "인보이스 번호 (선택)"), (*fields, number)
+            ("발행일 (YYYY-MM-DD)", "업체명", "총액 (숫자만, 예: 7,87)", "인보이스 번호 (선택)"), (*fields, number)
         ), 1):
             ttk.Label(body, text=label).grid(row=index, column=0, sticky="w", padx=(0, 12), pady=4)
-            entry = ttk.Entry(body, width=40)
-            entry.insert(0, value)
-            entry.grid(row=index, column=1)
+            entry = MoneyEntry(body, value, width=30) if index == 3 else ttk.Entry(body, width=40)
+            if index != 3:
+                entry.insert(0, value)
+            entry.grid(row=index, column=1, sticky="w")
             entries.append(entry)
 
         def save():
             values = tuple(entry.get().strip() for entry in entries)
-            amount = re.fullmatch(MONEY, values[2], re.IGNORECASE)
-            if not re.fullmatch(DATE, values[0]) or not normalized_date(values[0]) or not values[1] or not amount:
-                messagebox.showerror("입력 확인", "발행일, 업체명, 통화가 포함된 총액을 입력하세요.", parent=dialog)
+            day = normalized_date(values[0]) if re.fullmatch(DATE, values[0]) else pick_value("발행일", values[0])
+            if not day or not values[1] or not values[2]:
+                messagebox.showerror("입력 확인", "발행일, 업체명, 총액(숫자)을 입력하세요. 통화는 옆 칸에서 골라요(기본 EUR).", parent=dialog)
                 return
-            edited = normalized_date(values[0]), values[1], normalized_money(amount)
+            edited = day, values[1], values[2]
             if not proposed_name(edited):
                 messagebox.showerror("입력 확인", "파일명에 사용할 업체명을 입력하세요.", parent=dialog)
                 return
@@ -2014,8 +2147,17 @@ class App:
             dialog.destroy()
             self.learn_from(path, edited, values[3])
 
-        ttk.Button(body, text="원본 위치 확인", command=lambda: show_source_locations(
-            dialog, path, {"발행일": fields[0], "총액": fields[2], "인보이스 번호": number},
+        def put(kind, value):
+            index = {"발행일": 0, "업체명": 1, "총액": 2, "인보이스 번호": 3}[kind]
+            if index == 2:
+                entries[2].set(value)
+            else:
+                entries[index].delete(0, "end")
+                entries[index].insert(0, value)
+
+        ttk.Button(body, text="원본에서 보기·값 고르기", command=lambda: show_source_locations(
+            dialog, path, {"발행일": entries[0].get().strip(), "총액": entries[2].get() or entries[2].entry.get().strip(),
+                           "인보이스 번호": entries[3].get().strip(), "업체명": entries[1].get().strip()}, on_value=put,
         )).grid(row=5, column=0, sticky="w", pady=(10, 0))
         ttk.Button(body, text="저장", command=save).grid(row=5, column=1, sticky="e", pady=(10, 0))
         dialog.bind("<Return>", lambda event: save())
