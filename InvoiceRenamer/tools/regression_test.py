@@ -709,7 +709,39 @@ def run_v1131():
     print("PASS: v1.13.1 stored text (new start, renamed, step 3, re-read, incomplete OCR), panel focus, odd file keeps reading")
 
 
+def run_v114():
+    """v1.14 features."""
+    from tax_documents import pdf_tax_fields, tax_notes, vat_ids
+    from monthly_close import exchange_rate, Invoice
+    from decimal import Decimal
+    from datetime import date as day
+    # tax: reverse charge, foreign seller, IBAN is not a VAT ID, missing tax / tax id
+    french = ("Société Exemple SAS\nN° TVA FR 12 345678901\nClient: Euromall GmbH USt-IdNr. DE123456789\n"
+              "Autoliquidation - Reverse charge Article 196\nIBAN DE89370400440532013000\nTotal 100,00 EUR\n")
+    meta = pdf_tax_fields(french)
+    check(vat_ids(french) == ["FR12345678901", "DE123456789"] and meta.get("foreign") == "FR" and meta["special"] == "Reverse Charge",
+          f"v1.14: VAT IDs and reverse charge {vat_ids(french)} {meta}")
+    notes = [korean for korean, _ in tax_notes(meta, Decimal("100"), "EUR")]
+    check(any("역과세" in n for n in notes) and any("해외" in n for n in notes) and not any(n.startswith("세액(MwSt)") for n in notes),
+          f"v1.14: reverse charge needs no tax line {notes}")
+    german = "Muster GmbH\nSteuernummer 12/345/67890\nMwSt 19% 19,00\nGesamtbetrag 119,00 EUR\n"
+    check(tax_notes(pdf_tax_fields(german), Decimal("119"), "EUR") == [], "v1.14: complete German invoice has no remarks")
+    bare = tax_notes(pdf_tax_fields("Laden\nGesamt 300,00 EUR\n"), Decimal("300"), "EUR")
+    check(len(bare) == 2, f"v1.14: no tax and no tax id are named {bare}")
+    small = tax_notes(pdf_tax_fields("Bäckerei\nMwSt 7% 0,30\nSumme 4,50 EUR\n"), Decimal("4.5"), "EUR")
+    check(small == [], f"v1.14: small invoice needs no tax id {small}")
+    intra = pdf_tax_fields("Lieferant NL\nBTW NL123456789B01\nInnergemeinschaftliche Lieferung\n")
+    check(intra["special"] == "Innergemeinschaftlich" and intra.get("foreign") == "NL", f"v1.14: intra-EU {intra}")
+    # FX: implied rate from booking and invoice amount
+    class Item:  # the transaction side only needs amount and currency
+        amount, currency = Decimal("-92.15"), "EUR"
+    doc = Invoice("k", Path("x.pdf"), day(2026, 11, 3), "Shop", Decimal("100.00"), "USD", "1", False)
+    check(exchange_rate(Item, doc) == Decimal("0.9215"), f"v1.14: exchange rate {exchange_rate(Item, doc)}")
+    print("PASS: v1.14 tax remarks (reverse charge, EU/foreign VAT ID, missing tax/tax id, small invoice), exchange rate")
+
+
 if __name__ == "__main__":
     run()
     run_v113()
     run_v1131()
+    run_v114()

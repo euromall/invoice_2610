@@ -82,6 +82,47 @@ def read_structured(path):
     return {}
 
 
+# v1.14: tax checks before the ZIP goes out (§ 14 UStG items, reverse charge, foreign sellers)
+REVERSE_CHARGE = (r"(?i)reverse[- ]charge|steuerschuldnerschaft des leistungsempfängers|§\s*13b\s*UStG|"
+                  r"art(?:icle|\.)?\s*196|autoliquidation|inversione contabile|omvendt betalingspligt|"
+                  r"verlegd(?:e)? btw|inversión del sujeto pasivo|odwrotne obciążenie")
+INTRA_EU = r"(?i)innergemeinschaftliche[rn]? (?:lieferung|leistung|erwerb)|intra-community (?:supply|acquisition)|§\s*4\s*Nr\.?\s*1\s*b"
+VAT_COUNTRIES = "AT|BE|BG|CY|CZ|DE|DK|EE|EL|ES|FI|FR|HR|HU|IE|IT|LT|LU|LV|MT|NL|PL|PT|RO|SE|SI|SK|XI|GB|CH|NO"
+VAT_LABEL = r"(?:USt[ .-]*Id[ .-]*Nr\.?|USt[ .-]*IdNr|UID(?:-Nr\.?)?|VAT(?: Reg(?:istration)?\.?)?(?: No\.?| Number| ID| Nr\.?)?|TVA|P\.?\s?IVA|IVA|BTW|NIF|N° TVA|MwSt[ .-]*Nr\.?)"
+
+
+def vat_ids(text):
+    """VAT IDs printed in the document (‘DE123456789’, ‘FR 12 345678901’), labelled ones and bare German ones."""
+    found = []
+    for match in re.finditer(rf"(?i){VAT_LABEL}[^\n]{{0,25}}?\b({VAT_COUNTRIES})[ ]?((?:[0-9A-Z][ ]?){{8,12}})\b", text):
+        found.append(match[1].upper() + re.sub(r"\s", "", match[2]).upper())
+    found.extend(re.findall(r"\b(DE\d{9})\b", text))
+    return list(dict.fromkeys(vat for vat in found if re.search(r"\d{6}", vat)))
+
+
+def tax_notes(meta, amount, currency, credit=False):
+    """[(Korean, German)] tax remarks for one invoice. Facts only; the advisor decides."""
+    meta = meta or {}
+    notes = []
+    special = meta.get("special")
+    if special == "Reverse Charge":
+        notes.append(("역과세(Reverse Charge) 표시 · 세액은 우리 쪽에서 신고",
+                      "Reverse Charge – Steuerschuld des Leistungsempfängers (§ 13b UStG) prüfen"))
+    elif special == "Innergemeinschaftlich":
+        notes.append(("EU 역내 거래(세금 면제) 표시", "Innergemeinschaftlicher Erwerb – Erwerbsbesteuerung prüfen"))
+    if meta.get("foreign"):
+        notes.append((f"해외 판매자 세금번호({meta['foreign']})",
+                      f"Ausländischer Lieferant (USt-IdNr. {meta['foreign']}) – umsatzsteuerliche Behandlung prüfen"))
+    if currency and currency != "EUR":
+        notes.append((f"외화 인보이스({currency})", f"Fremdwährung {currency}"))
+    small = currency == "EUR" and amount is not None and 0 < amount <= 250
+    if not special and not meta.get("tax") and not credit:
+        notes.append(("세액(MwSt) 표시 못 찾음 · 매입세액 공제 확인", "Keine Umsatzsteuer erkannt – Vorsteuerabzug prüfen"))
+    if not small and not meta.get("tax_id") and not meta.get("vat_ids"):
+        notes.append(("판매자 세금번호(Steuernummer/USt-IdNr.) 못 찾음", "Steuernummer/USt-IdNr. des Lieferanten nicht erkannt"))
+    return notes
+
+
 def pdf_tax_fields(text):
     fields = {}
     patterns = {
@@ -102,7 +143,15 @@ def pdf_tax_fields(text):
     ))
     if len(orders) == 1:
         fields["order"] = orders.pop()
-    fields["special"] = "Reverse Charge" if re.search(r"reverse charge|steuerschuldnerschaft des leistungsempfängers", text, re.I) else ""
+    fields["special"] = "Reverse Charge" if re.search(REVERSE_CHARGE, text) else ""
+    if not fields["special"] and re.search(INTRA_EU, text):
+        fields["special"] = "Innergemeinschaftlich"
+    ids = vat_ids(text)
+    if ids:
+        fields["vat_ids"] = ids
+        foreign = sorted({vat[:2] for vat in ids if not vat.startswith("DE")})
+        if foreign:
+            fields["foreign"] = ", ".join(foreign)
     # Amazon marketplace invoice: paid to Amazon, issued by the seller (‘Verkauft von …’ / Amazon order number).
     if re.search(r"(?i)\bamazon\b", text) and (re.search(r"(?i)verkauft von|sold by|\b\d{3}-\d{7}-\d{7}\b", text)):
         fields["amazon"] = True

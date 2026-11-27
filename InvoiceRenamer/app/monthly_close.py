@@ -25,7 +25,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import quote, urlencode
 
 from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MoneyEntry, pick_value, import_mode, make_copyable, open_file, source_preview, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, flush_text_cache, known_digest, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
-from tax_documents import pdf_tax_fields, read_structured
+from tax_documents import pdf_tax_fields, read_structured, tax_notes
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
 from ui_theme import (COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, Busy, InlineDialog, ask_yes_no, configure_tags, resort, show_notice,
@@ -1475,7 +1475,7 @@ class MonthlyClose:
                 ("번호 명세서", self.open_numbered_statements, None)],
             3: [("인보이스 폴더", self.select_folder, None), ("일괄 매칭", self.batch_candidates, None),
                 ("완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
-            4: [("최종 검수", self.final_review, "Primary.TButton"), ("인쇄 묶음", self.open_print_bundle, None), ("누락 점검표", self.monthly_review, None), ("미연결 인보이스", self.show_unlinked_invoices, None),
+            4: [("최종 검수", self.final_review, "Primary.TButton"), ("인쇄 묶음", self.open_print_bundle, None), ("누락 점검표", self.monthly_review, None), ("세무 점검", self.tax_overview, None), ("미연결 인보이스", self.show_unlinked_invoices, None),
                 ("후속 할 일", self.followup_list, None), ("기간 점검", self.show_statement_periods, None),
                 ("전체 검색", self.search_all_months, None)],
             5: [("세무사 ZIP", self.export_zip, "Primary.TButton"),
@@ -3658,8 +3658,12 @@ class MonthlyClose:
             link_counts = Counter(link for other in self.state["records"].values() for link in other.get("links", []))
         if any(link_counts[doc.key] > 1 for doc in documents) and not record.get("allocations"):
             warnings.append("같은 인보이스가 다른 거래에도 연결")
-        if any(doc.currency and doc.currency != item.currency for doc in documents):
-            warnings.append("통화 다름")
+        for doc in documents:
+            if doc.currency and doc.currency != item.currency:
+                rate = exchange_rate(item, doc)
+                warnings.append(f"통화 다름 · {doc.amount} {doc.currency} ↔ {abs(item.amount)} {item.currency}"
+                                + (f" (환율 {rate:.4f})" if rate else ""))
+
         totals = [signed_total(doc) for doc in documents if doc.amount is not None and doc.currency == item.currency]
         if len(totals) == len(documents) and documents and not record.get("allocations") and not record.get("difference_reason"):
             gap = abs(sum(totals)) - abs(item.amount)
@@ -3678,6 +3682,57 @@ class MonthlyClose:
             if doc.day and abs((doc.day - item.day).days) > 7:
                 warnings.append(f"날짜 {abs((doc.day - item.day).days)}일 차이")
         return warnings
+
+    def tax_hints(self, key):
+        """v1.14: tax remarks (Korean) for the invoices linked to one transaction; information, not an error."""
+        hints = []
+        for link in self.record(key).get("links", []):
+            doc = self.by_key.get(link)
+            if doc:
+                hints += [korean for korean, _ in tax_notes(doc.tax_fields, doc.amount, doc.currency, doc.credit)
+                          if not korean.startswith("외화")]
+        return list(dict.fromkeys(hints))
+
+    def tax_overview(self):
+        """Step 4 ‘세무 점검’: every linked invoice of the chosen month with what the program noticed (§ 14 UStG items,
+        reverse charge, EU/foreign sellers, foreign currency). Double-click opens the invoice."""
+        month = self.month_filter.get()
+        rows = []
+        for key, item in self.transactions.items():
+            record = self.record(key)
+            if month not in ("전체", record.get("period")):
+                continue
+            for link in record.get("links", []):
+                doc = self.by_key.get(link)
+                if not doc:
+                    continue
+                notes = tax_notes(doc.tax_fields, doc.amount, doc.currency, doc.credit)
+                rate = exchange_rate(item, doc)
+                if rate:
+                    notes = [(f"{korean} · 환율 {rate}" if korean.startswith("외화") else korean, german) for korean, german in notes]
+                if notes:
+                    rows.append((record.get("number", ""), doc, " · ".join(korean for korean, _ in notes)))
+        dialog = InlineDialog(self.root)
+        dialog.title("세무 점검 · Steuerliche Hinweise")
+        dialog.center(1180, 720)
+        ttk.Label(dialog, text=(f"{month if month != '전체' else '모든 달'} · 확인해 볼 인보이스 {len(rows)}개. 프로그램이 글자에서 찾은 것만 보여 줘요. "
+                                "판단은 세무사 몫이고, 같은 내용이 세무사 ZIP의 Prüfhinweise 칸에 독일어로 들어가요."),
+                  wraplength=1120, padding=(14, 10, 14, 6)).pack(anchor="w")
+        footer = ttk.Frame(dialog, padding=(14, 6, 14, 12))
+        footer.pack(side="bottom", fill="x")
+        table = self.table(dialog, ("번호", "인보이스", "업체", "총액", "참고"), (80, 260, 170, 100, 520))
+        for index, (number, doc, text) in enumerate(rows):
+            amount = f"{doc.amount} {doc.currency}" if doc.amount is not None else ""
+            table.insert("", "end", iid=str(index), values=(number, doc.path.name, doc.seller, amount, text))
+
+        def open_selected(_event=None):
+            selection = table.selection()
+            if selection:
+                open_file(rows[int(selection[0])][1].path)
+
+        table.bind("<Double-1>", open_selected)
+        ttk.Button(footer, text="인보이스 열기", command=open_selected).pack(side="left")
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right")
 
     def final_review(self):
         """Go through the month's transactions one by one: statement text and invoice side by side, mark as checked."""
@@ -3782,7 +3837,9 @@ class MonthlyClose:
             current["key"] = key
             title.set(f"{record.get('number', '')} · {item.day} · {item.amount} {item.currency} · {split_merchant(item.merchant)[1]}")
             found = self.final_checks(key)
-            warning.set(("주의: " + " · ".join(found)) if found else "")
+            hints = self.tax_hints(key)
+            warning.set(("주의: " + " · ".join(found) if found else "") + ("\n" if found and hints else "")
+                        + ("세무 참고: " + " · ".join(hints) if hints else ""))
             source, page, _, lines = self.statement_lines_for(item)
             statement.configure(state="normal")
             statement.delete("1.0", "end")
@@ -5938,7 +5995,8 @@ class MonthlyClose:
                 details_writer.writerow(["Belegnummer", "Datei im ZIP", "Quelldatei", "SHA-256", "Rechnungsdatum",
                                          "Leistungsdatum", "Lieferant", "Empfänger", "Rechnungsnummer", "Netto",
                                          "USt", "Steuersätze (Netto / USt)", "Brutto", "Währung", "Steuernummer/USt-IdNr.",
-                                         "Referenz", "Prüfhinweise", "Belegnotiz für Steuerberatung"])
+                                         "Referenz", "Prüfhinweise", "Belegnotiz für Steuerberatung",
+                                         "Fremdwährung: Buchungsbetrag / Kurs"])
                 changes, hospitality, allocation = (io.StringIO(newline="") for _ in range(3))
                 change_writer, hospitality_writer, allocation_writer = (
                     csv.writer(stream, delimiter=";") for stream in (changes, hospitality, allocation)
@@ -6033,6 +6091,8 @@ class MonthlyClose:
                             meta.get("rates", ""), doc.amount if doc.amount is not None else "", doc.currency,
                             meta.get("tax_id", ""), meta.get("reference", ""), tax_review(doc),
                             delivery_text(self.state.get("document_notes", {}).get(doc.key, "")),
+                            (f"{abs(item.amount):.2f} {item.currency} / {exchange_rate(item, doc)}".replace(".", ",")
+                             if exchange_rate(item, doc) else ""),
                         )
                         details_writer.writerow([export_value(field) if isinstance(field, str) else field for field in fields])
                         value = record.get("allocations", {}).get(link)
@@ -6139,9 +6199,18 @@ def package_filename(transaction_id, doc):
     return f"[{transaction_id}]_{label[:170]}{doc.path.suffix.lower()}"
 
 
+def exchange_rate(item, doc):
+    """Implied rate booking currency per invoice currency (e.g. 0.9215 EUR per USD), None when not computable."""
+    if not doc.amount or item.amount is None or not doc.currency or doc.currency == item.currency:
+        return None
+    return (abs(item.amount) / abs(doc.amount)).quantize(Decimal("0.0001"))
+
+
 def tax_review(doc):
     meta = doc.tax_fields or {}
     notes = [meta["special"]] if meta.get("special") else []
+    notes += [german for korean, german in tax_notes(meta, doc.amount, doc.currency, doc.credit)
+              if korean.startswith(("해외", "EU 역내"))]
     if doc.credit:
         notes.append("Korrektur/Referenz prüfen")
     small_candidate = doc.currency == "EUR" and doc.amount is not None and 0 < doc.amount <= 250 and not notes
