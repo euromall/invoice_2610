@@ -109,9 +109,11 @@ def read_csv(path, legacy=False):
 
 def read_statement_pdf(path):
     groups = []
+    commerzbank = "commerzbank" in Path(path).name.casefold()
     with pymupdf.open(path) as document:
         if len(document):
             first = document[0].get_text(sort=True)
+            commerzbank = commerzbank or "Commerzbank" in first
             if "americanexpress.de" in first.lower() and "Abrechnungszeitraum" in first:
                 return read_amex_statement(document, first)
             if "Deutsche Kreditbank AG" in first and "Ihre Abrechnung vom" in first:
@@ -129,6 +131,9 @@ def read_statement_pdf(path):
                 ):
                     groups.append(rows)
     if not groups:
+        if commerzbank:  # v1.14: no sample statement to build a reader yet
+            raise ValueError("Commerzbank PDF 명세서는 아직 읽지 못해요. Commerzbank 온라인 뱅킹 → Umsätze → "
+                             "‘Export’에서 CSV로 내려받아 불러오세요. PDF 원본은 세무사용으로 함께 두면 돼요.")
         raise ValueError("PDF 거래 표를 찾지 못했어요. 은행 또는 카드사 CSV를 사용하세요.")
     header = groups[0][0]
     result = []

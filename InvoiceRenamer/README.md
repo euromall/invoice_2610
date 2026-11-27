@@ -2,6 +2,31 @@
 
 독일 세무 월마감용 프로그램입니다. 은행·카드 명세서 거래에 인보이스를 연결하고, 세무사에게 전달할 독일어 ZIP과 Excel 대조표를 만듭니다.
 
+## v1.14.0 변경 사항 (2026-11-27)
+
+새 기능 버전. 모두 Linux(Xvfb)에서 합성 자료로만 확인했고 Windows 실기·실제 메일 서버·실제 은행 자료로는 확인하지 않았어요.
+
+| 구분 | 내용 |
+|---|---|
+| 세무 참고 (제안 1·2) | `tax_documents.tax_notes`: 세액(MwSt)·판매자 세금번호 없음(250€ 이하 소액 예외), Reverse Charge(§ 13b), EU 역내 거래, 해외 판매자 USt-IdNr(`vat_ids`, IBAN 제외). 오류가 아닌 참고. 4단계 ‘세무 점검’, 최종 검수 ‘세무 참고’, `02_Belegdetails.csv` Prüfhinweise. |
+| 환율 (제안 3) | `exchange_rate(item, doc)`: 외화 인보이스와 EUR 결제의 실제 환율. 통화 경고 문구와 `02_Belegdetails.csv` ‘Fremdwährung: Buchungsbetrag / Kurs’. |
+| 매달 거래처 빠짐 (제안 5) | `recurring_gaps`: 앞 3달 연속 나온 거래처가 이번 달 없으면 누락 점검표 6번째 종류. |
+| 사라진 파일 (제안 13) | `missing_links`·`find_missing_files`: 연결된 인보이스가 작업 폴더에서 사라지면 오늘 할 일·마감 전 점검에 표시, 다른 폴더에서 내용(해시)으로 찾아 작업 폴더로 복사. |
+| 새 버전 백업 (제안 14) | `Shell.backup_on_new_version`: 새 버전 첫 실행 때 작업 기록 자동 백업(`last_version`). |
+| 마감 전 점검 (제안 18) | 5단계 ‘마감 전 점검’: 꼭 처리할 것(인보이스 없음·세무사 확인·번역 대기·기간 공백·자동 점검·사라진 파일)과 참고 항목, 항목마다 ‘가기’. |
+| 전달 요약 PDF (제안 16) | ZIP에 `00_Begleitschreiben.pdf`(독일어 1쪽: 마감월·건수·미해결 거래·Reverse Charge 등 특이사항·열린 문의). `cover_letter_pdf`, 기본 넣기. |
+| 알림 메일 (제안 16) | 전달 이력 → ‘알림 메일’: 독일어 문안 3종(업로드·추가 제출·회신 요청, `advisor_notice`), 복사·메일 프로그램(mailto)·바로 보내기(SMTP). 세무사 주소·이름·회사명은 설정 `advisor_profile`. |
+| 세무사 문의 (제안 11) | 5단계 ‘세무사 문의’: `state["inquiries"]`(마감월·거래번호·문의·답변·상태). ‘답변 필요’는 마감 전 점검·전달 요약에, ZIP `12_Rueckfragen.csv`. |
+| 인쇄 | 4단계 ‘인쇄’(전 ‘인쇄 묶음’): 내용(묶음·번호 명세서만·인보이스만), 범위(마감월·계좌·번호·상태), 번호 찍기·안내 쪽·양면용 빈 쪽, 마지막 선택 기억(`print_options`). `print_bundle(content, stamp, duplex)`, `print_keys`. |
+| 폴더 이름·위치 | 환경설정 → 폴더: 매칭완료·명세서·제외 폴더의 이름과 위치(`program_folders`). 예전 기본 이름도 계속 인식. 저장할 때 기존 파일 옮기기를 물음(`relocation_plan`·`relocate_files`, 덮어쓰지 않음, 빈 폴더만 지움, 제외 기록 경로 갱신, 명세서 경로 갱신 `paths_moved`). 다른 드라이브는 복사·확인·삭제(`move_across`). 3단계·백업은 다른 위치의 매칭완료 폴더도 읽음. |
+| 비용 집계 (제안 17) | 4단계 더보기 → ‘비용 집계 (엑셀)’: 불러온 모든 달의 업체별·월별·업체×월·거래 시트(`cost_rows`·`cost_workbook`). 업체 = 연결된 인보이스의 판매자, 없으면 명세서 거래처. 내부이체 제외, 현금 지출 포함. 4단계 버튼 줄이 넘쳐 기간 점검·전체 검색도 더보기로 옮김. |
+| 휴대폰 사진 (제안 15) | 1단계 더보기 → ‘휴대폰 사진 가져오기’: 정한 폴더(예: Dropbox 카메라 업로드)의 새 사진·PDF를 골라 복사. 가져온 것·숨긴 것은 다시 안 보임(`photo-imports.json`). |
+| 현금 지출 (제안 19) | 3단계 ‘현금 지출’: `state["cash"]`(K2611-001 번호·날짜·금액·거래처·내용·영수증). 영수증으로 쓴 인보이스는 ‘거래 없는 인보이스’에서 빠짐. ZIP `13_Kasse.csv`·`Kasse/`, Excel ‘Kasse’ 시트. |
+| 매출 인보이스 (제안 20) | 환경설정 → 폴더 → 매출 인보이스 폴더: 그 폴더 인보이스는 `sales` 표시, 들어온 돈(음수)과 금액이 맞으면 후보·대조 완료. 독일어 상태 ‘Abgeglichen (Ausgangsrechnung)’. |
+| 메일 연결 | 환경설정 → 메일 → 메일 계정 설정(Gmail·한메일·GMX·WEB.DE·직접): IMAP 첨부 가져오기(1단계 더보기, BODY.PEEK로 읽음 표시 안 함, 메일 삭제·이동 없음, 한 번 본 첨부는 `mail-imports.json`으로 다시 안 보임), SMTP 바로 보내기(보내기 전 확인, 보낸 뒤 ‘전달함’). 앱 비밀번호는 `keyring`(Windows 자격 증명 관리자)에만 저장. 새 의존성 `keyring==25.5.0`. |
+| 회사 프로필 (제안 21) | 환경설정 → 일반 → 회사: `profiles.py`. 기본 회사는 기존 위치 그대로, 다른 회사는 `%LOCALAPPDATA%\InvoiceRenamer\profiles\<id>`를 LOCALAPPDATA로 씀(작업 폴더·기록·설정 따로). 배운 양식·읽은 PDF 글자·OCR 데이터는 공용(`INVOICE_RENAMER_BASE`). 바꾸면 프로그램을 닫았다가 다시 엶. |
+| Commerzbank (제안 7) | 샘플이 없어 PDF 판독기는 만들지 않음. Commerzbank PDF면 CSV 내보내기 안내. |
+
 ## v1.13.2 변경 사항 (2026-11-27)
 
 | 구분 | 내용 |
