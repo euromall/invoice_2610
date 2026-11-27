@@ -1662,7 +1662,7 @@ def undo_moves(history, progress=None):
     return restored, failed
 
 
-CONFLICTED_COPY = r"(?i)conflicted copy|Konfliktkopie|in Konflikt stehende Kopie|충돌 사본|-[A-Z0-9-]*-PC\b(?=\.\w+$)"
+CONFLICTED_COPY = r"(?i)conflicted copy|Konfliktkopie|in Konflikt stehende Kopie|충돌 사본"
 VIEWS = ("전체", "필수 누락", "확인 필요", "인보이스 아님", "변경 가능", "보류", "정리 완료", "매칭 완료")
 MATCHED_PATTERN = r"매칭완료_\d{2}(?:0[1-9]|1[0-2])"  # same as monthly_close.MATCHED_FOLDER
 # v1.13: files set aside go to 제외/<reason>; nothing is deleted. Matched files stay in 매칭완료_YYMM (not here).
