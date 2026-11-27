@@ -113,6 +113,8 @@ class Shell:
                 self.close.folder = self.app.folder  # statements are filed into the work folder; PDFs are read in step 3
             self.app.on_work_folder = self.work_folder_changed
             self.app.on_manage_reasons = self.close.manage_reasons
+            self.app.on_manage_mail = self.close.manage_mailboxes
+            self.app.on_account_order = self.close.edit_account_order
         except RuntimeError:
             self.close = None
         self.build_sidebar()

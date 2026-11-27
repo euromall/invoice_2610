@@ -21,7 +21,7 @@ from xml.etree.ElementTree import ParseError
 
 import pymupdf
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, import_mode, make_copyable, open_file, source_preview, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
 from tax_documents import pdf_tax_fields, read_structured
@@ -263,8 +263,10 @@ def statement_lines(page):
     return result
 
 
-def numbered_statement(path, entries):
+def numbered_statement(path, entries, placed=None):
     """Return (pdf bytes, marked count) for a copy of a PDF statement with transaction numbers.
+
+    placed: optional dict that receives {number: page index} for every marked number.
 
     entries: [(number, Transaction)]. A line is marked when it starts with the transaction's
     day.month and contains its amount. The number goes right of the amount (the end of the line),
@@ -288,19 +290,21 @@ def numbered_statement(path, entries):
                     label = f"[{number}]"
                     size = 9
                     width = pymupdf.get_text_length(label, fontname="hebo", fontsize=size)
+                    beside = True
                     if page.rect.x1 - rect.x1 >= width + 6:  # right after the amount
                         x = rect.x1 + 4
                     elif rect.x0 - page.rect.x0 >= width + 6:
                         x = rect.x0 - width - 3
                     else:
+                        beside = False
                         x = max(page.rect.x0 + 2, rect.x0)
                         page.draw_rect(pymupdf.Rect(x - 1, rect.y0 - size - 1, x + width + 1, rect.y0), color=None,
                                        fill=(1, 1, 1), overlay=True)
                         page.insert_text((x, rect.y0 - 1.5), label, fontsize=size, fontname="hebo", color=red)
-                        marked += 1
-                        del remaining[position]
-                        break
-                    page.insert_text((x, rect.y1 - 1.5), label, fontsize=size, fontname="hebo", color=red)
+                    if beside:
+                        page.insert_text((x, rect.y1 - 1.5), label, fontsize=size, fontname="hebo", color=red)
+                    if placed is not None:
+                        placed[number] = page.number
                     marked += 1
                     del remaining[position]
                     break
@@ -311,6 +315,46 @@ def numbered_statement(path, entries):
                                    fontname="helv", color=red)
         data = document.tobytes(garbage=3, deflate=True)
     return data, marked
+
+
+def stamp_page(page, label, size=10):
+    """Write label in a white box at the bottom centre of the page as the reader sees it (also on rotated pages)."""
+    width = pymupdf.get_text_length(label, fontname="hebo", fontsize=size)
+    visible = page.rect  # already the size as shown, rotation applied
+    box = pymupdf.Rect(visible.x0 + (visible.width - width) / 2 - 4, visible.y1 - size - 10,
+                       visible.x0 + (visible.width + width) / 2 + 4, visible.y1 - 4)
+    box = box * page.derotation_matrix
+    box.normalize()
+    page.draw_rect(box, color=(0.78, 0.19, 0.19), fill=(1, 1, 1), width=0.6, overlay=True)
+    point = pymupdf.Point(visible.x0 + (visible.width - width) / 2, visible.y1 - 8) * page.derotation_matrix
+    page.insert_text(point, label, fontsize=size, fontname="hebo", color=(0.78, 0.19, 0.19), rotate=page.rotation)
+
+
+def numbered_evidence(path, numbers):
+    """A copy of an evidence file (PDF or photo) as a PDF document with ‘608-004’ (or ‘608-012 / 608-013’)
+    stamped at the bottom centre of every page. The caller closes the document. The original is not changed."""
+    document = open_evidence(path)
+    if not document.is_pdf:
+        converted = pymupdf.open("pdf", document.convert_to_pdf())
+        document.close()
+        document = converted
+    label = " / ".join(numbers)
+    for page in document:
+        stamp_page(page, label)
+    return document
+
+
+def info_page(target, lines, title="Hinweis"):
+    """Append an A4 page with a few lines of (German) text to a PDF document."""
+    page = target.new_page(width=595, height=842)
+    page.insert_text((56, 90), title, fontsize=16, fontname="hebo", color=(0.14, 0.22, 0.30))
+    y = 124
+    for line in lines:
+        for part in [line[i:i + 95] for i in range(0, max(len(line), 1), 95)]:
+            page.insert_text((56, y), part, fontsize=11, fontname="helv")
+            y += 17
+        y += 4
+    return page
 
 
 def statement_check(path, transactions):
@@ -550,6 +594,9 @@ def matching_reference(description, invoice):
     return ""
 
 
+CANDIDATE_DAYS = 45  # step 3 lists same-amount evidence within this many days of the payment first
+
+
 def candidates(transaction, invoices, aliases):
     merchant = merchant_key(transaction.merchant)
     known = aliases.get(merchant, [])
@@ -570,6 +617,49 @@ def gmail_url(merchant, day):
     term = f"from:{safe}" if re.fullmatch(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", safe) else f'"{safe}"'
     search = f'has:attachment filename:pdf after:{day - timedelta(days=14)} before:{day + timedelta(days=15)} {term}'
     return f"https://mail.google.com/mail/u/0/#search/{quote(search, safe='')}"
+
+
+MAILBOX_KINDS = {"gmail": "Gmail", "daum": "한메일"}
+
+
+def mailboxes(settings=None):
+    """Registered mailboxes from settings.json → ‘mailboxes’: [{"kind": "gmail"|"daum", "label", "index"}]."""
+    if settings is None:
+        try:
+            from invoice_renamer import load_settings
+            settings = load_settings()
+        except Exception:
+            settings = {}
+    boxes = [box for box in settings.get("mailboxes") or [] if isinstance(box, dict) and box.get("kind") in MAILBOX_KINDS]
+    return boxes or [{"kind": "gmail", "label": "Gmail", "index": 0}]
+
+
+def mail_search_url(box, amount=None, merchant="", day=None, before=14, after=15, attachment=False):
+    """Web search URL of a mailbox. amount (Decimal) is searched the German way (30,27) and also as 30.27 in Gmail;
+    merchant is added when given. Daum searches one term, so it uses the amount when there is one."""
+    comma = format(abs(amount), ".2f").replace(".", ",") if amount is not None else ""
+    start = day - timedelta(days=before) if day else None
+    end = day + timedelta(days=after) if day else None
+    safe = merchant.replace('"', " ").replace("\n", " ").replace("\r", " ").strip()
+    if box.get("kind") == "daum":
+        term = comma or safe
+        if start and end:
+            fields = {"after": start.strftime("%Y%m%d"), "before": end.strftime("%Y%m%d")}
+            fields.update({name: term for name in ("body", "cc", "file", "from", "subject", "to")})
+            fields["folderId"] = "ALL"
+            return "https://mail.daum.net/top/SEARCH?" + urlencode(dict(sorted(fields.items())))
+        return "https://mail.daum.net/top/SEARCH?" + urlencode({"query": term})
+    parts = []
+    if comma:
+        parts.append(f'("{comma}" OR "{comma.replace(",", ".")}")')
+    if safe:
+        parts.append(f"from:{safe}" if re.fullmatch(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", safe) else f'"{safe}"')
+    if attachment:
+        parts.append("has:attachment")
+    if start and end:
+        parts.append(f"after:{start:%Y/%m/%d} before:{end:%Y/%m/%d}")
+    index = int(box.get("index", 0) or 0)
+    return f"https://mail.google.com/mail/u/{index}/#search/{quote(' '.join(parts), safe='')}"
 
 
 def export_value(value):
@@ -603,6 +693,7 @@ PACKAGE_PARTS = [
     ("01_Abgleich.csv", "01_Abgleich.csv", "거래별 대조 결과: 거래번호·날짜·금액·상태·세무사 전달 메모.", True),
     ("Kontoauszuege", "Kontoauszuege/ (명세서 원본)", "은행·카드 명세서 원본 파일.", False),
     ("nummeriert", "Kontoauszuege/…_nummeriert.pdf", "PDF 명세서에 거래번호를 찍은 사본 (원본은 그대로).", False),
+    ("Druckmappe.pdf", "Druckmappe.pdf", "인쇄용 PDF 한 개: 명세서 쪽마다 그 쪽 번호의 인보이스(번호 찍힌 사본)를 이어 붙였어요. 원본은 Belege/에 그대로.", False),
     ("Anlagen", "Anlagen/ (보조 자료)", "메모·기록에서 거래에 붙인 보조 자료 (확인 메일 등).", False),
     ("02_Belegdetails.csv", "02_Belegdetails.csv", "증빙별 상세: 발행일·업체·인보이스 번호·순액·세액.", False),
     ("03_Offene_Posten.csv", "03_Offene_Posten.csv", "미해결 거래: 증빙 없음·확인 필요인 거래만 모은 표.", False),
@@ -1225,7 +1316,7 @@ class MonthlyClose:
                 ("번호 명세서", self.open_numbered_statements, None)],
             3: [("증빙 폴더", self.select_folder, None), ("일괄 매칭", self.batch_candidates, None),
                 ("완료 폴더로 이동", self.archive_matched, "Primary.TButton")],
-            4: [("최종 검수", self.final_review, "Primary.TButton"), ("누락 점검표", self.monthly_review, None), ("미연결 증빙", self.show_unlinked_invoices, None),
+            4: [("최종 검수", self.final_review, "Primary.TButton"), ("인쇄 묶음", self.open_print_bundle, None), ("누락 점검표", self.monthly_review, None), ("미연결 증빙", self.show_unlinked_invoices, None),
                 ("후속 할 일", self.followup_list, None), ("기간 점검", self.show_statement_periods, None),
                 ("전체 검색", self.search_all_months, None)],
             5: [("세무사 ZIP", self.export_zip, "Primary.TButton"),
@@ -1305,7 +1396,7 @@ class MonthlyClose:
             ("카드대금·내부이체 후보", self.transfer_candidates), ("결제·환불 연결", self.link_refunds),
         ]).pack(side="left", padx=(0, 6))
         for label, command in (("메모·기록", self.edit_note), ("인보이스 요청 초안", self.draft_invoice_request),
-                               ("Gmail 검색", self.search_gmail)):
+                               ("메일 검색", self.search_gmail)):
             ttk.Button(self.left_footer, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 4))
         self.cards = self.table(upper, ("번호", "거래일", "가맹점·거래처", "금액", "증빙 상태", "메모", "구분"),
                                 (72, 92, 220, 100, 120, 160, 120))
@@ -1313,6 +1404,7 @@ class MonthlyClose:
         self.cards.master.pack_configure(padx=1, pady=(0, 1))
         configure_tags(self.cards)
         self.cards.bind("<<TreeviewSelect>>", lambda event: self.show_invoices())
+        self.cards.bind("<Return>", lambda event: self.link_best() if self.best_doc is not None else None)
         self.detail_strip = tk.Frame(upper, background="#f6f8fa", padx=10, pady=6)
         detail_buttons = tk.Frame(self.detail_strip, background="#f6f8fa")
         detail_buttons.pack(side="right", fill="y", padx=(8, 0))
@@ -1339,6 +1431,10 @@ class MonthlyClose:
         self.all_pdfs = tk.BooleanVar()
         ttk.Checkbutton(self.pdfs_header, text="전체 증빙에서 고르기", variable=self.all_pdfs, command=self.show_invoices,
                         style="Panel.TCheckbutton").pack(side="right", padx=(0, 10))
+        self.show_far = tk.BooleanVar()
+        self.far_text = tk.StringVar(value="다른 달 후보")
+        self.far_check = ttk.Checkbutton(self.pdfs_header, textvariable=self.far_text, variable=self.show_far,
+                                         command=self.show_invoices, style="Panel.TCheckbutton")
         self.best_card = tk.Frame(lower, background="#f3fbf6", highlightthickness=0)
         stripe = tk.Frame(self.best_card, background=COLORS["green"], width=4)
         stripe.pack(side="left", fill="y")
@@ -1353,6 +1449,17 @@ class MonthlyClose:
         tk.Label(best_body, textvariable=self.best_reason, font=FONT_SMALL, background="#f3fbf6",
                  foreground=COLORS["green"], anchor="w").pack(fill="x", pady=(2, 0))
         ttk.Button(self.best_card, text="연결", style="Success.TButton", command=self.link_best).pack(side="right", padx=12)
+        self.none_card = tk.Frame(lower, background="#fff8eb", highlightthickness=0)
+        tk.Frame(self.none_card, background=COLORS["amber"], width=4).pack(side="left", fill="y")
+        none_body = tk.Frame(self.none_card, background="#fff8eb", padx=12, pady=8)
+        none_body.pack(side="left", fill="both", expand=True)
+        tk.Label(none_body, text="금액이 같은 증빙이 없어요. 이렇게 찾아보세요:", font=FONT_BOLD, background="#fff8eb",
+                 anchor="w").pack(fill="x")
+        none_buttons = tk.Frame(none_body, background="#fff8eb")
+        none_buttons.pack(fill="x", pady=(6, 0))
+        for label, command in (("메일 검색", self.search_gmail), ("+ 증빙 파일 추가", self.add_evidence_for),
+                               ("전체 증빙에서 고르기", lambda: (self.all_pdfs.set(True), self.show_invoices()))):
+            ttk.Button(none_buttons, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 6))
         self.best_doc = None
         self.pdfs = self.table(lower, ("증빙", "발행일", "총액", "번호", "추천·상태"), (210, 90, 90, 95, 150))
         self.pdfs.master.pack_configure(padx=1, pady=(0, 1))
@@ -3086,6 +3193,7 @@ class MonthlyClose:
         """Best-candidate card on the right and the file-name preview at the bottom (step 3)."""
         self.best_doc = None
         self.best_card.pack_forget()
+        self.none_card.pack_forget()
         if len(selected) != 1:
             self.pdfs_caption.set("거래 한 건을 고르세요" if not selected else f"거래 {len(selected)}건 선택")
             self.next_text.set("거래를 고르면 매칭완료 후 파일 이름을 미리 보여 줘요.")
@@ -3109,6 +3217,9 @@ class MonthlyClose:
             self.next_text.set("연결하고 매칭완료 폴더로 옮기면 이 이름이 돼요")
         else:
             self.next_text.set("금액이 같은 증빙이 없어요 · ‘전체 증빙에서 고르기’나 ‘증빙 없이 처리’를 쓰세요")
+            if not self.all_pdfs.get() and not self.record(key).get("statement_evidence") and not self.record(key).get("transfer") \
+                    and not self.record(key).get("refund_group"):
+                self.none_card.pack(fill="x", before=self.pdfs.master)
         self.next_name.set(package_filename(number, doc) if doc else "")
 
     def link_best(self):
@@ -3124,13 +3235,25 @@ class MonthlyClose:
         self.pdfs.delete(*self.pdfs.get_children())
         selected = self.cards.selection()
         linked = set().union(*(self.linked(key) for key in selected))
-        exact = []
+        exact, far = [], []
         seen = set(linked)
         for key in selected:
-            for invoice in candidates(self.transactions[key], self.invoices, self.state["aliases"]):
+            item = self.transactions[key]
+            for invoice in candidates(item, self.invoices, self.state["aliases"]):
                 if invoice.key not in seen:
-                    exact.append(invoice)
+                    near = not invoice.day or abs((invoice.day - item.day).days) <= CANDIDATE_DAYS
+                    (exact if near else far).append(invoice)
                     seen.add(invoice.key)
+        if far:
+            self.far_text.set(f"다른 달 후보 {len(far)}개도 보기")
+            if not self.far_check.winfo_ismapped():
+                self.far_check.pack(side="right", padx=(0, 10))
+        elif self.far_check.winfo_ismapped():
+            self.far_check.pack_forget()
+        if far and (self.show_far.get() or not exact):  # nothing near: show the far ones instead of an empty list
+            exact = exact + far
+        else:
+            seen -= {invoice.key for invoice in far}
         shown = [self.by_key[key] for key in sorted(linked) if key in self.by_key] + exact
         if self.all_pdfs.get():
             used_paths = {doc.path for doc in shown}
@@ -3181,8 +3304,9 @@ class MonthlyClose:
         return source, page, rect, lines
 
     def show_card_columns(self):
-        """Step 3 hides the memo column; ‘구분’ (SEPA Lastschrift …) only when the statements have it."""
-        kinds = any(split_merchant(item.merchant)[0] for item in self.transactions.values())
+        """Step 3 hides the memo column and ‘구분’ (SEPA Lastschrift …, shown in the detail box below) so the payee
+        has room; other steps show ‘구분’ when the statements have it."""
+        kinds = getattr(self, "step", None) != 3 and any(split_merchant(item.merchant)[0] for item in self.transactions.values())
         columns = ("번호", "거래일") + (("구분",) if kinds else ()) + ("가맹점·거래처", "금액", "증빙 상태")
         if getattr(self, "step", None) != 3:
             columns += ("메모",)
@@ -3824,10 +3948,24 @@ class MonthlyClose:
                 aliases = state["aliases"].setdefault(merchant, [])
                 if alias not in aliases:
                     aliases.append(alias)
-        self.save(state)
+        before = list(self.cards.get_children())
+        if self.save(state) and not remove and len(cards) == 1:
+            self.select_next_open(before, cards[0])
 
     def link(self):
         self.change_links(False)
+
+    def select_next_open(self, before, current):
+        """After linking one transaction, go to the next one in the list that still needs evidence."""
+        rows = set(self.cards.get_children())
+        start = before.index(current) + 1 if current in before else 0
+        for key in before[start:] + before[:start]:
+            if key in rows and key != current and key in self.transactions and not self.linked(key):
+                self.cards.selection_set(key)
+                self.cards.focus(key)
+                self.cards.see(key)
+                self.cards.focus_set()
+                return
 
     def unlink(self):
         self.change_links(True)
@@ -4377,9 +4515,15 @@ class MonthlyClose:
             self.notice(f"{self.card_label(item)}에 증빙 {len(keys)}개를 연결했어요."
                         f"\n파일은 작업 폴더에 {'복사' if copy else '이동'}했어요.{failed}", title="증빙 추가 완료")
 
-    def unmatched_documents(self):
+    def unmatched_documents(self, near_only=False):
+        """Evidence no transaction uses. near_only: only dated within CANDIDATE_DAYS of the loaded statements (or undated)."""
         linked = {key for record in self.state["records"].values() for key in record.get("links", [])}
-        return [doc for doc in self.invoices if doc.key not in linked]
+        documents = [doc for doc in self.invoices if doc.key not in linked]
+        if near_only and self.transactions:
+            first = min(item.day for item in self.transactions.values()) - timedelta(days=CANDIDATE_DAYS)
+            last = max(item.day for item in self.transactions.values()) + timedelta(days=CANDIDATE_DAYS)
+            documents = [doc for doc in documents if not doc.day or first <= doc.day <= last]
+        return documents
 
     def chosen_document(self):
         selection = self.pdfs.selection()
@@ -4479,6 +4623,9 @@ class MonthlyClose:
         ttk.Label(dialog, textvariable=caption, padding=(14, 10, 14, 4), wraplength=940).pack(anchor="w")
         footer = ttk.Frame(dialog, padding=(14, 8))
         footer.pack(side="bottom", fill="x")
+        near_only = tk.BooleanVar(value=True)
+        ttk.Checkbutton(dialog, text=f"불러온 명세서 기간 앞뒤 {CANDIDATE_DAYS}일 안의 증빙만 (날짜 없는 증빙 포함)", variable=near_only,
+                        command=lambda: fill()).pack(anchor="w", padx=14)
         table = self.table(dialog, ("파일", "발행일", "업체명", "총액", "번호", "금액 맞는 거래"), (300, 90, 180, 100, 120, 150))
         shown = {}
 
@@ -4486,7 +4633,8 @@ class MonthlyClose:
             table.delete(*table.get_children())
             shown.clear()
             open_cards = [item for item in self.unlinked_transactions()]
-            for index, doc in enumerate(sorted(self.unmatched_documents(), key=lambda doc: (doc.day or date.min, doc.path.name))):
+            documents = self.unmatched_documents(near_only=near_only.get())
+            for index, doc in enumerate(sorted(documents, key=lambda doc: (doc.day or date.min, doc.path.name))):
                 fits = [item for item in open_cards if doc.amount is not None and abs(item.amount) == abs(doc.amount)]
                 shown[str(index)] = (doc, fits)
                 table.insert("", "end", iid=str(index), values=(
@@ -4556,7 +4704,7 @@ class MonthlyClose:
     def update_unmatched_button(self):
         button = getattr(self, "unmatched_button", None)
         if button is not None and button.winfo_exists():
-            count = len(self.unmatched_documents()) if self.invoices else 0
+            count = len(self.unmatched_documents(near_only=True)) if self.invoices else 0
             button.configure(text=f"연결 안 된 증빙 ({count})" if self.invoices else "연결 안 된 증빙")
 
     def open_pdf(self):
@@ -4593,6 +4741,160 @@ class MonthlyClose:
         if summary:
             self.status.set(" · ".join(summary) + " · 세무사 ZIP에도 같은 사본이 들어가요.")
 
+    def number_order(self, keys):
+        def rank(key):
+            number = self.record(key).get("number", "")
+            head, _, tail = number.partition("-")
+            return (self.record(key).get("period", ""), head, int(tail) if tail.isdigit() else 0, number)
+        return sorted(keys, key=rank)
+
+    def print_bundle(self, keys=None, notes=True, progress=None):
+        """One PDF for printing: each statement page followed by the evidence of the numbers marked on it.
+
+        keys: transactions to include (default all). Statements follow the saved account order; evidence
+        gets its number stamped at the bottom centre. Numbers without evidence get a short German note page
+        when notes is True. Numbers the statement page could not be found for follow the statement's last page.
+        Returns (pdf bytes, summary text)."""
+        wanted = set(self.transactions if keys is None else keys)
+        sources_of = self.state.get("transaction_sources", {})
+        by_source = defaultdict(list)
+        for key in wanted:
+            source = next((checksum for checksum in sources_of.get(key, {}) if checksum in self.statement_sources), "")
+            by_source[source].append(key)
+        accounts = {checksum: next((self.accounts.get(key, "") for key in items), "") for checksum, items in by_source.items()}
+        rank = {name: index for index, name in enumerate(ordered_accounts(accounts.values()))}
+        first_number = {checksum: self.record(self.number_order(items)[0]).get("number", "") for checksum, items in by_source.items()}
+        order = sorted(by_source, key=lambda checksum: (checksum == "", rank.get(accounts[checksum], len(rank)), first_number[checksum]))
+        done_docs, counts = set(), Counter()
+        reasons = reason_list()
+        bundle = pymupdf.open()
+        steps = sum(len(items) for items in by_source.values()) or 1
+        position = 0
+
+        def add_transaction(key):
+            nonlocal position
+            position += 1
+            record = self.record(key)
+            number = record.get("number", "")
+            if progress:
+                progress(position, steps, number)
+            docs = [link for link in self.linked(key) if link in self.by_key]
+            for link in docs:
+                if link in done_docs:
+                    continue
+                done_docs.add(link)
+                path = self.by_key[link].path
+                numbers = [self.record(other).get("number", "") for other in self.number_order(
+                    [other for other in self.transactions if link in self.linked(other)])]
+                if path.suffix.lower() == ".xml":
+                    info_page(bundle, [f"{' / '.join(numbers)} · {path.name}",
+                                       "E-Rechnung (XML) ohne Bilddarstellung - Datei liegt im Ordner Belege."], "E-Rechnung")
+                    counts["xml"] += 1
+                    continue
+                try:
+                    with numbered_evidence(path, numbers) as copy:
+                        bundle.insert_pdf(copy)
+                    counts["evidence"] += 1
+                except (OSError, RuntimeError, ValueError) as error:
+                    record_error("print_bundle", error)
+                    info_page(bundle, [f"{' / '.join(numbers)} · {path.name}", f"Datei konnte nicht gelesen werden: {error}"],
+                              "Beleg nicht lesbar")
+                    counts["failed"] += 1
+            if not docs and notes:
+                item = self.transactions[key]
+                lines = [f"{number} · {item.day.strftime('%d.%m.%Y')} · {item.merchant[:70]}",
+                         f"Betrag: {german_amount(item.amount)} {item.currency}",
+                         f"Status: {self.german_status(key)}"]
+                reason = reason_german(record.get("statement_evidence", ""), reasons)
+                if reason:
+                    lines.append(f"Begründung: {reason}")
+                if record.get("refund_group"):
+                    lines.append("Verrechnet mit: " + ", ".join(self.record(other).get("number", "")
+                                                               for other in record["refund_group"] if other != key))
+                if record.get("advisor_note"):
+                    lines.append(f"Notiz: {delivery_text(record['advisor_note'])[:300]}")
+                info_page(bundle, lines, f"{number} · ohne Beleg")
+                counts["notes"] += 1
+
+        for checksum in order:
+            items = self.number_order(by_source[checksum])
+            path = self.statement_sources.get(checksum)
+            if path is not None and path.suffix.lower() == ".pdf":
+                placed = {}
+                entries = [(self.record(key)["number"], self.transactions[key]) for key in items]
+                data, _ = numbered_statement(path, entries, placed)
+                by_page = defaultdict(list)
+                for key in items:
+                    number = self.record(key)["number"]
+                    if number in placed:
+                        by_page[placed[number]].append(key)
+                missing = [key for key in items if self.record(key)["number"] not in placed]
+                with pymupdf.open("pdf", data) as statement:
+                    for index in range(len(statement)):
+                        bundle.insert_pdf(statement, from_page=index, to_page=index)
+                        counts["statement_pages"] += 1
+                        for key in by_page[index]:
+                            add_transaction(key)
+                if missing:
+                    info_page(bundle, [path.name, "Diese Belegnummern wurden im Auszug nicht automatisch gefunden:",
+                                       ", ".join(self.record(key)["number"] for key in missing)], "Ohne Position im Auszug")
+                    for key in missing:
+                        add_transaction(key)
+                counts["unplaced"] += len(missing)
+            else:
+                if path is not None:
+                    info_page(bundle, [path.name, "CSV-Auszug - Belege in Reihenfolge der Belegnummern."], "Kontoauszug (CSV)")
+                for key in items:
+                    add_transaction(key)
+        if not len(bundle):
+            bundle.close()
+            raise ValueError("인쇄할 거래가 없어요.")
+        data = bundle.tobytes(garbage=3, deflate=True)
+        bundle.close()
+        summary = (f"명세서 {counts['statement_pages']}쪽 · 증빙 {counts['evidence']}개 · 안내 {counts['notes']}쪽"
+                   + (f" · 명세서에서 위치 못 찾음 {counts['unplaced']}건" if counts["unplaced"] else "")
+                   + (f" · 읽기 실패 {counts['failed']}개" if counts["failed"] else ""))
+        return data, summary
+
+    def open_print_bundle(self):
+        """Ask what to include, then open the print bundle in the default PDF program."""
+        if not self.transactions:
+            self.notice("먼저 명세서를 불러오세요.")
+            return
+        month = self.month_filter.get()
+        keys = [key for key in self.transactions if month in ("전체", self.record(key).get("period"))]
+        dialog = InlineDialog(self.root)
+        dialog.title("인쇄 묶음")
+        dialog.center(560, 300)
+        dialog.grab_set()
+        scope = f"{month} 거래 {len(keys)}건" if month != "전체" else f"모든 거래 {len(keys)}건"
+        ttk.Label(dialog, text=f"{scope}을 한 PDF로 묶어요. 명세서 1쪽 → 그 쪽 번호의 인보이스들 → 명세서 2쪽 … 순서예요.\n"
+                               "인보이스 아래 가운데에 거래번호가 찍혀요(원본 파일은 그대로).",
+                  wraplength=520, padding=(14, 12, 14, 6)).pack(anchor="w")
+        notes = tk.BooleanVar(value=True)
+        ttk.Checkbutton(dialog, text="증빙 없는 번호에 안내 쪽 넣기 (사유 한 줄)", variable=notes).pack(anchor="w", padx=14, pady=4)
+
+        def build():
+            dialog.destroy()
+            try:
+                with Busy(self.root, "인쇄 묶음을 만들고 있어요") as busy:
+                    data, summary = self.print_bundle(keys, notes.get(), busy.step)
+                    folder = Path(tempfile.mkdtemp(prefix="invoice-print-"))
+                    name = f"Druckmappe_{month if month != '전체' else 'alle'}.pdf"
+                    target = folder / name
+                    target.write_bytes(data)
+            except (OSError, RuntimeError, ValueError) as error:
+                record_error("print_bundle", error)
+                messagebox.showerror("인쇄 묶음 실패", str(error), parent=self.root)
+                return
+            self.status.set(f"인쇄 묶음: {summary}")
+            self.open_evidence_file(target)
+
+        footer = ttk.Frame(dialog, padding=(14, 12))
+        footer.pack(fill="x", side="bottom")
+        ttk.Button(footer, text="만들어서 열기", style="Primary.TButton", command=build).pack(side="right")
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
+
     def open_evidence_file(self, path):
         try:
             if os.name == "nt":
@@ -4603,19 +4905,146 @@ class MonthlyClose:
             messagebox.showerror("PDF 열기 실패", str(error), parent=self.root)
 
     def search_gmail(self):
+        """Panel: search a registered mailbox (Gmail or 한메일) by amount and/or seller around the payment date."""
         item = self.single_card()
         if item is None:
             return
+        from invoice_renamer import load_settings, save_settings
+        settings = load_settings()
+        boxes = mailboxes(settings)
         key = merchant_key(item.merchant)
-        previous = self.state.get("senders", {}).get(key, item.merchant)
-        merchant = simpledialog.askstring("Gmail 검색", "업체명이나 발신자 이메일 주소", initialvalue=previous, parent=self.root)
-        if merchant and merchant.strip():
-            merchant = merchant.strip()
-            if merchant != previous and re.fullmatch(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", merchant):
+        payee = split_merchant(item.merchant)[1].split("|")[0].strip()
+        previous = self.state.get("senders", {}).get(key, payee)
+        dialog = InlineDialog(self.root)
+        dialog.title("메일 검색")
+        dialog.center(600, 430)
+        dialog.grab_set()
+        body = ttk.Frame(dialog, padding=(16, 12))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        ttk.Label(body, text=f"{self.record(item.key).get('number', '')} · {item.day:%d.%m.%Y} · {german_amount(item.amount)} {item.currency}",
+                  font=FONT_BOLD).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        names = [f"{box.get('label') or MAILBOX_KINDS[box['kind']]}" for box in boxes]
+        last = settings.get("mailbox_last", 0)
+        ttk.Label(body, text="메일").grid(row=1, column=0, sticky="w")
+        box_choice = ttk.Combobox(body, values=names, state="readonly", width=30)
+        box_choice.current(last if isinstance(last, int) and 0 <= last < len(names) else 0)
+        box_choice.grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(body, text="찾을 것").grid(row=2, column=0, sticky="w")
+        mode = tk.StringVar(value=settings.get("mail_mode", "amount"))
+        modes = ttk.Frame(body)
+        modes.grid(row=2, column=1, sticky="w", pady=3)
+        for value, label in (("amount", f"금액 ({format(abs(item.amount), '.2f').replace('.', ',')})"), ("seller", "업체·발신자"), ("both", "둘 다")):
+            ttk.Radiobutton(modes, text=label, value=value, variable=mode).pack(side="left", padx=(0, 10))
+        ttk.Label(body, text="업체·발신자").grid(row=3, column=0, sticky="w")
+        seller = ttk.Entry(body, width=40)
+        seller.insert(0, previous)
+        seller.grid(row=3, column=1, sticky="we", pady=3)
+        ttk.Label(body, text="기간 (거래일 기준)").grid(row=4, column=0, sticky="w")
+        days = ttk.Frame(body)
+        days.grid(row=4, column=1, sticky="w", pady=3)
+        before = tk.StringVar(value=str(settings.get("mail_days_before", 14)))
+        after = tk.StringVar(value=str(settings.get("mail_days_after", 15)))
+        ttk.Spinbox(days, from_=0, to=365, width=5, textvariable=before).pack(side="left")
+        ttk.Label(days, text="일 전부터 ").pack(side="left")
+        ttk.Spinbox(days, from_=0, to=365, width=5, textvariable=after).pack(side="left")
+        ttk.Label(days, text="일 후까지").pack(side="left")
+        attachment = tk.BooleanVar(value=bool(settings.get("mail_attachment", False)))
+        ttk.Checkbutton(body, text="첨부 있는 메일만 (Gmail)", variable=attachment).grid(row=5, column=1, sticky="w", pady=3)
+        ttk.Label(body, text="한메일은 한 단어만 찾아요. ‘둘 다’를 고르면 금액으로 찾아요.\n메일 목록은 ‘환경설정’의 ‘메일 등록’에서 바꿔요.",
+                  foreground=COLORS["muted"]).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        def search():
+            try:
+                days_before, days_after = int(before.get()), int(after.get())
+            except ValueError:
+                show_notice(dialog, "기간은 숫자로 적으세요.")
+                return
+            box = boxes[box_choice.current()]
+            chosen = mode.get()
+            name = seller.get().strip()
+            url = mail_search_url(box, item.amount if chosen in ("amount", "both") else None,
+                                  name if chosen in ("seller", "both") else "", item.day, days_before, days_after, attachment.get())
+            try:
+                save_settings({"mailbox_last": box_choice.current(), "mail_mode": chosen, "mail_days_before": days_before,
+                               "mail_days_after": days_after, "mail_attachment": attachment.get()})
+            except OSError:
+                pass
+            if name and name != previous and re.fullmatch(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", name):
                 state = deepcopy(self.state)
-                state.setdefault("senders", {})[key] = merchant
+                state.setdefault("senders", {})[key] = name
                 self.save(state)
-            webbrowser.open(gmail_url(merchant, item.day))
+            dialog.destroy()
+            webbrowser.open(url)
+
+        footer = ttk.Frame(dialog, padding=(16, 10))
+        footer.pack(fill="x", side="bottom")
+        ttk.Button(footer, text="브라우저에서 찾기", style="Primary.TButton", command=search).pack(side="right")
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
+        ttk.Button(footer, text="메일 등록…", command=lambda: (dialog.destroy(), self.manage_mailboxes())).pack(side="left")
+        dialog.bind("<Return>", lambda event: search())
+
+    def manage_mailboxes(self):
+        """Panel: the mailboxes the mail search can open (Gmail accounts by their number in the browser, 한메일)."""
+        from invoice_renamer import load_settings, save_settings
+        boxes = [dict(box) for box in mailboxes(load_settings())]
+        dialog = InlineDialog(self.root)
+        dialog.title("메일 등록")
+        dialog.center(620, 420)
+        dialog.grab_set()
+        ttk.Label(dialog, text="메일 검색에서 고를 메일함이에요. Gmail 계정이 여러 개면 브라우저에 로그인한 순서 번호(첫 계정 0)를 적으세요.",
+                  wraplength=580, padding=(14, 10, 14, 6)).pack(anchor="w")
+        table = self.table(dialog, ("이름", "종류", "Gmail 계정 번호"), (240, 120, 140))
+
+        def fill():
+            table.delete(*table.get_children())
+            for index, box in enumerate(boxes):
+                table.insert("", "end", iid=str(index), values=(box.get("label", ""), MAILBOX_KINDS[box["kind"]],
+                                                                box.get("index", 0) if box["kind"] == "gmail" else ""))
+
+        form = ttk.Frame(dialog, padding=(14, 6))
+        form.pack(fill="x")
+        label = ttk.Entry(form, width=22)
+        label.insert(0, "한메일")
+        label.pack(side="left")
+        kind = ttk.Combobox(form, values=list(MAILBOX_KINDS.values()), state="readonly", width=10)
+        kind.current(1)
+        kind.pack(side="left", padx=6)
+        number = ttk.Spinbox(form, from_=0, to=9, width=4)
+        number.set("0")
+        number.pack(side="left")
+
+        def add():
+            text = label.get().strip() or kind.get()
+            chosen = next(code for code, name in MAILBOX_KINDS.items() if name == kind.get())
+            entry = {"kind": chosen, "label": text}
+            if chosen == "gmail":
+                try:
+                    entry["index"] = max(0, int(number.get()))
+                except ValueError:
+                    entry["index"] = 0
+            boxes.append(entry)
+            fill()
+
+        def remove():
+            for iid in sorted(table.selection(), key=int, reverse=True):
+                del boxes[int(iid)]
+            fill()
+
+        def save():
+            if not boxes:
+                show_notice(dialog, "메일함을 한 개 이상 남기세요.")
+                return
+            save_settings({"mailboxes": boxes})
+            dialog.destroy()
+
+        ttk.Button(form, text="추가", command=add).pack(side="left", padx=6)
+        ttk.Button(form, text="선택 삭제", command=remove).pack(side="left")
+        footer = ttk.Frame(dialog, padding=(14, 10))
+        footer.pack(fill="x", side="bottom")
+        ttk.Button(footer, text="저장", style="Primary.TButton", command=save).pack(side="right")
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
+        fill()
 
     def export_csv(self):
         if not self.transactions and not self.errors:
@@ -4850,7 +5279,7 @@ class MonthlyClose:
                     if not counts.get(part):
                         continue
                     amount, empty = f"{counts[part]}개", False
-                include[part] = required or not empty
+                include[part] = required or (not empty and part != "Druckmappe.pdf")  # print copy only when asked
                 parts.append((part, label, meaning + (" (내용 없음)" if empty else ""), required, amount))
             files = self.table(files_tab, ("넣기", "파일·폴더", "한글 설명", "개수"), (60, 250, 560, 70))
             files.tag_configure("off", foreground=COLORS["muted"])
@@ -5112,6 +5541,12 @@ class MonthlyClose:
                 for name, contents in tables.items():
                     if name not in omit:
                         archive.writestr(name, contents.encode("utf-8-sig"))
+                if "Druckmappe.pdf" not in omit and baselines is None:
+                    try:
+                        bundle, _ = self.print_bundle(keys)
+                        archive.writestr("Druckmappe.pdf", bundle)
+                    except (OSError, RuntimeError, ValueError) as error:
+                        record_error("print_bundle", error)
                 archive.writestr("Abgleich.xlsx", advisor_workbook(tables, set(archive.namelist())))
                 if "Hinweise.txt" not in omit:
                     archive.writestr("Hinweise.txt", (

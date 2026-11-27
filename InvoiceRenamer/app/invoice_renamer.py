@@ -1162,6 +1162,8 @@ class App:
         self.on_change = on_change
         self.on_work_folder = None  # set by the main window to keep steps 2-5 on the same work folder
         self.on_manage_reasons = None  # set by the main window: ‘증빙 없이 처리’ reasons (step 3)
+        self.on_manage_mail = None  # mailboxes for the mail search
+        self.on_account_order = None  # order of bank accounts and cards for numbering
         if container is None:
             title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
             root.title(f"[연습 모드] {title}" if practice_folder else title)
@@ -1460,6 +1462,16 @@ class App:
             ttk.Label(body, text="증빙 없이 처리 사유", font=FONT_BOLD).grid(row=7, column=0, sticky="w", pady=(22, 4))
             ttk.Button(body, text="사유 관리 (한국어·독일어·추가)",
                        command=lambda: (dialog.destroy(), self.on_manage_reasons())).grid(row=8, column=0, sticky="w")
+        if self.on_manage_mail or self.on_account_order:
+            ttk.Label(body, text="메일 검색·계좌 순서", font=FONT_BOLD).grid(row=9, column=0, sticky="w", pady=(22, 4))
+            row = ttk.Frame(body)
+            row.grid(row=10, column=0, columnspan=3, sticky="w")
+            if self.on_manage_mail:
+                ttk.Button(row, text="메일 등록 (Gmail·한메일)",
+                           command=lambda: (dialog.destroy(), self.on_manage_mail())).pack(side="left")
+            if self.on_account_order:
+                ttk.Button(row, text="계좌 순서 정하기",
+                           command=lambda: (dialog.destroy(), self.on_account_order())).pack(side="left", padx=6)
 
     def update_import_labels(self):
         """‘파일 가져오기 (복사)’ or ‘(이동)’: the button says what happens to the originals."""
