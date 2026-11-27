@@ -27,7 +27,8 @@ from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MoneyEntry, pick_value, i
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
-from ui_theme import COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, Busy, InlineDialog, configure_tags, resort, show_notice, table_tools, transaction_tag
+from ui_theme import (COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, Busy, InlineDialog, ask_yes_no, configure_tags, resort, show_notice,
+                      show_toast, table_tools, transaction_tag)
 from workspace_backup import add_attachment, attachment_path, create_backup, restore_workspace
 
 
@@ -1705,7 +1706,7 @@ class MonthlyClose:
             prompt = f"준비된 명세서 {len(chosen)}개를 가져올까요?"
             if pending:
                 prompt += f"\n설정이 필요한 {len(pending)}개는 가져오지 않아요."
-            if not messagebox.askyesno("명세서 가져오기", prompt, parent=window):
+            if not ask_yes_no("명세서 가져오기", prompt, parent=window):
                 return
             done = []
             for key in chosen:
@@ -1754,7 +1755,9 @@ class MonthlyClose:
         dialog.grab_set()
         ttk.Label(dialog, text="여러 명세서를 가져올 때 이 순서대로 번호를 매겨요. 새 계좌는 맨 아래에 붙어요.",
                   wraplength=480, padding=(14, 10, 14, 6)).pack(anchor="w")
-        box = tk.Listbox(dialog, activestyle="none", height=10, exportselection=False)
+        footer = ttk.Frame(dialog, padding=(14, 10))
+        footer.pack(fill="x", side="bottom")  # packed before the list so it can never be pushed out of the panel
+        box = tk.Listbox(dialog, activestyle="none", height=8, exportselection=False)
         box.pack(fill="both", expand=True, padx=14)
         for name in order:
             box.insert("end", name)
@@ -1777,8 +1780,6 @@ class MonthlyClose:
             if on_save:
                 on_save()
 
-        footer = ttk.Frame(dialog, padding=(14, 10))
-        footer.pack(fill="x")
         self.buttons(footer, [("▲ 위로", lambda: shift(-1)), ("▼ 아래로", lambda: shift(1))])
         ttk.Button(footer, text="저장", style="Primary.TButton", command=save).pack(side="right")
         ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
@@ -1840,7 +1841,7 @@ class MonthlyClose:
             self.status.set("독일어 요청 초안을 복사했어요.")
 
         def mark():
-            if not messagebox.askyesno("요청 완료 기록", "메일을 직접 보냈나요? 오늘 날짜로 요청 완료를 기록할까요?", parent=window):
+            if not ask_yes_no("요청 완료 기록", "메일을 직접 보냈나요? 오늘 날짜로 요청 완료를 기록할까요?", parent=window):
                 return
             state = deepcopy(self.state)
             record = state["records"][item.key]
@@ -1984,7 +1985,7 @@ class MonthlyClose:
                 transactions, errors, check, discrepancy = self.preview_import(source, rows, spec)
             if is_pdf:
                 preview = "\n".join(f"{item.day}  {item.merchant}  {item.amount} {item.currency}" for item in transactions[:8])
-                if not messagebox.askyesno("PDF 추출 확인", f"{len(transactions)}건 추출 · 확인 {len(errors)}행\n{check}\n\n{preview}\n\n계속할까요?", parent=dialog):
+                if not ask_yes_no("PDF 추출 확인", f"{len(transactions)}건 추출 · 확인 {len(errors)}행\n{check}\n\n{preview}\n\n계속할까요?", parent=dialog):
                     return
             if on_review:
                 on_review(source_key, spec, transactions, errors, check, discrepancy)
@@ -2143,7 +2144,7 @@ class MonthlyClose:
         if not sources:
             self.notice("이어 열 수 있는 명세서가 없어요.")
             return
-        if self.transactions and not messagebox.askyesno("이어서 작업", "현재 화면을 마지막 저장 작업으로 바꿀까요?", parent=self.root):
+        if self.transactions and not ask_yes_no("이어서 작업", "현재 화면을 마지막 저장 작업으로 바꿀까요?", parent=self.root):
             return
         self.reload_sources(sources, session.get("folder"))
 
@@ -2276,7 +2277,7 @@ class MonthlyClose:
             if not target:
                 return
             layout, account = target
-            if not messagebox.askyesno("양식 삭제", f"‘{account}’ 양식 설정을 지울까요?\n이미 불러온 거래·연결·메모는 지워지지 않아요. 다음에 같은 파일을 불러오면 열을 다시 고르게 돼요.", parent=dialog):
+            if not ask_yes_no("양식 삭제", f"‘{account}’ 양식 설정을 지울까요?\n이미 불러온 거래·연결·메모는 지워지지 않아요. 다음에 같은 파일을 불러오면 열을 다시 고르게 돼요.", parent=dialog):
                 return
             state = deepcopy(self.state)
             del state["import_profiles"][layout][account]
@@ -2347,7 +2348,7 @@ class MonthlyClose:
             if not chosen:
                 messagebox.showerror("지난 달 열기", "열 수 있는 명세서를 한 개 이상 선택하세요.", parent=dialog)
                 return
-            if self.transactions and not messagebox.askyesno("지난 달 열기", "지금 화면의 거래 대신 선택한 달의 명세서를 불러올까요?\n지금 작업은 ‘이어서 작업’으로 다시 열 수 있어요.", parent=dialog):
+            if self.transactions and not ask_yes_no("지난 달 열기", "지금 화면의 거래 대신 선택한 달의 명세서를 불러올까요?\n지금 작업은 ‘이어서 작업’으로 다시 열 수 있어요.", parent=dialog):
                 return
             target = month.get()
             dialog.destroy()
@@ -2904,7 +2905,7 @@ class MonthlyClose:
             return
         preview = "\n".join(str(target.relative_to(self.folder)) for _, target in moves[:5])
         more = f"\n… 외 {len(moves) - 5}개" if len(moves) > 5 else ""
-        if not messagebox.askyesno("매칭완료 증빙 이동", f"증빙 {len(moves)}개를 옮길까요?\n\n{preview}{more}", parent=self.root):
+        if not ask_yes_no("매칭완료 증빙 이동", f"증빙 {len(moves)}개를 옮길까요?\n\n{preview}{more}", parent=self.root):
             return
         errors = []
         history = []
@@ -2945,7 +2946,7 @@ class MonthlyClose:
         if not self.last_moves:
             self.notice("되돌릴 증빙 이동이 없어요.")
             return
-        if not messagebox.askyesno("이동 되돌리기", f"증빙 {len(self.last_moves)}개를 원래 폴더로 되돌릴까요?", parent=self.root):
+        if not ask_yes_no("이동 되돌리기", f"증빙 {len(self.last_moves)}개를 원래 폴더로 되돌릴까요?", parent=self.root):
             return
         restored, failed = undo_moves(self.last_moves)
         self.last_moves = [item[:3] for item in reversed(failed)]
@@ -3761,7 +3762,7 @@ class MonthlyClose:
         if not source:
             return
         parent = filedialog.askdirectory(parent=self.root, title="복원 폴더를 만들 위치")
-        if not parent or not messagebox.askyesno("전체 작업 복원",
+        if not parent or not ask_yes_no("전체 작업 복원",
             "선택한 위치에 새 폴더를 만들고 작업 기록을 불러올까요? 현재 기록은 별도 백업으로 남겨요.", parent=self.root):
             return
         try:
@@ -3822,7 +3823,7 @@ class MonthlyClose:
             messagebox.showerror("복원할 수 없어요", str(error), parent=self.root)
             return
         count = len(state["records"])
-        if not messagebox.askyesno("작업 기록 복원",
+        if not ask_yes_no("작업 기록 복원",
             f"백업에 있는 거래 기록 {count}건으로 현재 기록을 바꿀까요?\n현재 기록도 복원 전 백업으로 남겨요.", parent=self.root):
             return
         try:
@@ -3873,7 +3874,7 @@ class MonthlyClose:
             if bool(current.get("locked")) == locked:
                 return
             if locked:
-                if not messagebox.askyesno("마감 확정", f"{chosen} 거래와 연결 증빙을 잠글까요?", parent=dialog):
+                if not ask_yes_no("마감 확정", f"{chosen} 거래와 연결 증빙을 잠글까요?", parent=dialog):
                     return
                 reason = ""
             else:
@@ -3911,7 +3912,7 @@ class MonthlyClose:
                 prompt = "선택한 거래의 이체 또는 환불 연결을 해제할까요?"
             else:
                 prompt = "선택한 거래에서 선택한 PDF 연결을 해제할까요?" if keys else "선택한 거래의 모든 PDF 연결을 해제할까요?"
-            if not messagebox.askyesno("연결 해제", prompt, parent=self.root):
+            if not ask_yes_no("연결 해제", prompt, parent=self.root):
                 return
         else:
             repeated = any(keys.intersection(record.get("links", []))
@@ -3920,7 +3921,7 @@ class MonthlyClose:
                 prompt = f"거래 {len(cards)}건 각각에 PDF {len(keys)}개를 연결할까요?"
                 if repeated:
                     prompt += "\n선택한 PDF 중 다른 거래에 연결된 파일이 있어요."
-                if not messagebox.askyesno("여러 거래 또는 PDF 연결", prompt, parent=self.root):
+                if not ask_yes_no("여러 거래 또는 PDF 연결", prompt, parent=self.root):
                     return
         state = deepcopy(self.state)
         for key in cards:
@@ -4371,7 +4372,7 @@ class MonthlyClose:
         prompt = f"선택한 거래 {len(keys)}건을 연결할까요?\n환불 후 잔액: {remaining:.2f} {currency}"
         if remaining:
             prompt += "\n\n일부 환불이에요. 남은 금액의 인보이스를 결제 거래에 연결해야 완료돼요."
-        if not messagebox.askyesno("결제·환불 연결", prompt, parent=self.root):
+        if not ask_yes_no("결제·환불 연결", prompt, parent=self.root):
             return
         state = deepcopy(self.state)
         for key in keys:
@@ -4629,7 +4630,7 @@ class MonthlyClose:
 
     def edit_document_values(self, doc=None, after=None):
         """Fix date, seller, total and number of one evidence file (kept in invoice-edits.json, the file is not changed)."""
-        from invoice_renamer import save_invoice_edit
+        from invoice_renamer import ValueForm, save_invoice_edit
         doc = doc or self.chosen_document()
         if doc is None:
             return
@@ -4638,31 +4639,16 @@ class MonthlyClose:
         form.grab_set()
         body = ttk.Frame(form, padding=16)
         body.pack(fill="x")
-        ttk.Label(body, text=doc.path.name, wraplength=520).grid(row=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(body, text=doc.path.name, wraplength=520).grid(row=0, columnspan=4, sticky="w", pady=(0, 8))
         values = (doc.day.isoformat() if doc.day else "", doc.seller,
                   f"{doc.amount} {doc.currency}" if doc.amount is not None else "", doc.number)
-        entries = []
-        for row, (label, value) in enumerate(zip(("발행일 (YYYY-MM-DD)", "업체명", "총액 (숫자만, 예: 7,87)", "인보이스 번호"), values), 1):
-            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
-            entry = MoneyEntry(body, value, width=30) if row == 3 else ttk.Entry(body, width=40)
-            if row != 3:
-                entry.insert(0, value)
-            entry.grid(row=row, column=1, sticky="w")
-            entries.append(entry)
-
-        def put(kind, value):
-            index = {"발행일": 0, "업체명": 1, "총액": 2, "인보이스 번호": 3}[kind]
-            if index == 2:
-                entries[2].set(value)
-            else:
-                entries[index].delete(0, "end")
-                entries[index].insert(0, value)
 
         def save():
-            day, seller, total, number = (entry.get().strip() for entry in entries)
+            day, seller, total, number = fields.raw()
             day = normalized_date(day) if re.fullmatch(DATE, day) else pick_value("발행일", day)
             if not day or not seller or not total:
-                show_notice(form, "발행일(2026-07-02), 업체명, 총액(숫자, 예: 7,87)을 적어 주세요. 통화는 옆 칸에서 골라요.")
+                show_notice(form, "발행일(2026-07-02), 업체명, 총액(숫자, 예: 7,87)을 적어 주세요. 통화는 옆 칸에서 골라요.\n"
+                                  "빨간 ‘누락’ 칸은 ‘고르기’로 원본에서 고를 수 있어요.")
                 return
             try:
                 save_invoice_edit(doc.path, (day, seller, total, number))
@@ -4674,12 +4660,12 @@ class MonthlyClose:
             if after:
                 after()
 
+        fields = ValueForm(body, doc.path, values, on_save=save, number_label="인보이스 번호")
+        buttons = ttk.Frame(body)
+        buttons.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         if doc.path.suffix.lower() != ".xml":
-            ttk.Button(body, text="원본에서 보기·값 고르기", command=lambda: show_source_locations(
-                form, doc.path, {"발행일": entries[0].get().strip(), "총액": entries[2].get() or entries[2].entry.get().strip(),
-                                 "인보이스 번호": entries[3].get().strip(), "업체명": entries[1].get().strip()}, on_value=put,
-            )).grid(row=5, column=0, sticky="w", pady=(10, 0))
-        ttk.Button(body, text="저장", command=save).grid(row=5, column=1, sticky="e", pady=(10, 0))
+            ttk.Button(buttons, text="원본에서 보기·값 고르기", command=lambda: fields.pick(fields.first_missing())).pack(side="left")
+        ttk.Button(buttons, text="저장", style="Primary.TButton", command=save).pack(side="right")
 
     def exclude_document(self, doc=None, parent=None):
         """Move an evidence file that is not an invoice (or not for this close) to the ‘제외’ folder. Nothing is deleted."""
@@ -4693,7 +4679,7 @@ class MonthlyClose:
         if used:
             show_notice(parent, f"{doc.path.name}\n거래 {', '.join(used)}에 연결된 증빙이에요. 먼저 ‘해제’한 뒤 제외하세요.")
             return False
-        if not messagebox.askyesno("제외 폴더로", f"{doc.path.name}\n인보이스가 아니거나 이번 마감과 상관없는 파일이면 ‘제외’ 폴더로 옮길까요?\n"
+        if not ask_yes_no("제외 폴더로", f"{doc.path.name}\n인보이스가 아니거나 이번 마감과 상관없는 파일이면 ‘제외’ 폴더로 옮길까요?\n"
                                                    "지우지 않아요. 1단계 ‘정리 되돌리기’나 탐색기에서 다시 꺼낼 수 있어요.", parent=parent):
             return False
         try:
@@ -5099,11 +5085,16 @@ class MonthlyClose:
         boxes = [dict(box) for box in mailboxes(load_settings())]
         dialog = InlineDialog(self.root)
         dialog.title("메일 등록")
-        dialog.center(620, 420)
+        dialog.center(760, 440)
         dialog.grab_set()
         ttk.Label(dialog, text="메일 검색에서 고를 메일함이에요. Gmail 계정이 여러 개면 브라우저에 로그인한 순서 번호(첫 계정 0)를 적으세요.",
                   wraplength=580, padding=(14, 10, 14, 6)).pack(anchor="w")
+        footer = ttk.Frame(dialog, padding=(14, 10))
+        footer.pack(fill="x", side="bottom")  # footer and form first: the table takes only the space left over
+        form = ttk.Frame(dialog, padding=(14, 6))
+        form.pack(fill="x", side="bottom")
         table = self.table(dialog, ("이름", "종류", "Gmail 계정 번호"), (240, 120, 140))
+        table.configure(height=6)
 
         def fill():
             table.delete(*table.get_children())
@@ -5111,19 +5102,19 @@ class MonthlyClose:
                 table.insert("", "end", iid=str(index), values=(box.get("label", ""), MAILBOX_KINDS[box["kind"]],
                                                                 box.get("index", 0) if box["kind"] == "gmail" else ""))
 
-        form = ttk.Frame(dialog, padding=(14, 6))
-        form.pack(fill="x")
-        label = ttk.Entry(form, width=22)
+        ttk.Label(form, text="이름").pack(side="left")
+        label = ttk.Entry(form, width=18)
         label.insert(0, "한메일")
         label.pack(side="left")
         kind = ttk.Combobox(form, values=list(MAILBOX_KINDS.values()), state="readonly", width=10)
         kind.current(1)
         kind.pack(side="left", padx=6)
+        ttk.Label(form, text="Gmail 계정 번호").pack(side="left", padx=(6, 4))
         number = ttk.Spinbox(form, from_=0, to=9, width=4)
         number.set("0")
         number.pack(side="left")
 
-        def add():
+        def entry_from_form():
             text = label.get().strip() or kind.get()
             chosen = next(code for code, name in MAILBOX_KINDS.items() if name == kind.get())
             entry = {"kind": chosen, "label": text}
@@ -5132,8 +5123,32 @@ class MonthlyClose:
                     entry["index"] = max(0, int(number.get()))
                 except ValueError:
                     entry["index"] = 0
-            boxes.append(entry)
+            return entry
+
+        def add():
+            boxes.append(entry_from_form())
             fill()
+
+        def change():
+            selection = table.selection()
+            if len(selection) != 1:
+                show_notice(dialog, "고칠 메일함을 표에서 하나 고르세요.")
+                return
+            boxes[int(selection[0])] = entry_from_form()
+            fill()
+            table.selection_set(selection[0])
+
+        def picked(_event=None):
+            selection = table.selection()
+            if len(selection) != 1:
+                return
+            box = boxes[int(selection[0])]
+            label.delete(0, "end")
+            label.insert(0, box.get("label", ""))
+            kind.set(MAILBOX_KINDS[box["kind"]])
+            number.set(str(box.get("index", 0)))
+
+        table.bind("<<TreeviewSelect>>", picked)
 
         def remove():
             for iid in sorted(table.selection(), key=int, reverse=True):
@@ -5148,9 +5163,8 @@ class MonthlyClose:
             dialog.destroy()
 
         ttk.Button(form, text="추가", command=add).pack(side="left", padx=6)
-        ttk.Button(form, text="선택 삭제", command=remove).pack(side="left")
-        footer = ttk.Frame(dialog, padding=(14, 10))
-        footer.pack(fill="x", side="bottom")
+        ttk.Button(form, text="선택 고치기", command=change).pack(side="left")
+        ttk.Button(form, text="선택 삭제", command=remove).pack(side="left", padx=6)
         ttk.Button(footer, text="저장", style="Primary.TButton", command=save).pack(side="right")
         ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
         fill()

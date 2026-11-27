@@ -28,9 +28,10 @@ class PdfView(tk.Frame):
     on_pick(page index, pymupdf.Rect, text): when given, dragging with the left mouse button draws a box and
     hands over the words inside it (for filling a missing value)."""
 
-    def __init__(self, parent, on_pick=None, background=None, compact=False):
+    def __init__(self, parent, on_pick=None, background=None, compact=False, on_menu=None):
         super().__init__(parent, background=background or COLORS["panel"])
         self.on_pick = on_pick
+        self.on_menu = on_menu  # on_menu(event, page index, word text, word Rect): right click on a word
         self.document = None
         self.path = None
         self.page = 0
@@ -89,6 +90,8 @@ class PdfView(tk.Frame):
             self.canvas.bind("<ButtonPress-1>", self._drag_start)
             self.canvas.bind("<B1-Motion>", self._drag_move)
             self.canvas.bind("<ButtonRelease-1>", self._drag_end)
+        if on_menu:
+            self.canvas.bind("<Button-3>", self._menu)
         self.bind("<Destroy>", self._closed, add="+")
 
     # Loading -------------------------------------------------------------
@@ -251,13 +254,59 @@ class PdfView(tk.Frame):
         if self.on_pick:
             self.on_pick(self.page, area, text)
 
+    def page_point(self, event):
+        """The point on the PDF page (unrotated coordinates) under a mouse event."""
+        left, top = self.offset
+        x, y = self.canvas.canvasx(event.x) - left, self.canvas.canvasy(event.y) - top
+        return pymupdf.Point(x, y) * ~(self.document[self.page].rotation_matrix * pymupdf.Matrix(self.scale, self.scale))
+
+    def _menu(self, event):
+        if self.document is None or not self.on_menu:
+            return
+        page = self.document[self.page]
+        point = self.page_point(event)
+        words = [word for word in page.get_text("words") if pymupdf.Rect(word[:4]).contains(point)]
+        if not words:
+            return
+        word = words[0]
+        # the whole run of words on that line that touch each other (e.g. "1.234,56 EUR" or "RE-2026-001")
+        line = sorted((w for w in page.get_text("words") if (w[5], w[6]) == (word[5], word[6])), key=lambda w: w[0])
+        self.on_menu(event, self.page, word[4], pymupdf.Rect(word[:4]), " ".join(w[4] for w in line))
+
+    @staticmethod
+    def label_near(page, area):
+        """Words that name a value: the words to the left on the same line, else the line just above it."""
+        words = page.get_text("words")
+        middle = (area.y0 + area.y1) / 2
+        left = [w for w in words if w[1] <= middle <= w[3] and w[2] <= area.x0 + 1]
+        left.sort(key=lambda w: w[0])
+        if left:
+            run = [left[-1]]
+            for word in reversed(left[:-1]):  # stop at a wide gap: that is another column
+                if run[0][0] - word[2] > 40:
+                    break
+                run.insert(0, word)
+            return " ".join(w[4] for w in run[-4:]).rstrip(":：#").strip()
+        above = [w for w in words if w[3] <= area.y0 + 1 and w[2] >= area.x0 - 5 and w[0] <= area.x1 + 5]
+        if not above:
+            return ""
+        bottom = max(w[3] for w in above)
+        line = sorted((w for w in above if abs(w[3] - bottom) < 3), key=lambda w: w[0])
+        return " ".join(w[4] for w in line[-4:]).rstrip(":：#").strip()
+
     @staticmethod
     def words_in(page, area):
         """Words whose middle lies inside the box, in reading order (OCR text is not available here)."""
         words = [word for word in page.get_text("words") if pymupdf.Rect(word[:4]).intersects(area)
                  and area.contains(pymupdf.Point((word[0] + word[2]) / 2, (word[1] + word[3]) / 2))]
         words.sort(key=lambda word: (word[5], word[6], word[7]))
-        return " ".join(word[4] for word in words)
+        # Some PDFs print the same text twice on the same spot (fake bold, shadow): keep one copy.
+        kept = []
+        for word in words:
+            if any(word[4] == other[4] and abs(word[0] - other[0]) < 2 and abs(word[1] - other[1]) < 2 for other in kept):
+                continue
+            kept.append(word)
+        return " ".join(word[4] for word in kept)
 
     def _closed(self, event):
         if event.widget is self and self.document is not None:

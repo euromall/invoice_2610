@@ -116,7 +116,30 @@ def label_before(text, start):
     return " ".join(words[-3:])
 
 
-def find_label(text, spellings, last=False):
+FIELD_WORDS = {
+    "date": ("datum", "date", "rechnungsdatum", "belegdatum", "ausgestellt", "invoice date", "issued", "vom"),
+    "total": ("summe", "gesamt", "total", "betrag", "brutto", "zahlbetrag", "endbetrag", "zu zahlen", "rechnungsbetrag",
+              "amount", "zahlung"),
+    "number": ("nr", "nummer", "no", "number", "rechnung", "invoice", "beleg", "id"),
+}
+BAD_WORDS = ("iban", "bic", "sparkasse", "bank", "ust", "steuer", "telefon", "fax", "kunden", "amtsgericht", "hrb",
+             "geschäftsführer", "seite", "page")
+
+
+def label_score(label, kind):
+    """Higher is better: a label that names the field beats one from the footer (bank, tax office, ...)."""
+    words = label.casefold()
+    score = 2 * sum(1 for word in FIELD_WORDS.get(kind, ()) if word in words)
+    if "|" in label or any(word in words for word in BAD_WORDS):
+        score -= 3
+    if kind == "number" and "kunden" in words:
+        score -= 3
+    return score
+
+
+def find_label(text, spellings, last=False, kind="", check=None):
+    """The words in front of the value. With kind/check: every place the value appears is tried, labels that name
+    the field are preferred, and a label is only taken when reading the text with it gives the value back."""
     hits = []
     for spelling in spellings:
         for match in re.finditer(rf"(?<![\d.,]){re.escape(spelling)}(?![\d])", text):
@@ -126,7 +149,15 @@ def find_label(text, spellings, last=False):
     if not hits:
         return ""
     hits.sort()
-    return hits[-1][1] if last else hits[0][1]
+    if not kind:
+        return hits[-1][1] if last else hits[0][1]
+    ordered = sorted(hits, key=lambda hit: (-label_score(hit[1], kind), -hit[0] if last else hit[0]))
+    for _, label in ordered:
+        if label_score(label, kind) < 0:
+            continue
+        if check is None or check(label):
+            return label
+    return ""
 
 
 def pick_marker(text, seller):
@@ -139,30 +170,56 @@ def pick_marker(text, seller):
     return ""
 
 
-def learn(text, filename, fields, number):
-    """Remember the layout of one corrected invoice. Returns the stored entry or None (and why)."""
+def learn(text, filename, fields, number, anchors=None, save=True):
+    """Remember the layout of one corrected invoice. Returns the stored entry or None (and why).
+
+    anchors: {"date"|"total"|"number": label} — words next to the box the user dragged on the page; tried first.
+    save=False only works out the entry (to show it for confirmation); store it with remember(entry)."""
     issued, seller, total = fields
     marker = pick_marker(text, seller)
     if not marker:
         return None, "업체명이 PDF 안에 그대로 적혀 있지 않아 양식을 배우지 못했어요. PDF에 보이는 업체명으로 적어 주세요."
+    anchors = anchors or {}
     labels = {}
-    if issued:
-        labels["date"] = find_label(text, date_spellings(issued))
     amount_text, _, currency = total.partition(" ")
     amount = parse_amount(amount_text) if amount_text else None
-    if amount is not None:
-        labels["total"] = find_label(text, amount_spellings(abs(amount)), last=True)
-    if number:
-        labels["number"] = find_label(text, {number})
+
+    def gives_date(label):
+        return parse_date(value_after(text, label, DATE_TOKEN)) == issued
+
+    def gives_total(label):
+        token = value_after(text, label, AMOUNT_TOKEN)
+        found = parse_amount(token) if token else None
+        return found is not None and abs(found) == abs(amount)
+
+    def gives_number(label):
+        return value_after(text, label, r"[\w/-]*\d[\w/-]*") == number
+
+    checks = {"date": gives_date, "total": gives_total, "number": gives_number}
+    wanted = {"date": issued and date_spellings(issued), "total": amount is not None and amount_spellings(abs(amount)),
+              "number": number and {number}}
+    for kind, spellings in wanted.items():
+        if not spellings:
+            continue
+        anchor = anchors.get(kind, "")
+        if anchor and checks[kind](anchor):
+            labels[kind] = anchor
+            continue
+        labels[kind] = find_label(text, spellings, last=kind == "total", kind=kind, check=checks[kind])
     labels = {key: value for key, value in labels.items() if value}
     if not labels:
-        return None, "PDF 안에서 입력한 값을 찾지 못해 양식을 배우지 못했어요."
+        return None, "PDF 안에서 입력한 값 옆의 항목 이름을 확실히 찾지 못해 양식을 배우지 않았어요."
     entry = {"marker": marker, "seller": seller, "currency": currency or "EUR", "labels": labels,
              "learned_from": filename, "at": date.today().isoformat()}
-    formats = [item for item in load_formats() if item["marker"].casefold() != marker.casefold()]
+    if save:
+        remember(entry)
+    return entry, ""
+
+
+def remember(entry):
+    formats = [item for item in load_formats() if item["marker"].casefold() != entry["marker"].casefold()]
     formats.append(entry)
     save_formats(formats)
-    return entry, ""
 
 
 def label_pattern(label):

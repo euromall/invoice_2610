@@ -471,5 +471,77 @@ def run():
     print("PASS: v1.12 amount input, value picking, DHL total, mail search, account order, Amazon sellers, print bundle, refunds, v1.11 final check, v1.10 statement text, sort, reasons, v1.9 recurring rules, unmatched evidence, plain numbers, v1.8 copy import mode, v1.7.1 combined PDF split, v1.7 work folder import, v1.6 learned seller layouts, v1.5 Markdown follows PDF, ZIP parts, v1.4.1 duplicate invoices, v1.4 statement filing, v1.2.2 numbered PDF statement, v1.2 required fields and invoice check, v1.1.1 file names, total labels, import errors, encodings, XRechnung/ZUGFeRD, seller patterns, edits file")
 
 
+def run_v113():
+    """v1.13: learning picks the right labels, file-name numbers, field guess from labels, duplicate words."""
+    import learned_formats
+    from invoice_renamer import field_from_label, number_from_filename, value_problems
+    from pdf_view import PdfView
+
+    with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
+        root = Path(scratch)
+        # an advisor invoice with a bank footer: the old learner took ‘Umsatzsteuer | Sparkasse’ as the number label
+        text = ("Ast Steuerberatung\nRechnung\nRechnungs-Nummer: 2026-0815\nRechnungsdatum: 03.11.2026\n"
+                "Gebühr 100,00\nUmsatzsteuer 19,00\nGesamtbetrag 119,00 EUR\n"
+                "Umsatzsteuer | Sparkasse 2026-0815 IBAN DE00 1234\nEUR Gebühr GESELLSCHAFT 119,00\n")
+        entry, reason = learned_formats.learn(text, "ast.pdf", ("2026-11-03", "Ast Steuerberatung", "119.00 EUR"), "2026-0815",
+                                              save=False)
+        check(bool(entry) and entry["labels"].get("number", "").startswith("Rechnungs"),
+              f"v1.13: number label from the invoice line {entry and entry['labels']}")
+        check("Sparkasse" not in str(entry["labels"]) and "GESELLSCHAFT" not in str(entry["labels"]),
+              f"v1.13: footer words not learned {entry['labels']}")
+        check(not learned_formats.load_formats(), "v1.13: save=False stores nothing")
+        learned_formats.remember(entry)
+        check(len(learned_formats.load_formats()) == 1, "v1.13: remember stores the entry")
+        # the anchor (words next to the dragged box) wins when it reads the value back
+        entry2, _ = learned_formats.learn(text, "ast.pdf", ("2026-11-03", "Ast Steuerberatung", "119.00 EUR"), "2026-0815",
+                                          anchors={"total": "Gesamtbetrag"}, save=False)
+        check(entry2["labels"]["total"] == "Gesamtbetrag", f"v1.13: anchor label used {entry2['labels']}")
+        entry3, _ = learned_formats.learn(text, "ast.pdf", ("2026-11-03", "Ast Steuerberatung", "119.00 EUR"), "2026-0815",
+                                          anchors={"total": "Telefon"}, save=False)
+        check(entry3["labels"]["total"] != "Telefon", "v1.13: an anchor that does not give the value back is ignored")
+
+        # invoice number from the original file name, only when printed in the document
+        check(number_from_filename(Path("RE_612088028.pdf"), "Rechnungsnummer 612088028") == "612088028", "v1.13: number from file name")
+        check(number_from_filename(Path("RE_612088028.pdf"), "nothing here") == "", "v1.13: file-name number must be printed")
+        check(number_from_filename(Path("2026-07-31_Shop.pdf"), "Datum 2026-07-31") == "", "v1.13: dates are not numbers")
+        pdf = root / "dm_612088028.pdf"
+        with pymupdf.open() as document:
+            document.new_page().insert_text((60, 80), "dm-drogerie markt\nDatum 05.11.2026\nSumme 12,34 EUR\nBeleg 612088028")
+            document.save(pdf)
+        info = {}
+        fields, _, number, _ = read_invoice_details(pdf, info)
+        check(number == "612088028" and info["checks"].get("인보이스 번호") == "파일명에서 가져옴",
+              f"v1.13: read number from file name {number} {info.get('checks')}")
+
+        # which field a picked value belongs to, from the words next to it
+        check(field_from_label("Rechnungs-Nummer", "612088028") == "인보이스 번호", "v1.13: label → number")
+        check(field_from_label("Rechnungsdatum", "03.11.2026") == "발행일", "v1.13: label → date")
+        check(field_from_label("Gesamtbetrag", "119,00 EUR") == "총액", "v1.13: label → total")
+        check(field_from_label("Rechnungsdatum", "abc") == "", "v1.13: date label but no date picked")
+        check(field_from_label("IBAN", "DE00") == "", "v1.13: footer label names no field")
+
+        # values not printed in the PDF are flagged ‘확인 필요’
+        problems = value_problems(pdf, {"발행일": "2026-11-05", "총액": "99.00 EUR", "인보이스 번호": "612088028", "업체명": "dm"})
+        check(problems.get("총액") and "발행일" not in problems and "인보이스 번호" not in problems,
+              f"v1.13: value check {problems}")
+
+        # the same word printed twice on top of itself is picked once
+        doubled = root / "doubled.pdf"
+        with pymupdf.open() as document:
+            page = document.new_page()
+            page.insert_text((60, 80), "Nr")
+            page.insert_text((90, 80), "612088028")
+            page.insert_text((90.4, 80.3), "612088028")
+            document.save(doubled)
+        with pymupdf.open(doubled) as document:
+            picked = PdfView.words_in(document[0], pymupdf.Rect(0, 0, 400, 120))
+            label = PdfView.label_near(document[0], next(pymupdf.Rect(w[:4]) for w in document[0].get_text("words")
+                                                         if w[4] == "612088028"))
+        check(picked == "Nr 612088028", f"v1.13: duplicate words dropped ‘{picked}’")
+        check(label == "Nr", f"v1.13: label next to the value ‘{label}’")
+    print("PASS: v1.13 learning labels, file-name number, field guess, value check, duplicate words")
+
+
 if __name__ == "__main__":
     run()
+    run_v113()

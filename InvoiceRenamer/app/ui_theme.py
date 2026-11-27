@@ -693,6 +693,101 @@ def show_notice(parent, message, title="안내", kind="info", action=None):
     return card
 
 
+def ask_yes_no(title, message, parent=None, warnings=(), undo=None, ok="확인", cancel="취소", choices=None):
+    """Confirmation card in the middle of the main window (replaces the system yes/no box).
+
+    message: what will happen; warnings: lines shown in amber ("주의"); undo: True / False / text about undoing.
+    choices: optional [(label, value), ...] radio buttons; then the chosen value is returned instead of True.
+    Returns False (or None with choices) when cancelled. Enter = 확인, Esc = 취소."""
+    root = (parent or tk._default_root).winfo_toplevel()
+    accent = COLORS["amber"] if warnings else COLORS["blue"]
+    card = tk.Frame(root, background=COLORS["panel"], highlightthickness=1, highlightbackground="#9aa3ad",
+                    highlightcolor="#9aa3ad")
+    tk.Frame(card, background=accent, width=6).pack(side="left", fill="y")
+    body = tk.Frame(card, background=COLORS["panel"], padx=18, pady=14)
+    body.pack(side="left", fill="both", expand=True)
+    tk.Label(body, text=title, font=FONT_BOLD, background=COLORS["panel"], foreground=accent, anchor="w").pack(fill="x")
+    tk.Label(body, text=message, font=FONT, background=COLORS["panel"], foreground=COLORS["ink"],
+             wraplength=520, justify="left", anchor="w").pack(fill="x", pady=(6, 8))
+    picked = tk.StringVar(value=str(choices[0][1]) if choices else "")
+    if choices:
+        for label, value in choices:
+            ttk.Radiobutton(body, text=label, value=str(value), variable=picked).pack(anchor="w")
+    if warnings:
+        box = tk.Frame(body, background="#fff6e5", padx=10, pady=6)
+        box.pack(fill="x", pady=(4, 8))
+        tk.Label(box, text="주의", font=FONT_BOLD, background="#fff6e5", foreground=COLORS["amber"], anchor="w").pack(fill="x")
+        for line in warnings:
+            tk.Label(box, text=f"• {line}", font=FONT_SMALL, background="#fff6e5", foreground=COLORS["ink"],
+                     wraplength=500, justify="left", anchor="w").pack(fill="x")
+    if undo is not None:
+        text = undo if isinstance(undo, str) else ("나중에 되돌릴 수 있어요." if undo else "되돌릴 수 없어요.")
+        tk.Label(body, text=text, font=FONT_SMALL, background=COLORS["panel"], foreground=COLORS["muted"],
+                 anchor="w").pack(fill="x", pady=(0, 8))
+    answer = {"value": None}
+    done = tk.BooleanVar(value=False)
+    previous_grab = root.grab_current()
+    previous = root.focus_get()
+
+    def finish(value):
+        answer["value"] = value
+        done.set(True)
+
+    buttons = tk.Frame(body, background=COLORS["panel"])
+    buttons.pack(anchor="e")
+    ttk.Button(buttons, text=cancel, command=lambda: finish(False)).pack(side="left", padx=(0, 6))
+    ok_button = ttk.Button(buttons, text=ok, style="Primary.TButton", command=lambda: finish(True))
+    ok_button.pack(side="left")
+    card.place(relx=0.5, rely=0.42, anchor="center")
+    card.lift()
+    for widget in (card, body, ok_button):
+        widget.bind("<Return>", lambda _event: finish(True))
+        widget.bind("<Escape>", lambda _event: finish(False))
+    card.after_idle(ok_button.focus_set)
+    try:
+        card.grab_set()
+    except tk.TclError:
+        pass
+    card.wait_variable(done)
+    try:
+        card.grab_release()
+    except tk.TclError:
+        pass
+    card.destroy()
+    try:
+        if previous_grab is not None and previous_grab.winfo_exists():
+            previous_grab.grab_set()
+        if previous is not None and previous.winfo_exists():
+            previous.focus_set()
+    except (tk.TclError, KeyError):
+        pass
+    if choices:
+        return picked.get() if answer["value"] else None
+    return bool(answer["value"])
+
+
+def show_toast(parent, message, action=None, seconds=6):
+    """A short note at the bottom of the window that goes away by itself; action=(label, command) e.g. 되돌리기."""
+    root = parent.winfo_toplevel()
+    for old in [child for child in root.place_slaves() if getattr(child, "_toast", False)]:
+        old.destroy()
+    bar = tk.Frame(root, background="#24313f", padx=14, pady=8)
+    bar._toast = True
+    tk.Label(bar, text=message, background="#24313f", foreground="white", font=FONT).pack(side="left")
+    if action:
+        label, command = action
+
+        def run():
+            bar.destroy()
+            command()
+        tk.Button(bar, text=label, command=run, relief="flat", background="#3b82f6", foreground="white",
+                  activebackground="#2563eb", activeforeground="white", padx=10).pack(side="left", padx=(12, 0))
+    bar.place(relx=0.5, rely=0.96, anchor="s")
+    bar.lift()
+    bar.after(seconds * 1000, lambda: bar.winfo_exists() and bar.destroy())
+    return bar
+
+
 # Tables: sort by header click, alignment and widths the user sets are remembered ---------------
 RIGHT_HEADS = ("금액", "총액", "합계", "차액", "잔액", "Betrag")
 CENTER_HEADS = ("번호", "거래일", "발행일", "날짜", "월", "거래번호", "기간", "건수", "개수")

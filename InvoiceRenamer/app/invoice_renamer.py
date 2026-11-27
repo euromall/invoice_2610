@@ -18,7 +18,7 @@ import pymupdf
 
 import learned_formats
 from release_info import VERSION, export_diagnostics, record_error
-from ui_theme import COLORS, FONT_BOLD, Busy, InlineDialog, resort, show_notice, table_tools
+from ui_theme import COLORS, FONT_BOLD, Busy, InlineDialog, Tooltip, ask_yes_no, resort, show_notice, show_toast, table_tools
 
 
 DATE = r"(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})"
@@ -276,7 +276,7 @@ def text_layer(path):
         return ""
 
 
-INVOICE_NUMBER = (r"(?im)\b(?:Rechnungsnummer|Rechnungs-?Nr\.?|Rechnung\s+Nr\.?|Beleg-?Nr\.?|Invoice\s+(?:No\.?|Number|#)|인보이스\s*번호)"
+INVOICE_NUMBER = (r"(?im)\b(?:Rechnungsnummer|Rechnungs-Nummer|Rechnungs-?Nr\.?|Rechnung\s+Nr\.?|Beleg-?Nr\.?|Invoice\s+(?:No\.?|Number|#)|인보이스\s*번호)"
                   r"\s*[:#]?[ \t]*(?:\n[ \t]*)?([\w/-]*\d[\w/-]*)\b")
 
 
@@ -358,18 +358,58 @@ def read_invoice_details(path, info=None):
         correction |= bool(re.search(r"(?im)^\s*(?:Gutschrift|Stornorechnung|Credit Note)\b", layout))
     override = load_invoice_edits().get(digest(path))
     number = unique(numbers)
+    checks = {}  # field -> why the value needs a look (shown as ‘확인 필요’)
+    if len(set(numbers)) > 1:
+        checks["인보이스 번호"] = f"번호 후보 {len(set(numbers))}개 중 고르지 못함"
+    before = fields, number
     fields, number, learned = learned_formats.apply(layouts[1] + "\n" + layouts[0], fields, number)
     if learned:
         info["learned"] = learned
         info["invoice_like"] = True
+        for index, name in enumerate(("발행일", "업체명", "총액")):
+            if fields[index] and fields[index] != before[0][index]:
+                checks[name] = f"배운 양식 ‘{learned}’로 읽음"
+        if number and number != before[1]:
+            checks["인보이스 번호"] = f"배운 양식 ‘{learned}’로 읽음"
     if not fields[0]:
         fields = (date_from_filename(path), *fields[1:])
+        if fields[0]:
+            checks["발행일"] = "파일명에서 가져옴"
+    if not number:
+        number = number_from_filename(path, text)
+        if number:
+            checks["인보이스 번호"] = "파일명에서 가져옴"
     if override:
         fields, scan_note = tuple(override[:3]), ""
         info["invoice_like"] = True
         if len(override) > 3:
             number = override[3]
+        checks = {}
+    info["checks"] = checks
     return fields, scan_note, number, correction
+
+
+def number_from_filename(path, text):
+    """An invoice number in the original file name that is also printed in the document (e.g. ‘RE_612088028.pdf’).
+
+    Only numbers with at least 5 characters and a digit that appear in the text count; one printed right after an
+    invoice-number label wins. Dates in the name (2026-07-31, 20260731) are skipped."""
+    stem = Path(path).stem
+    found = []
+    for token in re.findall(r"[A-Za-z]*\d[\w/-]*", stem):
+        token = token.strip("_-")
+        for part in dict.fromkeys((token, *re.split(r"[_]", token))):
+            if len(part) < 5 or not re.search(r"\d", part) or re.fullmatch(r"20\d{2}-?\d{2}-?\d{2}", part):
+                continue
+            if re.search(rf"(?<![\w]){re.escape(part)}(?![\w])", text):
+                found.append(part)
+    if not found:
+        return ""
+    for part in found:
+        if re.search(rf"(?i)(?:nummer|nr\.?|no\.?|number|#)\s*[:#]?\s*{re.escape(part)}", text):
+            return part
+    found = list(dict.fromkeys(found))
+    return found[0] if len(found) == 1 else ""
 
 
 def read_invoice(path):
@@ -539,11 +579,58 @@ def make_copyable(text):
     text.bind("<Button-3>", lambda event: menu.tk_popup(event.x_root, event.y_root))
 
 
-def show_source_locations(parent, path, fields, on_value=None):
+FIELD_NAMES = ("발행일", "업체명", "총액", "인보이스 번호")
+REQUIRED_FIELDS = ("발행일", "업체명", "총액")
+LEARN_KEYS = {"발행일": "date", "총액": "total", "인보이스 번호": "number"}
+
+
+def field_from_label(label, text):
+    """The field a picked value probably belongs to, from the words next to it (‘Rechnungs-Nummer’ → 인보이스 번호).
+
+    '' when the words do not clearly name one, or the picked text does not look like that field (no date, no amount)."""
+    if not label:
+        return ""
+    scores = {name: learned_formats.label_score(label, key) for name, key in LEARN_KEYS.items()}
+    best = max(scores, key=scores.get)  # ties: 발행일, 총액 before 번호 (‘Rechnungsdatum’ also holds ‘rechnung’)
+    if scores[best] < 2:
+        return ""
+    if best in ("발행일", "총액") and not pick_value(best, text):
+        return ""
+    return best
+
+
+def value_problems(path, values):
+    """{field: why} for values that are not printed in the PDF text layer (fast check without OCR)."""
+    text = " ".join(text_layer(path).split()).casefold()
+    if len(re.findall(r"\w", text)) < 30:
+        return {}
+    problems = {}
+    for name, kind in (("발행일", "발행일"), ("총액", "총액"), ("인보이스 번호", "인보이스 번호")):
+        value = (values.get(name) or "").strip()
+        if not value:
+            continue
+        try:
+            terms = source_search_terms(value, kind)
+        except (ValueError, ArithmeticError):
+            problems[name] = "값의 형식을 알아보지 못함"
+            continue
+        if not any(" ".join(term.split()).casefold() in text for term in terms if term):
+            problems[name] = "원본에서 이 값을 찾지 못함"
+    seller = (values.get("업체명") or "").strip()
+    first = next((word for word in re.findall(r"\w{3,}", seller)), "")
+    if first and first.casefold() not in text:
+        problems["업체명"] = "원본에 같은 이름이 없음 (파일명·배운 이름일 수 있음)"
+    return problems
+
+
+def show_source_locations(parent, path, fields, on_value=None, start=None, on_save=None, anchors=None, status=None):
     """Where a value was read in the original, with page buttons and zoom.
 
-    on_value(kind, value): when given, a box to type or pick (drag a box on the page) the value of the chosen
-    field; ‘편집 칸에 넣기’ hands it back to the edit form."""
+    on_value(kind, value): when given, a box to type or pick (drag a box on the page, or right-click a word) the value
+    of the chosen field; ‘편집 칸에 넣기’ hands it back to the edit form and moves on to the next missing field.
+    start: the field shown first (default: the first missing one). on_save: adds ‘저장하고 닫기’ (saves the edit form).
+    anchors: dict that receives {"date"|"total"|"number": words next to the picked box} for learning the layout.
+    status(field) -> short state such as ‘누락’, ‘확인 필요’, ‘확인함’ shown in the field list."""
     from pdf_view import PdfView
 
     window = InlineDialog(parent)
@@ -551,11 +638,46 @@ def show_source_locations(parent, path, fields, on_value=None):
     window.geometry("1000x720")
     window.transient(parent)
     window.grab_set()
+
+    def state(name):
+        if status:
+            return status(name)
+        return "" if (fields.get(name) or "").strip() else "누락"
+
+    def missing(name):
+        return not (fields.get(name) or "").strip()
+
+    names = list(fields)
+    if on_value:  # missing fields first, so the list doubles as a to-do list
+        order = list(names)
+        names.sort(key=lambda name: (not missing(name), name not in REQUIRED_FIELDS, order.index(name)))
     controls = ttk.Frame(window, padding=(10, 8))
     controls.pack(fill="x")
-    choice = ttk.Combobox(controls, values=list(fields), state="readonly", width=13)
+    choice = ttk.Combobox(controls, state="readonly", width=22)
     choice.pack(side="left")
-    choice.current(0)
+
+    def labels():
+        choice.configure(values=[f"{name} · {state(name)}" if state(name) else name for name in names])
+
+    chosen = [names[0]]  # the field being filled (the list text changes with its state, so keep the name here)
+
+    def kind_now():
+        return chosen[0]
+
+    def select(name):
+        chosen[0] = name
+        labels()
+        choice.current(names.index(name))
+
+    def listed(_event=None):
+        index = choice.current()
+        if 0 <= index < len(names):
+            select(names[index])
+        refresh()
+
+    first = start if start in names else next((name for name in names if missing(name)), names[0]) if on_value else (
+        start if start in names else names[0])
+    select(first)
     display = tk.StringVar()
     hits = []
     position = 0
@@ -563,61 +685,145 @@ def show_source_locations(parent, path, fields, on_value=None):
     value_box = ttk.Entry(inputs, width=40)
     money_box = MoneyEntry(inputs)
     picked = tk.StringVar()
+    last_pick = {}  # field -> (value put in the box, words next to it)
+
+    def box_value(kind):
+        return money_box.get() if kind == "총액" else value_box.get().strip()
+
+    def fill_box(kind, value):
+        if kind == "총액":
+            money_box.set(value)
+        else:
+            value_box.delete(0, "end")
+            value_box.insert(0, value)
 
     def picked_text(page, area, text):
-        kind = choice.get()
-        value = pick_value(kind, text)
         if not text:
             picked.set("상자 안에서 글자를 찾지 못했어요. 스캔 문서면 직접 적어 주세요.")
             return
+        kind = kind_now()
+        label = PdfView.label_near(view.document[page], area) if view.document is not None else ""
+        note = ""
+        guess = field_from_label(label, text)
+        if on_value and guess and guess != kind:
+            fits = bool(pick_value(kind, text)) if kind in ("발행일", "총액") else True
+            if kind == "업체명":
+                note = f" · 옆 글자 ‘{label}’를 보면 ‘{guess}’ 같아요. 맞으면 위 목록에서 바꾸세요."
+            elif not fits or learned_formats.label_score(label, LEARN_KEYS[kind]) <= 0:
+                note = f" · 옆 글자 ‘{label}’를 보고 항목을 ‘{kind}’에서 ‘{guess}’(으)로 바꿨어요."
+                kind = guess
+                select(kind)
+                show_input()
+        value = pick_value(kind, text)
         picked.set(f"고른 글자: {text[:80]}")
         if not on_value:
             return
-        if kind == "총액":
-            money_box.set(value or text)
+        value = value or text
+        fill_box(kind, value)
+        last_pick[kind] = (box_value(kind), label)
+        if kind in ("발행일", "총액") and not pick_value(kind, text):
+            display.set(f"고른 글자에서 {kind}을(를) 알아보지 못했어요. 칸의 값을 고쳐 적거나 다시 골라 주세요." + note)
         else:
-            value_box.delete(0, "end")
-            value_box.insert(0, value or text)
+            display.set(f"‘{kind}’ 칸에 넣을 값: {box_value(kind) or value}"
+                        + (f" (옆 글자 ‘{label}’)" if label else "") + " · ‘편집 칸에 넣기’를 누르세요." + note)
 
-    view = PdfView(window, on_pick=picked_text)
+    def word_menu(event, page, word, rect, line):
+        menu = tk.Menu(window, tearoff=False)
+        menu.add_command(label=f"고른 글자: {word[:40]}", state="disabled")
+        if on_value:
+            put_menu = tk.Menu(menu, tearoff=False)
+            label = PdfView.label_near(view.document[page], rect)
+            for name in names:
+                if name in ("발행일", "총액"):
+                    value = pick_value(name, line) or pick_value(name, word)
+                elif name == "업체명":
+                    value = line
+                else:
+                    value = word.strip(":#")
+                if not value:
+                    put_menu.add_command(label=f"{name}: (알아보지 못함)", state="disabled")
+                    continue
+
+                def put(name=name, value=value):
+                    select(name)
+                    show_input()
+                    fill_box(name, value)
+                    last_pick[name] = (box_value(name), label)
+                    hand_over()
+
+                put_menu.add_command(label=f"{name}: {value[:40]}", command=put)
+            menu.add_cascade(label="이 값으로 넣기", menu=put_menu)
+        menu.add_separator()
+        for text, value in (("글자 복사", word), ("줄 전체 복사", line)):
+            menu.add_command(label=text, command=lambda value=value: (window.clipboard_clear(), window.clipboard_append(value)))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    view = PdfView(window, on_pick=picked_text, on_menu=word_menu)
 
     def show_input():
         if not on_value:
             return
-        kind = choice.get()
+        kind = kind_now()
         value_box.pack_forget()
         money_box.pack_forget()
-        if kind == "총액":
-            money_box.set(fields.get(kind, ""))
-            money_box.pack(side="left", after=input_label)
-        else:
-            value_box.delete(0, "end")
-            value_box.insert(0, fields.get(kind, ""))
-            value_box.pack(side="left", after=input_label)
+        fill_box(kind, fields.get(kind, ""))
+        (money_box if kind == "총액" else value_box).pack(side="left", after=input_label)
+        input_label.configure(text=kind)
 
-    def hand_over():
-        kind = choice.get()
-        value = money_box.get() if kind == "총액" else value_box.get().strip()
+    def hand_over(advance=True):
+        kind = kind_now()
+        value = box_value(kind)
         if kind == "총액" and not value:
             show_notice(window, "총액은 숫자로 적어 주세요. 예: 7,87", kind="warn")
-            return
+            return False
         if kind == "발행일" and value and not normalized_date(value):
             value = pick_value(kind, value)
             if not value:
                 show_notice(window, "발행일은 2026-07-31 또는 31.07.2026처럼 적어 주세요.", kind="warn")
-                return
-            value_box.delete(0, "end")
-            value_box.insert(0, value)
+                return False
+            fill_box(kind, value)
         fields[kind] = value
         on_value(kind, value)
-        picked.set(f"‘{kind}’ 칸에 넣었어요: {value}")
+        pick = last_pick.pop(kind, None)
+        if anchors is not None and kind in LEARN_KEYS and pick and pick[0] == value and pick[1]:
+            anchors[LEARN_KEYS[kind]] = pick[1]
+        message = f"‘{kind}’ 칸에 넣었어요: {value}"
+        following = next((name for name in names if missing(name) and name in REQUIRED_FIELDS), "") or next(
+            (name for name in names if missing(name)), "")
+        if advance and following:
+            select(following)
+            refresh()
+            picked.set(message + f" · 다음 빈 칸: {following}")
+        else:
+            select(kind)
+            picked.set(message + (" · 필수 항목이 모두 찼어요." + (" ‘저장하고 닫기’를 누르세요." if on_save else "")
+                                  if not any(missing(name) for name in REQUIRED_FIELDS if name in names) else ""))
+        return True
+
+    def save_and_close():
+        kind = kind_now()
+        value = box_value(kind)
+        if value and value != (fields.get(kind) or "") and not hand_over(advance=False):
+            return
+        empty = [name for name in REQUIRED_FIELDS if name in names and missing(name)]
+        if empty:
+            select(empty[0])
+            refresh()
+            show_notice(window, f"아직 비어 있어요: {', '.join(empty)}. 원본에서 골라 넣은 뒤 저장하세요.", kind="warn")
+            return
+        close()
+        on_save()
 
     if on_value:
         inputs.pack(fill="x")
         input_label = ttk.Label(inputs, text="값")
         input_label.pack(side="left", padx=(0, 8))
         ttk.Button(inputs, text="편집 칸에 넣기", style="Primary.TButton", command=hand_over).pack(side="left", padx=8)
-        ttk.Label(inputs, textvariable=picked, foreground=COLORS["muted"]).pack(side="left")
+        if on_save:
+            ttk.Button(inputs, text="저장하고 닫기", command=save_and_close).pack(side="left")
+        value_box.bind("<Return>", lambda event: (hand_over(), "break")[1])
+        money_box.entry.bind("<Return>", lambda event: (hand_over(), "break")[1])
+        ttk.Label(window, textvariable=picked, foreground=COLORS["muted"], padding=(10, 0)).pack(anchor="w")
     else:
         ttk.Label(window, textvariable=picked, foreground=COLORS["muted"], padding=(10, 0)).pack(anchor="w")
     ttk.Label(window, textvariable=display, padding=(10, 0, 10, 4)).pack(anchor="w")
@@ -631,9 +837,13 @@ def show_source_locations(parent, path, fields, on_value=None):
 
     def show(delta=0):
         nonlocal position
+        kind = kind_now()
         if not hits:
-            display.set("원본에서 이 값을 찾지 못했어요. 쪽을 넘겨 보며 값을 마우스로 끌어 고르거나 직접 적으세요."
-                        if on_value else "원본에서 같은 표기를 찾지 못했어요. 쪽을 넘겨 확인하세요.")
+            if on_value and missing(kind):
+                display.set(f"‘{kind}’ 값이 아직 없어요. 쪽을 넘겨 보며 값을 마우스로 끌어 고르거나, 글자를 오른쪽 클릭하거나, 직접 적으세요.")
+            else:
+                display.set("원본에서 이 값을 찾지 못했어요. 쪽을 넘겨 보며 값을 마우스로 끌어 고르거나 직접 적으세요."
+                            if on_value else "원본에서 같은 표기를 찾지 못했어요. 쪽을 넘겨 확인하세요.")
             if view.path != path:
                 view.load(path, 0)
             else:
@@ -649,20 +859,21 @@ def show_source_locations(parent, path, fields, on_value=None):
 
     def refresh(_event=None):
         nonlocal hits, position
-        kind = choice.get()
+        kind = kind_now()
         value = fields.get(kind)
         position = 0
         show_input()
         try:
             hits = source_locations(path, value, kind) if value else []
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError, ValueError, RuntimeError, ArithmeticError) as error:
             hits = []
             display.set(f"원본 위치 검색 실패 · {error}")
         show()
 
     for text, callback in (("이전 위치", lambda: show(-1)), ("다음 위치", lambda: show(1)), ("PDF 열기", lambda: open_file(path))):
         ttk.Button(controls, text=text, command=callback).pack(side="left", padx=4)
-    ttk.Label(controls, text="같은 값이 여러 곳에 있으면 모두 주황 상자로 보여요.", foreground=COLORS["muted"]).pack(side="left", padx=8)
+    ttk.Label(controls, text="끌어서 고르기 · 글자 오른쪽 클릭 = 넣기 메뉴" if on_value else "같은 값이 여러 곳에 있으면 모두 주황 상자로 보여요.",
+              foreground=COLORS["muted"]).pack(side="left", padx=8)
 
     def close():
         window.destroy()
@@ -672,8 +883,125 @@ def show_source_locations(parent, path, fields, on_value=None):
             parent.after_idle(parent.grab_set)
 
     window.protocol("WM_DELETE_WINDOW", close)
-    choice.bind("<<ComboboxSelected>>", refresh)
+    choice.bind("<<ComboboxSelected>>", listed)
     refresh()
+    return window
+
+
+class ValueForm:
+    """The four value rows of an edit form: box, state (누락 / 확인 필요 / 확인함) and a ‘고르기’ button each.
+
+    ‘고르기’ (or a double-click on an empty box) opens the original on that field; picked values come back here.
+    checks: {field: why it needs a look} from reading. anchors: learned-label hints collected while picking."""
+
+    LABELS = ("발행일 (YYYY-MM-DD)", "업체명", "총액 (숫자만, 예: 7,87)", "인보이스 번호")
+
+    def __init__(self, body, path, values, checks=None, first_row=1, on_save=None, number_label="인보이스 번호 (선택)"):
+        self.body, self.path, self.on_save = body, Path(path), on_save
+        self.checked = set()
+        self.anchors = {}
+        self.checks = dict(checks or {})
+        self.entries = []
+        self.states = []
+        pickable = self.path.suffix.lower() != ".xml"
+        for offset, (label, value) in enumerate(zip((*self.LABELS[:3], number_label), values)):
+            row = first_row + offset
+            name = FIELD_NAMES[offset]
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
+            entry = MoneyEntry(body, value, width=30) if offset == 2 else ttk.Entry(body, width=40)
+            if offset != 2:
+                entry.insert(0, value)
+            entry.grid(row=row, column=1, sticky="w")
+            box = entry.entry if offset == 2 else entry
+            box.bind("<KeyRelease>", lambda event, name=name: self.typed(name), add="+")
+            if pickable:
+                box.bind("<Double-Button-1>", lambda event, name=name: self.pick(name) if not self.value(name) else None,
+                         add="+")
+            mark = ttk.Label(body, text="", font=FONT_BOLD, width=11)
+            mark.grid(row=row, column=2, sticky="w", padx=(8, 4))
+            Tooltip(mark, lambda name=name: self.reason(name))
+            if pickable:
+                ttk.Button(body, text="고르기", style="Small.TButton", command=lambda name=name: self.pick(name)).grid(
+                    row=row, column=3, sticky="w")
+            self.entries.append(entry)
+            self.states.append(mark)
+        if pickable:
+            try:
+                for name, why in value_problems(self.path, self.values()).items():
+                    self.checks.setdefault(name, why)
+            except (OSError, RuntimeError, ValueError) as error:
+                record_error("value_check", error)
+        self.update()
+
+    def value(self, name):
+        entry = self.entries[FIELD_NAMES.index(name)]
+        if name == "총액":
+            return entry.get() or entry.entry.get().strip()
+        return entry.get().strip()
+
+    def values(self):
+        return {name: self.value(name) for name in FIELD_NAMES}
+
+    def raw(self):
+        """(발행일, 업체명, 총액, 번호) as typed; 총액 as ‘7.87 EUR’ or '' when not a number."""
+        return tuple(entry.get().strip() for entry in self.entries)
+
+    def state(self, name):
+        if not self.value(name):
+            return "비어 있음" if name == "인보이스 번호" else "누락"
+        if name in self.checked:
+            return "확인함"
+        if name in self.checks:
+            return "확인 필요"
+        return ""
+
+    def reason(self, name):
+        state = self.state(name)
+        if state == "누락":
+            return "필수 항목이 비어 있어요. ‘고르기’를 누르거나 빈 칸을 더블클릭해 원본에서 골라요."
+        if state == "비어 있음":
+            return "번호가 없어요. 250€ 넘는 인보이스는 번호가 필요해요."
+        if state == "확인 필요":
+            return f"확인 필요: {self.checks[name]}. 맞으면 그대로 두고, 아니면 ‘고르기’로 원본에서 골라요."
+        if state == "확인함":
+            return "직접 고르거나 고친 값이에요."
+        return "자동으로 읽은 값이에요."
+
+    def update(self):
+        colours = {"누락": COLORS["red"], "비어 있음": COLORS["muted"], "확인 필요": COLORS["amber"], "확인함": COLORS["green"]}
+        for name, mark in zip(FIELD_NAMES, self.states):
+            state = self.state(name)
+            mark.configure(text=("✓ " if state == "확인함" else "● " if state else "") + state,
+                           foreground=colours.get(state, COLORS["muted"]))
+
+    def typed(self, name):
+        self.checked.add(name)
+        self.update()
+
+    def put(self, name, value):
+        entry = self.entries[FIELD_NAMES.index(name)]
+        if name == "총액":
+            entry.set(value)
+        else:
+            entry.delete(0, "end")
+            entry.insert(0, value)
+        self.checked.add(name)
+        self.update()
+
+    def pick(self, start=None):
+        """Open the original on one field (default: the first missing one)."""
+        return show_source_locations(self.dialog(), self.path, self.values(),
+                                     on_value=self.put, start=start, on_save=self.on_save, anchors=self.anchors,
+                                     status=self.state)
+
+    def dialog(self):
+        widget = self.body
+        while widget is not None and not isinstance(widget, (InlineDialog, tk.Toplevel)):
+            widget = widget.master
+        return widget or self.body.winfo_toplevel()
+
+    def first_missing(self):
+        return next((name for name in FIELD_NAMES if self.state(name) == "누락"), None)
 
 
 def markdown_value(value):
@@ -1287,6 +1615,7 @@ class App:
         self.targets = {}
         self.invoice_like = {}
         self.parts = {}  # combined PDFs: path -> page ranges of each invoice
+        self.checks = {}  # path -> {field: why it needs a look}, from reading (file name, learned layout, ...)
         self.last_moves = []
         self.inbox_mode = False
         self.folder = None
@@ -1685,6 +2014,7 @@ class App:
                 record_error("pdf_read", error)
                 fields, note, number = ("", "", ""), "PDF 읽기 실패", ""
             self.invoice_like[path] = info.get("invoice_like", True)
+            self.checks[path] = info.get("checks", {})
             if info.get("parts"):
                 self.parts[path] = info["parts"]
             else:
@@ -1717,6 +2047,9 @@ class App:
                 missing.append("인보이스 번호")
         if missing:
             return "필수 누락: " + ", ".join(missing), "bad"
+        checks = getattr(self, "checks", {}).get(path) or {}
+        if checks:
+            return "확인 필요 · " + ", ".join(f"{name} {why}" for name, why in checks.items()), "warn"
         if small:
             return "번호 없음 · 250€ 이하 소액영수증 확인", "warn"
         return "", "ok"
@@ -1902,7 +2235,7 @@ class App:
         if not selection or self.folder is None:
             self.notice("제외 폴더로 옮길 파일을 선택하세요. ‘인보이스 아님 의심’ 보기에서 고르면 편해요.")
             return
-        if not messagebox.askyesno("제외 폴더로 이동", f"선택한 파일 {len(selection)}개를 ‘{EXCLUDED_FOLDER}’ 폴더로 옮길까요?\n"
+        if not ask_yes_no("제외 폴더로 이동", f"선택한 파일 {len(selection)}개를 ‘{EXCLUDED_FOLDER}’ 폴더로 옮길까요?\n"
                                    "파일은 지워지지 않고, ‘정리 되돌리기’로 되돌릴 수 있어요.", parent=self.root):
             return
         target_folder = self.folder / EXCLUDED_FOLDER
@@ -1934,37 +2267,69 @@ class App:
         if errors:
             messagebox.showerror("이동 실패", "\n".join(errors[:8]), parent=self.root)
 
-    def learn_from(self, path, fields, number):
-        """Remember this seller's layout and re-read the other files that are still incomplete."""
+    def learn_from(self, path, fields, number, anchors=None):
+        """Remember this seller's layout and re-read the other files that are still incomplete.
+
+        anchors: {"date"|"total"|"number": words next to the box the user dragged} — the label to learn.
+        Before anything is stored the user sees which words were learned and what the other files would get."""
         self.refresh()
         if path.suffix.lower() == ".xml":
             return
         try:
             pages = list(read_pdf_pages(path))
             text = "\n".join(page[1] for page in pages) + "\n" + "\n".join(page[0] for page in pages)
-            entry, reason = learned_formats.learn(text, path.name, fields, number)
+            entry, reason = learned_formats.learn(text, path.name, fields, number, anchors=anchors, save=False)
         except (OSError, RuntimeError, ValueError) as error:
             record_error("learn_format", error)
             entry, reason = None, str(error)
         if not entry:
             self.status.set(f"수정값을 저장했어요 · {reason}")
             return
-        updated = self.reread_incomplete(entry["marker"])
         known = {"date": "발행일", "total": "총액", "number": "번호"}
-        words = " · ".join(f"{known[key]} ‘{label}’" for key, label in entry["labels"].items())
-        self.notice(f"수정값을 저장하고 ‘{entry['marker']}’ 인보이스 양식을 배웠어요.\n찾는 단어: {words}\n"
-                    f"같은 업체 파일 {updated}개를 다시 읽어 채웠어요. 다음부터 이 업체는 자동으로 읽어요.",
-                    title="양식 학습 완료")
+        words = " · ".join(f"{known[key]} 앞 ‘{label}’" for key, label in entry["labels"].items())
+        previous = learned_formats.load_formats()
+        try:
+            learned_formats.remember(entry)
+            changes = self.reread_incomplete(entry["marker"], preview=True)
+        except OSError as error:
+            record_error("learn_format", error)
+            self.status.set(f"수정값을 저장했어요 · 양식 저장 실패: {error}")
+            return
+        lines = [f"‘{entry['marker']}’ 인보이스에서 이렇게 읽을게요: {words}"]
+        warnings = []
+        if changes:
+            lines.append(f"\n같은 업체 파일 {len(changes)}개가 새로 채워져요 (‘확인 필요’로 표시):")
+            for _key, row in changes[:8]:
+                issued, seller, total = row[1]
+                lines.append(f"• {row[0].name[:46]} → {issued or '?'} · {total or '?'} · 번호 {row[3] or '-'}")
+            if len(changes) > 8:
+                lines.append(f"… 외 {len(changes) - 8}개")
+            if any(not row[1][0] or not row[1][2] for _key, row in changes):
+                warnings.append("일부 파일은 여전히 빈 칸이 있어요. 값이 이상하면 ‘배우지 않기’를 누르고 원본에서 직접 골라 주세요.")
+        else:
+            lines.append("\n지금 목록에서 새로 채워질 다른 파일은 없어요. 다음에 이 업체 인보이스가 오면 이렇게 읽어요.")
+        if not ask_yes_no("이 양식을 배울까요?", "\n".join(lines), parent=self.root, warnings=warnings,
+                          undo="나중에 ‘배운 인보이스 양식’에서 지울 수 있어요.", ok="배우기", cancel="배우지 않기"):
+            learned_formats.save_formats(previous)
+            self.status.set("수정값만 저장했어요 · 양식은 배우지 않았어요.")
+            return
+        for key, row in changes:
+            self.rows[key] = row[:4]
+            self.invoice_like[row[0]] = True
+            self.checks[row[0]] = row[4]
+        self.refresh()
+        self.status.set(f"‘{entry['marker']}’ 양식을 배웠어요 · 같은 업체 {len(changes)}개 채움(확인 필요 표시)")
 
-    def reread_incomplete(self, marker=""):
+    def reread_incomplete(self, marker="", preview=False):
         """Read again the files that still miss a required field (after a layout was learned).
 
         marker: only files whose text layer contains it are read again (the text layer is checked first
-        without OCR, which is fast); scans without a text layer are skipped. Shows progress."""
+        without OCR, which is fast); scans without a text layer are skipped. Shows progress.
+        preview=True: nothing changes; returns [(key, (path, fields, note, number, checks))] that would change."""
         todo = [(key, row) for key, row in self.rows.items() if not (all(row[1]) and row[3])]
-        updated = 0
+        changes = []
         if not todo:
-            return 0
+            return [] if preview else 0
         folded = marker.casefold()
         with Busy(self.root, "같은 업체 인보이스를 다시 읽고 있어요") as busy:
             for index, (key, (path, fields, note, number)) in enumerate(todo, 1):
@@ -1977,11 +2342,19 @@ class App:
                 except (OSError, RuntimeError, ValueError):
                     continue
                 if info.get("learned") and (new_fields, new_number) != (fields, number):
-                    self.rows[key] = (path, new_fields, new_note, new_number)
-                    self.invoice_like[path] = True
-                    updated += 1
+                    checks = dict(info.get("checks", {}))
+                    for name, old, new in zip(("발행일", "업체명", "총액"), fields, new_fields):
+                        if old != new:
+                            checks.setdefault(name, "배운 양식으로 다시 읽음")
+                    changes.append((key, (path, new_fields, new_note, new_number, checks)))
+        if preview:
+            return changes
+        for key, row in changes:
+            self.rows[key] = row[:4]
+            self.invoice_like[row[0]] = True
+            self.checks[row[0]] = row[4]
         self.refresh()
-        return updated
+        return len(changes)
 
     def manage_learned(self):
         """List of learned seller layouts; wrong ones can be deleted."""
@@ -2081,7 +2454,7 @@ class App:
     def split_combined(self, path):
         parts = self.parts[path]
         pages = ", ".join(f"{first + 1}" + (f"~{last + 1}" if last > first else "") + "쪽" for first, last in parts)
-        if not messagebox.askyesno("인보이스 나누기", (
+        if not ask_yes_no("인보이스 나누기", (
                 f"{path.name}\n이 파일에는 판매자가 다른 인보이스 {len(parts)}개가 들어 있어요 ({pages}).\n"
                 f"인보이스마다 따로 파일로 나눌까요?\n원본은 ‘제외’ 폴더에 그대로 보관해요."), parent=self.root):
             return
@@ -2115,53 +2488,40 @@ class App:
         dialog.grab_set()
         body = ttk.Frame(dialog, padding=16)
         body.pack()
-        ttk.Label(body, text=path.name).grid(row=0, columnspan=2, sticky="w", pady=(0, 8))
-        entries = []
-        for index, (label, value) in enumerate(zip(
-            ("발행일 (YYYY-MM-DD)", "업체명", "총액 (숫자만, 예: 7,87)", "인보이스 번호 (선택)"), (*fields, number)
-        ), 1):
-            ttk.Label(body, text=label).grid(row=index, column=0, sticky="w", padx=(0, 12), pady=4)
-            entry = MoneyEntry(body, value, width=30) if index == 3 else ttk.Entry(body, width=40)
-            if index != 3:
-                entry.insert(0, value)
-            entry.grid(row=index, column=1, sticky="w")
-            entries.append(entry)
+        ttk.Label(body, text=path.name).grid(row=0, columnspan=4, sticky="w", pady=(0, 8))
 
         def save():
-            values = tuple(entry.get().strip() for entry in entries)
+            values = form.raw()
             day = normalized_date(values[0]) if re.fullmatch(DATE, values[0]) else pick_value("발행일", values[0])
             if not day or not values[1] or not values[2]:
-                messagebox.showerror("입력 확인", "발행일, 업체명, 총액(숫자)을 입력하세요. 통화는 옆 칸에서 골라요(기본 EUR).", parent=dialog)
+                show_notice(dialog, "발행일, 업체명, 총액(숫자)을 입력하세요. 통화는 옆 칸에서 골라요(기본 EUR).\n"
+                                    "빨간 ‘누락’ 칸은 ‘고르기’로 원본에서 고를 수 있어요.", kind="warn")
                 return
             edited = day, values[1], values[2]
             if not proposed_name(edited):
-                messagebox.showerror("입력 확인", "파일명에 사용할 업체명을 입력하세요.", parent=dialog)
+                show_notice(dialog, "파일명에 사용할 업체명을 입력하세요.", kind="warn")
                 return
             try:
                 save_invoice_edit(path, (*edited, values[3]))
             except (OSError, ValueError) as error:
-                messagebox.showerror("수정값 저장 실패", str(error), parent=dialog)
+                show_notice(dialog, f"수정값을 저장하지 못했어요: {error}", kind="error")
                 return
             self.rows[key] = (path, edited, "", values[3])
             self.invoice_like[path] = True
+            self.checks[path] = {}
             dialog.destroy()
-            self.learn_from(path, edited, values[3])
+            self.learn_from(path, edited, values[3], anchors=form.anchors)
 
-        def put(kind, value):
-            index = {"발행일": 0, "업체명": 1, "총액": 2, "인보이스 번호": 3}[kind]
-            if index == 2:
-                entries[2].set(value)
-            else:
-                entries[index].delete(0, "end")
-                entries[index].insert(0, value)
-
-        ttk.Button(body, text="원본에서 보기·값 고르기", command=lambda: show_source_locations(
-            dialog, path, {"발행일": entries[0].get().strip(), "총액": entries[2].get() or entries[2].entry.get().strip(),
-                           "인보이스 번호": entries[3].get().strip(), "업체명": entries[1].get().strip()}, on_value=put,
-        )).grid(row=5, column=0, sticky="w", pady=(10, 0))
-        ttk.Button(body, text="저장", command=save).grid(row=5, column=1, sticky="e", pady=(10, 0))
+        form = ValueForm(body, path, (*fields, number), checks=self.checks.get(path), on_save=save)
+        buttons = ttk.Frame(body)
+        buttons.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        if path.suffix.lower() != ".xml":
+            ttk.Button(buttons, text="원본에서 보기·값 고르기", command=lambda: form.pick(form.first_missing())).pack(side="left")
+        ttk.Button(buttons, text="저장", style="Primary.TButton", command=save).pack(side="right")
+        ttk.Label(body, text="빨강 = 비어 있음 · 주황 = 확인 필요(말풍선에 이유) · 초록 = 직접 고른 값. 빈 칸을 더블클릭해도 원본이 열려요.",
+                  foreground=COLORS["muted"]).grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
         dialog.bind("<Return>", lambda event: save())
-        entries[0].focus_set()
+        form.entries[0].focus_set()
 
     def apply(self):
         changes = []
@@ -2176,7 +2536,7 @@ class App:
         prompt = f"선택한 PDF {count}개를 발행월 폴더로 옮기고 이름을 바꾼 뒤 마크다운(.md)도 함께 저장할까요?"
         if not self.by_month.get() and not self.inbox_mode:
             prompt = f"선택한 PDF {count}개의 파일명을 바꾸고 마크다운(.md)도 함께 저장할까요?"
-        if not messagebox.askyesno("PDF 정리", prompt):
+        if not ask_yes_no("PDF 정리", prompt):
             return
         errors = []
         history = []
@@ -2197,6 +2557,7 @@ class App:
                 continue
             self.rows[key] = (target, *self.rows[key][1:])
             self.invoice_like[target] = self.invoice_like.pop(path, True)
+            self.checks[target] = self.checks.pop(path, {})
             history.append((path, target, checksum))
         busy.close()
         if history:
@@ -2213,7 +2574,7 @@ class App:
         if not self.last_moves:
             self.notice("되돌릴 정리 작업이 없어요.")
             return
-        if not messagebox.askyesno("정리 되돌리기", f"마지막 작업에서 옮긴 PDF {len(self.last_moves)}개를 되돌릴까요?"):
+        if not ask_yes_no("정리 되돌리기", f"마지막 작업에서 옮긴 PDF {len(self.last_moves)}개를 되돌릴까요?"):
             return
         with Busy(self.root, "정리를 되돌리고 있어요") as busy:
             restored, failed = undo_moves(self.last_moves, busy.step)
