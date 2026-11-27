@@ -1567,7 +1567,12 @@ def program_folder():
     if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
         return sys.argv[1]
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        here = os.path.dirname(sys.executable)
+        # folder build: the program lives in <work folder>\InvoiceAuto\, the data one level up
+        parent = os.path.dirname(here)
+        if not os.path.isdir(os.path.join(here, 'Base')) and os.path.isdir(os.path.join(parent, 'Base')):
+            return parent
+        return here
     return os.getcwd()
 
 
