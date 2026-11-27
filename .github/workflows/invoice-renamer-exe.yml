@@ -31,7 +31,7 @@ jobs:
             "--noconfirm", "--windowed", "--name", "InvoiceRenamer", "--paths", "$app",
             "--hidden-import", "monthly_close", "--hidden-import", "tax_documents", "--hidden-import", "advisor_workbook",
             "--hidden-import", "workspace_backup", "--hidden-import", "release_info", "--hidden-import", "ui_shell",
-            "--hidden-import", "ui_theme", "--hidden-import", "learned_formats", "--hidden-import", "mail_link",
+            "--hidden-import", "ui_theme", "--hidden-import", "learned_formats", "--hidden-import", "mail_link", "--hidden-import", "profiles",
             "--hidden-import", "keyring.backends.Windows", "--copy-metadata", "keyring",
             "--splash", "tools\splash.png",
             "--add-data", "$app\VERSION;.", "--add-data", "$app\사용법.txt;.", "--add-data", "$app\사용법.html;.",

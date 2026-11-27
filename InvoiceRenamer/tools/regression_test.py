@@ -989,6 +989,41 @@ def run_v114_mail():
     print("PASS: v1.14 mail link (credential store, IMAP attachments unread and once, SMTP mail with ZIP)")
 
 
+def run_v114_profiles():
+    """v1.14 company profiles: own data folder per company, default company unchanged, shared learned layouts."""
+    import os
+    import profiles
+    import learned_formats
+    import invoice_renamer as ir
+    with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
+        os.environ.pop(profiles.BASE_ENV, None)
+        data = profiles.load_profiles()
+        check(data == {"active": "", "profiles": [{"id": "", "name": "기본 회사"}]} and not profiles.several(), f"v1.14 profiles: default {data}")
+        ir.save_settings({"work_folder": str(Path(scratch) / "A")})
+        name = profiles.activate_at_start()
+        check(name == "기본 회사" and os.environ["LOCALAPPDATA"] == scratch and ir.work_folder() == Path(scratch) / "A",
+              "v1.14 profiles: the default company keeps the old place")
+        new_id = profiles.add_profile("Euromall  GmbH", Path(scratch) / "B")
+        check(profiles.several() and profiles.load_profiles()["profiles"][1] == {"id": new_id, "name": "Euromall GmbH"}, "v1.14 profiles: added")
+        try:
+            profiles.add_profile("euromall gmbh", Path(scratch) / "C")
+            check(False, "v1.14 profiles: same name twice")
+        except ValueError:
+            pass
+        profiles.set_active(new_id)
+        os.environ["LOCALAPPDATA"] = os.environ[profiles.BASE_ENV]  # a new start
+        os.environ.pop(profiles.BASE_ENV)
+        check(profiles.activate_at_start() == "Euromall GmbH" and ir.work_folder() == Path(scratch) / "B"
+              and ir.user_data_folder() == Path(scratch) / "InvoiceRenamer" / "profiles" / new_id / "InvoiceRenamer",
+              f"v1.14 profiles: the other company has its own settings {ir.user_data_folder()}")
+        check(learned_formats.storage_path() == Path(scratch) / "InvoiceRenamer" / "learned-formats.json"
+              and ir.text_cache_folder() == Path(scratch) / "InvoiceRenamer" / "text-cache", "v1.14 profiles: learned layouts and text shared")
+        profiles.rename_profile(new_id, "Euromall")
+        check(profiles.active_name() == "Euromall", "v1.14 profiles: renamed")
+        os.environ.pop(profiles.BASE_ENV, None)
+    print("PASS: v1.14 company profiles (default unchanged, own folders, shared learning, rename)")
+
+
 if __name__ == "__main__":
     run()
     run_v113()
@@ -996,3 +1031,4 @@ if __name__ == "__main__":
     run_v114()
     run_v114_folders()
     run_v114_mail()
+    run_v114_profiles()

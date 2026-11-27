@@ -21,6 +21,25 @@ STEPS = (
     (5, "세무사 제출"),
 )
 _MUTEX = None
+_RESTART = {"wanted": False}
+
+
+def restart_later(root):
+    """v1.14: close the window; run_shell starts the program again (company switch)."""
+    _RESTART["wanted"] = True
+    root.event_generate("<<CloseShell>>")
+
+
+def start_again():
+    import subprocess
+    if os.name == "nt" and _MUTEX:
+        try:
+            import ctypes
+            ctypes.windll.kernel32.CloseHandle(_MUTEX)
+        except (AttributeError, OSError):
+            pass
+    command = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve().parent / "invoice_renamer.py")]
+    subprocess.Popen(command, close_fds=True)
 
 
 def window_title(practice=False):
@@ -131,6 +150,7 @@ class Shell:
             self.app.on_manage_rules = self.close.manage_recurring
             self.app.on_manage_formats = self.close.manage_formats
             self.app.on_folders_moved = self.close.paths_moved
+            self.app.on_restart = lambda: restart_later(self.root)
         except RuntimeError:
             self.close = None
         self.build_sidebar()
@@ -149,6 +169,7 @@ class Shell:
             root.after(2500, self.today_on_start)
         root.bind("<F1>", lambda event: self.show_shortcuts(), add="+")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        root.bind("<<CloseShell>>", lambda _event: self.on_close())
 
     # Work folder watching ---------------------------------------------
     def folder_signature(self):
@@ -230,6 +251,14 @@ class Shell:
         header.pack(fill="x")
         tk.Label(header, text="월마감", background=COLORS["navy"], foreground="#ffffff",
                  font=("Malgun Gothic", 15, "bold")).pack(side="left")
+        if not self.practice_folder:
+            try:
+                import profiles
+                if profiles.several():  # v1.14: which company is open
+                    tk.Label(header, text=profiles.active_name(), background=COLORS["navy"], foreground="#ffd479",
+                             font=("Malgun Gothic", 11, "bold")).pack(side="left", padx=(10, 0))
+            except OSError:
+                pass
         self.month = ttk.Combobox(header, values=["전체"], state="readonly", width=9)
         self.month.set("전체")
         self.month.pack(side="left", padx=(12, 16))
@@ -700,6 +729,8 @@ def run_shell(practice_folder=None):
         close_splash()
     bring_to_front(root)
     root.mainloop()
+    if _RESTART["wanted"] and practice_folder is None:
+        start_again()
 
 
 if __name__ == "__main__":

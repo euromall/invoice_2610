@@ -31,7 +31,9 @@ CURRENCIES = {"€": "EUR", "EUR": "EUR", "$": "USD", "USD": "USD", "£": "GBP",
 
 
 def storage_path():
-    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "InvoiceRenamer" / "learned-formats.json"
+    # v1.14: shared by every company profile (INVOICE_RENAMER_BASE is the real LOCALAPPDATA while another company is active)
+    base = os.environ.get("INVOICE_RENAMER_BASE") or os.environ.get("LOCALAPPDATA", Path.home())
+    return Path(base) / "InvoiceRenamer" / "learned-formats.json"
 
 
 def load_formats():

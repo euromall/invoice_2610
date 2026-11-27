@@ -105,9 +105,14 @@ def user_data_folder():
     return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "InvoiceRenamer"
 
 
+def shared_data_folder():
+    """v1.14: data every company profile shares (learned layouts, seller patterns, stored PDF text, OCR data)."""
+    return Path(os.environ.get("INVOICE_RENAMER_BASE") or os.environ.get("LOCALAPPDATA", Path.home())) / "InvoiceRenamer"
+
+
 def header_sellers():
     patterns = list(HEADER_SELLERS)
-    path = user_data_folder() / "seller-patterns.json"
+    path = shared_data_folder() / "seller-patterns.json"
     try:
         extra = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     except (OSError, ValueError):
@@ -184,6 +189,7 @@ def tessdata_folder():
         Path(__file__).resolve().parent / "tessdata",
         Path(getattr(sys, "_MEIPASS", "")) / "tessdata" if getattr(sys, "frozen", False) else None,
         user_data_folder() / "tessdata",
+        shared_data_folder() / "tessdata",
         os.environ.get("TESSDATA_PREFIX"),
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tessdata",
         Path("/usr/share/tesseract-ocr/5/tessdata"),
@@ -277,7 +283,7 @@ _DIGEST_INDEX = {"loaded": False, "data": {}, "dirty": False}
 
 def text_cache_folder():
     """v1.13.1: what was read from each file (text layer and OCR), so unchanged files are not read again next time."""
-    return user_data_folder() / "text-cache"
+    return shared_data_folder() / "text-cache"
 
 
 def _stamp_key(path):
@@ -2139,6 +2145,7 @@ class App:
         self.on_import_statements = None  # step 1 right-click ‘명세서로 불러오기’ → step 2 import
         self.on_loaded = None  # called after the folder was read (the main window then stops announcing changes)
         self.on_manage_rules = None  # automatic rules for recurring payments (step 3)
+        self.on_restart = None  # v1.14: set by the main window (company switch starts the program again)
         self.on_folders_moved = None  # v1.14: step 2-5 updates saved statement paths after 폴더 이름·위치 moved files
         if container is None:
             title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
@@ -2796,6 +2803,8 @@ class App:
                         command=lambda: save_settings({"today_on_start": today.get()})).grid(row=5, column=0, sticky="w")
         ttk.Checkbutton(general, text="닫을 때와 마감 확정 때 작업 기록 자동 백업 (도구 → 백업·복원)", variable=auto,
                         command=lambda: save_settings({"auto_backup": auto.get()})).grid(row=6, column=0, sticky="w")
+        if not self.practice_folder:
+            self.company_rows(general, 7, dialog)
         # 폴더 ---------------------------------------------------------
         folders = page("폴더")
         ttk.Label(folders, text="작업 폴더", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
@@ -2874,6 +2883,76 @@ class App:
         titles = [tabs.tab(index, "text") for index in tabs.tabs()]
         if tab in titles:
             tabs.select(titles.index(tab))
+
+    def company_rows(self, parent, row, dialog):
+        """v1.14 회사 프로필: several businesses, each with its own work folder, statements, records and settings."""
+        import profiles
+        ttk.Label(parent, text="회사 (작업 분리)", font=FONT_BOLD).grid(row=row, column=0, sticky="w", pady=(22, 4))
+        line = ttk.Frame(parent)
+        line.grid(row=row + 1, column=0, columnspan=3, sticky="w")
+        data = profiles.load_profiles()
+        names = {entry["name"]: entry["id"] for entry in data["profiles"]}
+        choice = ttk.Combobox(line, values=list(names), state="readonly", width=28)
+        choice.set(profiles.active_name(data))
+        choice.pack(side="left")
+
+        def switch():
+            target = names.get(choice.get())
+            if target is None or target == profiles.load_profiles()["active"]:
+                show_notice(dialog, "지금 열려 있는 회사예요.")
+                return
+            if not ask_yes_no("회사 바꾸기", f"‘{choice.get()}’로 바꿀까요? 프로그램을 닫았다가 다시 열어요.\n지금 작업은 저장돼 있어요.",
+                              parent=dialog, ok="바꾸고 다시 열기"):
+                return
+            profiles.set_active(target)
+            if self.on_restart:
+                self.on_restart()
+
+        def add():
+            from tkinter import simpledialog
+            name = simpledialog.askstring("회사 추가", "회사 이름 (예: Euromall GmbH)", parent=self.root)
+            if not name:
+                return
+            folder = filedialog.askdirectory(parent=self.root, title=f"‘{name}’ 작업 폴더 고르기 (취소하면 문서/월마감_{name})")
+            folder = Path(folder) if folder else profiles.default_work_folder_for(name)
+            if folder.resolve() == work_folder().resolve():
+                show_notice(dialog, "지금 회사와 같은 작업 폴더예요. 회사마다 다른 폴더를 고르세요.")
+                return
+            try:
+                profiles.add_profile(name, folder)
+            except (ValueError, OSError) as error:
+                show_notice(dialog, str(error), kind="error")
+                return
+            fresh = profiles.load_profiles()
+            names.clear()
+            names.update({entry["name"]: entry["id"] for entry in fresh["profiles"]})
+            choice["values"] = list(names)
+            choice.set(" ".join(name.split())[:60])
+            show_notice(dialog, f"회사를 추가했어요. 작업 폴더: {folder}\n‘이 회사로 바꾸기’를 누르면 그 회사로 열어요.")
+
+        def rename():
+            from tkinter import simpledialog
+            target = names.get(choice.get())
+            name = simpledialog.askstring("회사 이름 바꾸기", "새 이름", initialvalue=choice.get(), parent=self.root)
+            if not name or target is None:
+                return
+            try:
+                profiles.rename_profile(target, name)
+            except (ValueError, OSError) as error:
+                show_notice(dialog, str(error), kind="error")
+                return
+            fresh = profiles.load_profiles()
+            names.clear()
+            names.update({entry["name"]: entry["id"] for entry in fresh["profiles"]})
+            choice["values"] = list(names)
+            choice.set(" ".join(name.split())[:60])
+
+        ttk.Button(line, text="이 회사로 바꾸기", command=switch).pack(side="left", padx=6)
+        ttk.Button(line, text="회사 추가", command=add).pack(side="left")
+        ttk.Button(line, text="이름 바꾸기", command=rename).pack(side="left", padx=6)
+        ttk.Label(parent, style="Muted.TLabel", wraplength=700, text=(
+            "회사마다 작업 폴더·명세서·거래 기록·설정·세무사 정보가 따로예요. 배운 인보이스 양식과 읽어 둔 PDF 글자는 함께 써요.")).grid(
+            row=row + 2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     def program_folder_rows(self, parent, row, dialog):
         """v1.14 환경설정 → 폴더: name and place of 매칭완료 / 명세서 / 제외. Saving offers to move the existing files."""
@@ -4069,6 +4148,7 @@ def run_practice():
         session = workspace / "Beispiele"
         shutil.copytree(examples, session)
         former = os.environ.get("LOCALAPPDATA")
+        os.environ.pop("INVOICE_RENAMER_BASE", None)  # practice never touches the real data, not even shared data
         os.environ["LOCALAPPDATA"] = str(workspace / "data")
         try:
             from ui_shell import run_shell
@@ -4085,5 +4165,10 @@ if __name__ == "__main__":
     if "--practice" in sys.argv[1:]:
         run_practice()
     else:
+        import profiles
+        try:
+            profiles.activate_at_start()  # v1.14: the chosen company's folder
+        except OSError as error:
+            record_error("profiles", error)
         from ui_shell import run_shell
         run_shell()
