@@ -1662,6 +1662,7 @@ def undo_moves(history, progress=None):
     return restored, failed
 
 
+CONFLICTED_COPY = r"(?i)conflicted copy|Konfliktkopie|in Konflikt stehende Kopie|충돌 사본|-[A-Z0-9-]*-PC\b(?=\.\w+$)"
 VIEWS = ("전체", "필수 누락", "확인 필요", "인보이스 아님", "변경 가능", "보류", "정리 완료", "매칭 완료")
 MATCHED_PATTERN = r"매칭완료_\d{2}(?:0[1-9]|1[0-2])"  # same as monthly_close.MATCHED_FOLDER
 # v1.13: files set aside go to 제외/<reason>; nothing is deleted. Matched files stay in 매칭완료_YYMM (not here).
@@ -1825,6 +1826,7 @@ class App:
         self.on_account_order = None  # order of bank accounts and cards for numbering
         self.on_import_statements = None  # step 1 right-click ‘명세서로 불러오기’ → step 2 import
         self.on_loaded = None  # called after the folder was read (the main window then stops announcing changes)
+        self.on_manage_rules = None  # automatic rules for recurring payments (step 3)
         if container is None:
             title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
             root.title(f"[연습 모드] {title}" if practice_folder else title)
@@ -2123,23 +2125,32 @@ class App:
         except OSError as error:
             self.notice(f"탐색기를 열지 못했어요: {error}\n{self.folder}", kind="warn")
 
-    def open_settings(self):
-        """Settings panel: work folder and how files are brought in."""
+    def open_settings(self, tab=None):
+        """Settings in tabs: 일반, 폴더, 메일, 명세서·계좌, 인보이스 양식, 사유, 자동 규칙 (v1.13)."""
         dialog = InlineDialog(self.root)
         dialog.title("환경설정")
-        dialog.geometry("720x420")
+        dialog.geometry("780x480")
         dialog.grab_set()
-        body = ttk.Frame(dialog, padding=18)
-        body.pack(fill="both", expand=True)
-        ttk.Label(body, text="작업 폴더", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
-        folder_text = tk.StringVar(value=str(work_folder()))
-        ttk.Label(body, textvariable=folder_text, wraplength=640).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 6))
-        buttons = ttk.Frame(body)
-        buttons.grid(row=2, column=0, columnspan=3, sticky="w")
-        ttk.Button(buttons, text="작업 폴더 바꾸기", command=lambda: (self.change_work_folder(), folder_text.set(str(work_folder())))
-                   ).pack(side="left")
-        ttk.Button(buttons, text="탐색기로 열기", command=self.reveal_work_folder).pack(side="left", padx=8)
-        ttk.Label(body, text="인보이스·명세서 가져오기 방식", font=FONT_BOLD).grid(row=3, column=0, sticky="w", pady=(22, 4))
+        tabs = ttk.Notebook(dialog)
+        tabs.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+        ttk.Button(dialog, text="닫기", command=dialog.destroy).pack(side="bottom", anchor="e", padx=12, pady=10)
+
+        def page(title):
+            frame = ttk.Frame(tabs, padding=18)
+            tabs.add(frame, text=title)
+            return frame
+
+        def note(parent, text, row):
+            ttk.Label(parent, style="Muted.TLabel", wraplength=700, text=text).grid(row=row, column=0, columnspan=3, sticky="w",
+                                                                                   pady=(4, 0))
+
+        def launcher(parent, row, text, command):
+            ttk.Button(parent, text=text, command=lambda: (dialog.destroy(), command())).grid(row=row, column=0, sticky="w",
+                                                                                              pady=(12, 0))
+
+        # 일반 ---------------------------------------------------------
+        general = page("일반")
+        ttk.Label(general, text="인보이스·명세서 가져오기 방식", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
         mode = tk.StringVar(value=import_mode())
 
         def save_mode():
@@ -2153,26 +2164,67 @@ class App:
 
         for row, (value, label) in enumerate((
                 ("copy", "복사 — 원본 파일은 그대로 두고 작업 폴더에 사본을 만들어요 (추천, 테스트할 때 안전)"),
-                ("move", "이동 — 원본 파일을 작업 폴더로 옮겨요 (파일이 한 곳에만 남아요, 정리 되돌리기 가능)")), 4):
-            ttk.Radiobutton(body, text=label, value=value, variable=mode, command=save_mode).grid(
+                ("move", "이동 — 원본 파일을 작업 폴더로 옮겨요 (파일이 한 곳에만 남아요, 정리 되돌리기 가능)")), 1):
+            ttk.Radiobutton(general, text=label, value=value, variable=mode, command=save_mode).grid(
                 row=row, column=0, columnspan=3, sticky="w", pady=2)
-        ttk.Label(body, style="Muted.TLabel", wraplength=640, text=(
-            "같은 방식이 1단계 ‘파일 가져오기·폴더 가져오기’와 2단계 명세서 불러오기에 함께 적용돼요. "
-            "바꾼 설정은 바로 저장돼요.")).grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        note(general, "1단계 ‘파일 가져오기·폴더 가져오기’와 2단계 명세서 불러오기에 함께 적용돼요. 바꾼 설정은 바로 저장돼요.", 3)
+        settings = load_settings()
+        ttk.Label(general, text="시작·백업", font=FONT_BOLD).grid(row=4, column=0, sticky="w", pady=(22, 4))
+        today = tk.BooleanVar(value=settings.get("today_on_start", True))
+        auto = tk.BooleanVar(value=settings.get("auto_backup", True))
+        ttk.Checkbutton(general, text="하루에 한 번 시작할 때 ‘오늘 할 일’ 보여 주기", variable=today,
+                        command=lambda: save_settings({"today_on_start": today.get()})).grid(row=5, column=0, sticky="w")
+        ttk.Checkbutton(general, text="닫을 때와 마감 확정 때 작업 기록 자동 백업 (도구 → 백업·복원)", variable=auto,
+                        command=lambda: save_settings({"auto_backup": auto.get()})).grid(row=6, column=0, sticky="w")
+        # 폴더 ---------------------------------------------------------
+        folders = page("폴더")
+        ttk.Label(folders, text="작업 폴더", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
+        folder_text = tk.StringVar(value=str(work_folder()))
+        ttk.Label(folders, textvariable=folder_text, wraplength=700).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        buttons = ttk.Frame(folders)
+        buttons.grid(row=2, column=0, columnspan=3, sticky="w")
+        ttk.Button(buttons, text="작업 폴더 바꾸기", command=lambda: (self.change_work_folder(), folder_text.set(str(work_folder())))
+                   ).pack(side="left")
+        ttk.Button(buttons, text="탐색기로 열기", command=self.reveal_work_folder).pack(side="left", padx=8)
+        note(folders, f"작업 폴더 안에 프로그램이 만드는 폴더: 발행월 폴더(YYYY-MM), 매칭완료_YYMM, ‘{STATEMENT_FOLDER}’, "
+                      f"‘{EXCLUDED_FOLDER}’(사유별: {', '.join(EXCLUDE_REASONS)}). 이 폴더들은 프로그램이 이름으로 찾으니 "
+                      "탐색기에서 이름을 바꾸지 마세요. 폴더 위치를 따로 정하는 기능은 다음 버전(v1.14)에서 넣을게요.", 3)
+        ttk.Button(folders, text="제외 기록 보기", command=lambda: (dialog.destroy(), self.show_exclusion_log())).grid(
+            row=4, column=0, sticky="w", pady=(14, 0))
+        # 메일 ---------------------------------------------------------
+        if self.on_manage_mail:
+            mail = page("메일")
+            ttk.Label(mail, text="메일 검색에 쓸 메일함", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
+            note(mail, "3단계 ‘메일 검색’이 이 목록의 메일함을 브라우저에서 열어요. Gmail 계정이 여러 개면 로그인 순서 번호를 적어요.", 1)
+            launcher(mail, 2, "메일 등록 (Gmail·한메일)", self.on_manage_mail)
+        # 명세서·계좌 ---------------------------------------------------
+        if self.on_account_order:
+            accounts = page("명세서·계좌")
+            ttk.Label(accounts, text="계좌·카드 순서", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
+            note(accounts, "거래번호(608-001 …)를 붙이는 순서예요. 명세서 열 설정은 2단계에서 명세서를 불러올 때 저장돼요.", 1)
+            launcher(accounts, 2, "계좌 순서 정하기", self.on_account_order)
+            if getattr(self, "on_manage_formats", None):
+                launcher(accounts, 3, "명세서 양식(열 설정) 관리", self.on_manage_formats)
+        # 인보이스 양식 --------------------------------------------------
+        layouts = page("인보이스 양식")
+        ttk.Label(layouts, text="배운 인보이스 양식", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
+        note(layouts, "편집에서 값을 고르면 그 업체 양식을 배워요(배우기 전에 물어봐요). 잘못 배운 양식은 여기서 지워요.", 1)
+        launcher(layouts, 2, "배운 인보이스 양식 보기·지우기", self.manage_learned)
+        # 사유 ---------------------------------------------------------
         if self.on_manage_reasons:
-            ttk.Label(body, text="증빙 없이 처리 사유", font=FONT_BOLD).grid(row=7, column=0, sticky="w", pady=(22, 4))
-            ttk.Button(body, text="사유 관리 (한국어·독일어·추가)",
-                       command=lambda: (dialog.destroy(), self.on_manage_reasons())).grid(row=8, column=0, sticky="w")
-        if self.on_manage_mail or self.on_account_order:
-            ttk.Label(body, text="메일 검색·계좌 순서", font=FONT_BOLD).grid(row=9, column=0, sticky="w", pady=(22, 4))
-            row = ttk.Frame(body)
-            row.grid(row=10, column=0, columnspan=3, sticky="w")
-            if self.on_manage_mail:
-                ttk.Button(row, text="메일 등록 (Gmail·한메일)",
-                           command=lambda: (dialog.destroy(), self.on_manage_mail())).pack(side="left")
-            if self.on_account_order:
-                ttk.Button(row, text="계좌 순서 정하기",
-                           command=lambda: (dialog.destroy(), self.on_account_order())).pack(side="left", padx=6)
+            reasons = page("사유")
+            ttk.Label(reasons, text="증빙 없이 처리 사유", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
+            note(reasons, "세무사에게 가는 독일어 문장과 함께 관리해요. 제외 폴더 사유는 정해진 목록을 써요.", 1)
+            launcher(reasons, 2, "사유 관리 (한국어·독일어·추가)", self.on_manage_reasons)
+        # 자동 규칙 -------------------------------------------------------
+        if getattr(self, "on_manage_rules", None):
+            rules = page("자동 규칙")
+            ttk.Label(rules, text="정기 결제 자동 처리 규칙", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
+            note(rules, "월세·할부·수수료처럼 매달 같은 거래를 등록한 사유로 ‘증빙 없이 처리’하는 규칙이에요.", 1)
+            launcher(rules, 2, "자동 적용 규칙 보기·삭제", self.on_manage_rules)
+        titles = [tabs.tab(index, "text") for index in tabs.tabs()]
+        if tab in titles:
+            tabs.select(titles.index(tab))
 
     def update_import_labels(self):
         """‘파일 가져오기 (복사)’ or ‘(이동)’: the button says what happens to the originals."""
@@ -2304,7 +2356,9 @@ class App:
                 missing.append("인보이스 번호")
         if missing:
             return "필수 누락: " + ", ".join(missing), "bad"
-        checks = getattr(self, "checks", {}).get(path) or {}
+        checks = dict(getattr(self, "checks", {}).get(path) or {})
+        if re.search(CONFLICTED_COPY, path.name):
+            checks["파일"] = "Dropbox·OneDrive 충돌 사본 — 원본과 비교해 하나는 ‘제외 ▸ 중복’"
         if checks:
             return "확인 필요 · " + ", ".join(f"{name} {why}" for name, why in checks.items()), "warn"
         if small:

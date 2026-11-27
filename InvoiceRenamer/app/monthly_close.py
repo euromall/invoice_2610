@@ -988,6 +988,49 @@ def write_state(path, state):
             temporary.unlink(missing_ok=True)
 
 
+def double_payments(transactions, days=3):
+    """Pairs of payments to the same payee with the same amount within a few days (maybe charged twice)."""
+    groups = defaultdict(list)
+    for item in transactions:
+        if item.amount > 0:
+            groups[(merchant_key(item.merchant)[:24], item.amount, item.currency)].append(item)
+    pairs = []
+    for items in groups.values():
+        items.sort(key=lambda item: item.day)
+        for first, second in zip(items, items[1:]):
+            if (second.day - first.day).days <= days:
+                pairs.append((first, second))
+    return pairs
+
+
+def backup_folder():
+    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "InvoiceRenamer" / "backups"
+
+
+def auto_backup(state, reason="", keep=20):
+    """Small backup of the records (and corrections, marks, learned layouts) into the backups folder.
+    Files are not included (that is ‘전체 작업 백업’). Keeps the newest `keep` automatic backups. Returns the path."""
+    from invoice_renamer import invoice_edits_path, load_flags, load_invoice_edits
+    import learned_formats
+    folder = backup_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    label = re.sub(r"[^\w-]+", "-", reason).strip("-")
+    target = folder / f"auto_{stamp}{'_' + label if label else ''}.json"
+    try:
+        edits = load_invoice_edits()
+    except ValueError:
+        edits = {}
+    data = {"format": "InvoiceRenamer", "version": 1, "state": state, "edits": edits, "flags": load_flags(),
+            "learned": learned_formats.load_formats(), "reason": reason, "at": stamp, "edits_path": str(invoice_edits_path())}
+    with tempfile.NamedTemporaryFile(dir=folder, mode="w", encoding="utf-8", delete=False, suffix=".tmp") as output:
+        json.dump(data, output, ensure_ascii=False)
+    Path(output.name).replace(target)
+    for old in sorted(folder.glob("auto_*.json"))[:-max(1, keep)]:
+        old.unlink(missing_ok=True)
+    return target
+
+
 def read_backup(path):
     backup = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(backup, dict) or backup.get("format") != "InvoiceRenamer" or backup.get("version") != 1:
@@ -1433,14 +1476,9 @@ class MonthlyClose:
             frame = ttk.Frame(self.bar_area)
             for label, command, style in items:
                 ttk.Button(frame, text=label, command=command, style=style or "TButton").pack(side="left", padx=(0, 6))
-            if number == 2:
-                more_menu(frame, "더보기 ▾", [("명세서 양식 관리", self.manage_formats),
-                                             ("명세서 기간 점검", self.show_statement_periods)]).pack(side="left")
-            if number == 3:
+            if number == 3:  # v1.13: no 더보기 here; ‘이동 되돌리기’ is the toast after moving, 명세서 근거 is in 증빙 없이 처리
                 self.unmatched_button = ttk.Button(frame, text="연결 안 된 증빙", command=self.manage_unmatched)
                 self.unmatched_button.pack(side="left", padx=(0, 6))
-                more_menu(frame, "더보기 ▾", [("명세서 근거로 처리 (수수료 등)", self.mark_statement_evidence),
-                                             ("이동 되돌리기", self.undo_archive)]).pack(side="left")
             self.step_bars[number] = frame
         chips = ttk.Frame(container, padding=(18, 4, 18, 4))
         chips.pack(fill="x")
@@ -1527,10 +1565,10 @@ class MonthlyClose:
         for label, command in (("+ 증빙 파일 추가", self.add_evidence_for), ("해제", self.unlink), ("나란히 보기", self.compare_documents),
                                ("열기", self.open_pdf)):
             ttk.Button(right_footer, text=label, command=command, style="Small.TButton").pack(side="left", padx=(0, 4))
-        more_menu(right_footer, "더보기", [
-            ("증빙 값 고치기", self.edit_document_values), ("증빙 → 제외 폴더", self.exclude_document), ("-", None),
+        more_menu(right_footer, "연결 상세 ▾", [
             ("배분·차액", self.edit_allocation), ("정정·원본 연결", self.edit_correction), ("접대비 정보", self.edit_hospitality),
-            ("보조 자료 첨부", self.edit_attachments), ("증빙 전달 메모 (독일어)", self.edit_document_note),
+            ("보조 자료 첨부", self.edit_attachments), ("인보이스 전달 메모 (독일어)", self.edit_document_note), ("-", None),
+            ("인보이스 값 고치기", self.edit_document_values),
         ]).pack(side="left")
         self.all_pdfs = tk.BooleanVar()
         ttk.Checkbutton(self.pdfs_header, text="전체 증빙에서 고르기", variable=self.all_pdfs, command=self.show_invoices,
@@ -3005,7 +3043,11 @@ class MonthlyClose:
             return
         preview = "\n".join(str(target.relative_to(self.folder)) for _, target in moves[:5])
         more = f"\n… 외 {len(moves) - 5}개" if len(moves) > 5 else ""
-        if not ask_yes_no("매칭완료 증빙 이동", f"증빙 {len(moves)}개를 옮길까요?\n\n{preview}{more}", parent=self.root):
+        sent = sorted({target.parent.name for _doc, target in moves
+                       if self.state.get("exports", {}).get("20" + target.parent.name[-4:-2] + "-" + target.parent.name[-2:])})
+        if not ask_yes_no("매칭완료 증빙 이동", f"거래에 연결된 인보이스 {len(moves)}개를 ‘매칭완료_YYMM’ 폴더로 옮길까요?\n\n{preview}{more}",
+                          parent=self.root, ok="옮기기", undo="옮긴 바로 뒤 아래 ‘되돌리기’로 되돌릴 수 있어요.",
+                          warnings=[f"{', '.join(sent)}은 이미 세무사에게 전달한 달이에요. 파일 위치만 바뀌어요."] if sent else ()):
             return
         errors = []
         history = []
@@ -3037,16 +3079,18 @@ class MonthlyClose:
             return
         remaining = len(self.cards.get_children())
         skipped_text = f"\n중복·마감월 확인이 필요해 옮기지 않은 증빙 {skipped}개가 있어요." if skipped else ""
-        self.notice(f"증빙 {moved}개를 ‘매칭완료_월’ 폴더로 옮겼어요. 마크다운도 함께 옮겼어요.{skipped_text}\n"
-                    f"목록에는 아직 확인이 필요한 거래 {remaining}건만 보여요. 끝난 거래는 위 ‘대조 완료’에서 볼 수 있어요.",
-                    title="매칭완료 이동 완료",
-                    action=("다음 단계: 누락 점검 →", lambda: self.navigate(4)) if self.navigate and not remaining else None)
+        self.status.set(f"인보이스 {moved}개를 ‘매칭완료_월’ 폴더로 옮겼어요.{skipped_text.replace(chr(10), ' ')} "
+                        f"남은 거래 {remaining}건 · 끝난 거래는 ‘대조 완료’에서 봐요.")
+        show_toast(self.root, f"{moved}개를 매칭완료 폴더로 옮겼어요", action=("되돌리기", lambda: self.undo_archive(ask=False)),
+                   seconds=10)
+        if self.navigate and not remaining:
+            self.notice("모든 거래를 확인했어요.", title="매칭완료 이동 완료", action=("다음 단계: 누락 점검 →", lambda: self.navigate(4)))
 
-    def undo_archive(self):
+    def undo_archive(self, ask=True):
         if not self.last_moves:
             self.notice("되돌릴 증빙 이동이 없어요.")
             return
-        if not ask_yes_no("이동 되돌리기", f"증빙 {len(self.last_moves)}개를 원래 폴더로 되돌릴까요?", parent=self.root):
+        if ask and not ask_yes_no("이동 되돌리기", f"증빙 {len(self.last_moves)}개를 원래 폴더로 되돌릴까요?", parent=self.root):
             return
         restored, failed = undo_moves(self.last_moves)
         self.last_moves = [item[:3] for item in reversed(failed)]
@@ -3832,10 +3876,61 @@ class MonthlyClose:
                     detail.insert("", "end", values=issue)
 
         summary.bind("<<TreeviewSelect>>", show)
+
+        def open_month(event):
+            month = summary.identify_row(event.y)
+            if month:
+                dialog.destroy()
+                self.go_to_month(month)
+            return "break"
+
+        def open_issue(event):
+            row = detail.identify_row(event.y)
+            if not row:
+                return "break"
+            kind, name, _ = detail.item(row, "values")
+            month = (summary.selection() or [""])[0]
+            dialog.destroy()
+            self.go_to_issue(month, kind, str(name))
+            return "break"
+
+        summary.bind("<Double-1>", open_month)
+        detail.bind("<Double-1>", open_issue)
+        ttk.Label(controls, text="월을 더블클릭하면 그 달 3단계로, 아래 항목을 더블클릭하면 그 거래·증빙으로 가요.",
+                  foreground=COLORS["muted"]).pack(side="right")
         summary.selection_set(summary.get_children()[0])
         self.buttons(controls, [("미연결 증빙 열기", self.show_unlinked_invoices),
                                 ("명세서 기간 점검", self.show_statement_periods), ("증빙 후속 목록", self.followup_list)])
         show()
+
+    def go_to_month(self, month):
+        """Step 3 for one closing month (header month box follows)."""
+        self.month_filter.set(month)
+        if getattr(self, "on_month", None):
+            self.on_month(month)
+        if getattr(self, "navigate", None):
+            self.navigate(3)
+        self.refresh()
+
+    def go_to_issue(self, month, kind, name):
+        """From the review table to the transaction (by its number) or to the evidence (by file name)."""
+        self.go_to_month(month)
+        if kind == REVIEW_KINDS[1]:  # evidence without a transaction
+            self.manage_unmatched()
+            return
+        for key in self.cards.get_children():
+            if self.record(key).get("number") == name:
+                self.cards.selection_set(key)
+                self.cards.focus(key)
+                self.cards.see(key)
+                return
+        self.view.set("전체")
+        self.refresh()
+        for key in self.cards.get_children():
+            if self.record(key).get("number") == name:
+                self.cards.selection_set(key)
+                self.cards.see(key)
+                return
 
     def export_workspace_backup(self):
         target = filedialog.asksaveasfilename(parent=self.root, defaultextension=".zip",
@@ -3910,11 +4005,26 @@ class MonthlyClose:
             return
         self.status.set(f"작업 기록 백업 완료 · {target}")
 
-    def restore_backup(self):
+    def backup_now(self, reason=""):
+        """Automatic small backup (settings: ‘auto_backup’, ‘backup_keep’). Never interrupts the work on failure."""
+        if self.practice_folder:
+            return None
+        from invoice_renamer import load_settings
+        settings = load_settings()
+        if reason and not settings.get("auto_backup", True):
+            return None
+        try:
+            return auto_backup(self.state, reason, int(settings.get("backup_keep", 20)))
+        except (OSError, ValueError, TypeError) as error:
+            record_error("auto_backup", error)
+            return None
+
+    def restore_backup(self, selected=None):
         if self.practice_folder:
             self.notice("연습 모드는 예시 자료만 사용해요.")
             return
-        selected = filedialog.askopenfilename(parent=self.root, filetypes=[("작업 백업", "*.json")])
+        selected = selected or filedialog.askopenfilename(parent=self.root, filetypes=[("작업 백업", "*.json")],
+                                                          initialdir=str(backup_folder()) if backup_folder().is_dir() else None)
         if not selected:
             return
         try:
@@ -3993,7 +4103,8 @@ class MonthlyClose:
 
         buttons = ttk.Frame(form)
         buttons.pack(anchor="w")
-        self.buttons(buttons, [("마감 확정", lambda: toggle(True)), ("사유를 적고 재열기", lambda: toggle(False))])
+        self.buttons(buttons, [("마감 확정", lambda: (toggle(True), self.backup_now("마감확정"))),
+                               ("사유를 적고 재열기", lambda: toggle(False))])
         month.bind("<<ComboboxSelected>>", show)
         show()
 
@@ -4445,6 +4556,19 @@ class MonthlyClose:
         status.pack(side="left", padx=5)
         table = self.table(dialog, ("마감월", "버전", "전달 상태", "상태 변경 시각", "파일"), (100, 70, 115, 190, 400))
         entries = {}
+
+        def reveal(event):
+            row = table.identify_row(event.y)
+            if row in entries:
+                path = Path(entries[row]["path"])
+                if path.exists():
+                    self.reveal_file(path)
+                else:
+                    show_notice(dialog, f"파일이 그 자리에 없어요:\n{path}")
+            return "break"
+
+        table.bind("<Double-1>", reveal)
+        ttk.Label(panel, text="행을 더블클릭하면 ZIP이 있는 폴더를 열어요.", foreground=COLORS["muted"]).pack(side="right")
 
         def fill():
             table.delete(*table.get_children())

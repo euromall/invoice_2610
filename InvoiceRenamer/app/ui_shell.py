@@ -1,6 +1,7 @@
 """Main window: five steps on the left, month progress on top, one page at a time."""
 
 import os
+from datetime import date
 from pathlib import Path
 import sys
 import tkinter as tk
@@ -126,6 +127,9 @@ class Shell:
             self.app.on_account_order = self.close.edit_account_order
             self.app.on_import_statements = lambda paths: (self.show(2), self.close.open_batch([str(path) for path in paths]))
             self.close.on_loaded = self.remember_folder
+            self.close.on_month = self.set_month
+            self.app.on_manage_rules = self.close.manage_recurring
+            self.app.on_manage_formats = self.close.manage_formats
         except RuntimeError:
             self.close = None
         self.build_sidebar()
@@ -140,6 +144,9 @@ class Shell:
             root.after(1500, self.remember_folder)
             root.bind("<FocusIn>", self.schedule_folder_check, add="+")
             root.bind("<F5>", lambda event: self.check_folder(force=True), add="+")
+            root.after(2500, self.today_on_start)
+        root.bind("<F1>", lambda event: self.show_shortcuts(), add="+")
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # Work folder watching ---------------------------------------------
     def folder_signature(self):
@@ -252,6 +259,13 @@ class Shell:
                 self.bar.create_rectangle(x, 0, x + part, 12, fill=color, width=0)
             x += part
 
+    def set_month(self, month):
+        """The header month box shows the month another screen switched to."""
+        values = list(self.month.cget("values"))
+        if month not in values:
+            self.month.configure(values=[*values, month])
+        self.month.set(month)
+
     def change_month(self, _event=None):
         if self.close:
             self.close.month_filter.set(self.month.get())
@@ -281,16 +295,8 @@ class Shell:
         tk.Frame(self.sidebar, height=1, background=COLORS["line"]).pack(fill="x", padx=14, pady=(16, 8))
         tk.Label(self.sidebar, text="도구", font=FONT_BOLD, background=COLORS["panel"], foreground=COLORS["muted"],
                  anchor="w").pack(fill="x", padx=18)
-        tools = [("지난 달 열기", self.open_past_month),
-                 ("작업 기록 백업", lambda: self.close and self.close.export_backup()),
-                 ("작업 기록 복원", lambda: self.close and self.close.restore_backup()),
-                 ("전체 작업 백업", lambda: self.close and self.close.export_workspace_backup()),
-                 ("전체 작업 복원", lambda: self.close and self.close.restore_workspace_backup()),
-                 ("설치·작동 점검", self.app.diagnose), ("오류 진단 저장", self.app.save_diagnostics),
-                 ("사용법 열기", self.open_manual),
-                 ("환경설정", self.app.open_settings)]
-        if not self.practice_folder:
-            tools.insert(5, ("연습 모드 열기", self.app.open_practice))
+        tools = [("오늘 할 일", self.show_today), ("작업 이력", self.show_history), ("백업·복원", self.open_backups),
+                 ("환경설정", self.app.open_settings), ("도움말 ▾", self.help_menu)]
         for label, command in tools:
             link = tk.Label(self.sidebar, text=label, anchor="w", font=FONT, background=COLORS["panel"],
                             foreground=COLORS["ink"], cursor="hand2", padx=18, pady=3)
@@ -300,6 +306,253 @@ class Shell:
             link.bind("<Leave>", lambda event, w=link: w.configure(foreground=COLORS["ink"]))
         tk.Label(self.sidebar, text=f"v{VERSION}", font=FONT_SMALL, background=COLORS["panel"],
                  foreground=COLORS["muted"]).pack(side="bottom", pady=8)
+
+    # Toolbox ----------------------------------------------------------
+    def help_menu(self):
+        menu = tk.Menu(self.root, tearoff=False)
+        items = [("사용법 열기", self.open_manual), ("단축키·마우스 (F1)", self.show_shortcuts)]
+        if not self.practice_folder:
+            items.append(("연습 모드 열기", self.app.open_practice))
+        items += [("설치·작동 점검", self.app.diagnose), ("오류 진단 저장", self.app.save_diagnostics)]
+        for label, command in items:
+            menu.add_command(label=label, command=command)
+        menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+
+    def show_shortcuts(self):
+        from ui_theme import InlineDialog
+        dialog = InlineDialog(self.root)
+        dialog.title("단축키·마우스")
+        dialog.center(760, 560)
+        rows = [
+            ("어디서나", "F1", "이 안내"), ("어디서나", "F5", "작업 폴더에서 바뀐 파일 읽기"),
+            ("어디서나", "Enter / Esc", "확인 창: 확인 / 취소"),
+            ("1단계 목록", "더블클릭", "편집 (빈 발행일·업체명·총액·번호 칸이면 원본에서 그 항목 고르기)"),
+            ("1단계 목록", "오른쪽 클릭", "선택한 파일: 열기·편집·제외(사유)·인보이스 맞음·보류·다시 읽기…"),
+            ("1단계 목록", "F2 / Delete", "편집 / 제외 폴더로"), ("1단계 목록", "Ctrl+A", "모두 선택"),
+            ("1단계 표 머리", "클릭 / 오른쪽 클릭", "정렬 / 정렬·맞춤·칸 숨기기"),
+            ("원본 창", "끌기", "상자 안 글자를 지금 항목 값으로 (옆 글자를 보고 항목을 바꾸기도 해요)"),
+            ("원본 창", "글자 오른쪽 클릭", "이 값으로 넣기 ▸ 항목"), ("원본 창", "Ctrl+휠", "확대·축소"),
+            ("3단계 거래", "Enter", "추천 1순위 연결 (이상하면 먼저 물어요)"),
+            ("3단계 거래", "더블클릭 / 오른쪽 클릭", "명세서에서 보기 / 메모·증빙 없이 처리·메일 검색·환불 찾기…"),
+            ("3단계 증빙", "더블클릭 / 오른쪽 클릭", "열기 / 연결·해제·나란히 보기·값 고치기·제외…"),
+            ("4단계 점검표", "더블클릭", "그 달 3단계로 · 항목이면 그 거래·증빙으로"),
+            ("전달 이력", "더블클릭", "ZIP이 있는 폴더 열기"),
+        ]
+        frame = ttk.Frame(dialog, padding=14)
+        frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(frame, columns=("where", "key", "what"), show="headings", height=len(rows))
+        for column, label, width in (("where", "화면", 120), ("key", "키·마우스", 160), ("what", "하는 일", 440)):
+            tree.heading(column, text=label)
+            tree.column(column, width=width)
+        for row in rows:
+            tree.insert("", "end", values=row)
+        tree.pack(fill="both", expand=True)
+        ttk.Button(dialog, text="닫기", command=dialog.destroy).pack(pady=(0, 12))
+
+    def open_backups(self):
+        """One window for all backups: automatic small backups, full backup with files, and restoring."""
+        from ui_theme import InlineDialog, show_notice
+        from invoice_renamer import load_settings, save_settings
+        if self.close is None:
+            return
+        from monthly_close import backup_folder
+        dialog = InlineDialog(self.root)
+        dialog.title("백업·복원")
+        dialog.center(820, 520)
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+        info = tk.StringVar()
+
+        def describe():
+            files = sorted(backup_folder().glob("auto_*.json")) if backup_folder().is_dir() else []
+            last = files[-1].stem.split("_", 2) if files else None
+            info.set((f"마지막 자동 백업: {last[1]} {last[2][:2]}:{last[2][2:4]}" if last else "자동 백업이 아직 없어요")
+                     + f" · 보관 {len(files)}개\n위치: {backup_folder()}")
+
+        settings = load_settings()
+        auto = tk.BooleanVar(value=settings.get("auto_backup", True))
+        keep = tk.StringVar(value=str(settings.get("backup_keep", 20)))
+        ttk.Label(body, text="작업 기록 백업 (작고 빠름)", font=FONT_BOLD).pack(anchor="w")
+        ttk.Label(body, text="거래 번호·연결·메모·수정값·배운 양식·표시를 저장해요. 인보이스 파일은 들어가지 않아요.",
+                  foreground=COLORS["muted"]).pack(anchor="w", pady=(0, 4))
+        ttk.Label(body, textvariable=info).pack(anchor="w")
+        row = ttk.Frame(body)
+        row.pack(anchor="w", pady=6)
+
+        def remember():
+            try:
+                count = max(3, min(200, int(keep.get())))
+            except ValueError:
+                count = 20
+            save_settings({"auto_backup": auto.get(), "backup_keep": count})
+
+        ttk.Checkbutton(row, text="프로그램을 닫을 때와 마감 확정 때 자동으로 백업", variable=auto, command=remember).pack(side="left")
+        ttk.Label(row, text="  최근").pack(side="left")
+        spin = ttk.Spinbox(row, from_=3, to=200, width=5, textvariable=keep, command=remember)
+        spin.pack(side="left", padx=4)
+        spin.bind("<FocusOut>", lambda event: remember())
+        ttk.Label(row, text="개 보관").pack(side="left")
+        buttons = ttk.Frame(body)
+        buttons.pack(anchor="w", pady=(4, 14))
+
+        def backup_now():
+            path = self.close.backup_now()
+            describe()
+            if path:
+                show_notice(dialog, f"작업 기록을 백업했어요.\n{path}")
+
+        def restore():
+            folder = backup_folder()
+            from tkinter import filedialog
+            selected = filedialog.askopenfilename(parent=self.root, filetypes=[("작업 백업", "*.json")],
+                                                  initialdir=str(folder) if folder.is_dir() else None)
+            if selected:
+                dialog.destroy()
+                self.close.restore_backup(selected)
+
+        for label, command in (("지금 백업", backup_now), ("작업 기록 복원…", restore),
+                               ("다른 곳에 저장…", self.close.export_backup), ("백업 폴더 열기", lambda: self.app.reveal(backup_folder() / "."))):
+            ttk.Button(buttons, text=label, command=command).pack(side="left", padx=(0, 6))
+        ttk.Label(body, text="전체 작업 백업 (파일 포함, 큼)", font=FONT_BOLD).pack(anchor="w")
+        ttk.Label(body, text="인보이스·명세서·전달 ZIP·보조 자료까지 ZIP 하나로 묶어요. 다른 PC로 옮기거나 분기마다 보관할 때 써요.",
+                  foreground=COLORS["muted"], wraplength=760).pack(anchor="w", pady=(0, 4))
+        full = ttk.Frame(body)
+        full.pack(anchor="w")
+        ttk.Button(full, text="전체 작업 백업…", command=self.close.export_workspace_backup).pack(side="left", padx=(0, 6))
+        ttk.Button(full, text="전체 작업 복원…", command=self.close.restore_workspace_backup).pack(side="left")
+        ttk.Button(dialog, text="닫기", command=dialog.destroy).pack(side="bottom", pady=12)
+        describe()
+
+    def show_history(self):
+        """What was changed and when: record changes (links, notes, close) and files set aside, newest first."""
+        from ui_theme import InlineDialog, table_tools
+        from invoice_renamer import load_exclusion_log
+        if self.close is None:
+            return
+        dialog = InlineDialog(self.root)
+        dialog.title("작업 이력")
+        dialog.geometry("1040x560")
+        ttk.Label(dialog, text="거래 기록 변경과 제외 폴더 이동을 시간 순서로 보여 줘요. 되돌리기는 각 화면의 ‘해제’, "
+                               "1단계 ‘정리 되돌리기’, ‘제외 기록 보기’, ‘백업·복원’에서 해요.",
+                  padding=(14, 10, 14, 6), wraplength=1000).pack(anchor="w")
+        frame = ttk.Frame(dialog)
+        frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        columns = ("at", "kind", "who", "what", "detail")
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        for column, label, width in zip(columns, ("시각", "종류", "사용자", "거래번호·파일", "내용"), (170, 90, 100, 260, 380)):
+            tree.heading(column, text=label)
+            tree.column(column, width=width, minwidth=50)
+        bar = ttk.Scrollbar(frame, command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True)
+        table_tools(tree, "work-history", stretch="detail")
+        rows = [(entry.get("at", ""), "거래 기록", entry.get("user", ""), entry.get("number", ""), entry.get("fields", ""))
+                for entry in self.close.state.get("audit", [])]
+        rows += [(entry.get("at", ""), "파일 " + entry.get("action", ""), "", Path(entry.get("to", "")).name,
+                  f"{entry.get('reason', '')} · {Path(entry.get('from', '')).parent.name} → {Path(entry.get('to', '')).parent.name}")
+                 for entry in load_exclusion_log()]
+        for row in sorted(rows, key=lambda row: str(row[0]), reverse=True)[:3000]:
+            tree.insert("", "end", values=row)
+        ttk.Button(dialog, text="닫기", command=dialog.destroy).pack(pady=(0, 10))
+
+    def show_today(self):
+        """Start overview: what is left in each step, with a button that goes there."""
+        from ui_theme import InlineDialog
+        from monthly_close import backup_folder, double_payments
+        dialog = InlineDialog(self.root)
+        dialog.title("오늘 할 일")
+        dialog.center(860, 560)
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+        items = []
+        summary = getattr(self.app, "summary", {}) or {}
+        marks = getattr(self.app, "marks", {})
+        if summary.get("bad"):
+            items.append(("1단계", f"필수 값이 빠진 인보이스 {summary['bad']}개", lambda: self.go_view(1, "필수 누락")))
+        if summary.get("warn"):
+            items.append(("1단계", f"확인이 필요한 인보이스 {summary['warn']}개 (파일명·배운 양식·소액 등)", lambda: self.go_view(1, "확인 필요")))
+        if summary.get("muted"):
+            items.append(("1단계", f"인보이스가 아닌 것 같은 파일 {summary['muted']}개", lambda: self.go_view(1, "인보이스 아님")))
+        held = sum(1 for entry in marks.values() if entry.get("hold"))
+        if held:
+            items.append(("1단계", f"보류로 표시한 파일 {held}개", lambda: self.go_view(1, "보류")))
+        ready = len(getattr(self.app, "targets", {}))
+        if ready:
+            items.append(("1단계", f"파일명을 바꿀 수 있는 인보이스 {ready}개", lambda: self.go_view(1, "변경 가능")))
+        if self.close is not None:
+            close = self.close
+            if not close.transactions:
+                items.append(("2단계", "불러온 명세서가 없어요", lambda: self.show(2)))
+            missing = [key for key in close.transactions if "증빙 없음" in close.status_for(key) or close.status_for(key) == "증빙 미연결"]
+            if missing:
+                items.append(("3단계", f"증빙이 없는 거래 {len(missing)}건", lambda: self.show(3)))
+            if close.invoices:
+                unmatched = len(close.unmatched_documents(near_only=True))
+                if unmatched:
+                    items.append(("3단계", f"거래에 연결 안 된 인보이스 {unmatched}개", lambda: (self.show(3), close.manage_unmatched())))
+            pairs = double_payments(close.transactions.values())
+            if pairs:
+                text = ", ".join(f"{close.record(a.key).get('number', '')}·{close.record(b.key).get('number', '')}" for a, b in pairs[:3])
+                items.append(("3단계", f"이중 결제 의심 {len(pairs)}쌍 (같은 곳·같은 금액·3일 안): {text}",
+                              lambda: self.show_pairs(pairs)))
+            today = date.today().isoformat()
+            late = [key for key in close.transactions if close.record(key).get("follow_up") == "요청 중"
+                    and close.record(key).get("due", "9999") < today]
+            if late:
+                items.append(("3단계", f"인보이스 요청 기한이 지난 거래 {len(late)}건", lambda: (self.show(3), close.followup_list())))
+        files = sorted(backup_folder().glob("auto_*.json")) if backup_folder().is_dir() else []
+        if not files:
+            items.append(("백업", "작업 기록 백업이 아직 없어요", self.open_backups))
+        ttk.Label(body, text="지금 남은 일", font=FONT_BOLD).pack(anchor="w", pady=(0, 8))
+        if not items:
+            ttk.Label(body, text="남은 일이 없어요. 4단계 ‘누락 점검’과 5단계 ‘세무사 제출’을 확인하세요.").pack(anchor="w")
+        for step, text, command in items:
+            row = ttk.Frame(body)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=step, width=8, foreground=COLORS["muted"]).pack(side="left")
+            ttk.Label(row, text=text, wraplength=600).pack(side="left")
+            ttk.Button(row, text="가기", style="Small.TButton",
+                       command=lambda c=command: (dialog.destroy(), c())).pack(side="right")
+        bottom = ttk.Frame(dialog, padding=(16, 8))
+        bottom.pack(side="bottom", fill="x")
+        from invoice_renamer import load_settings, save_settings
+        start = tk.BooleanVar(value=load_settings().get("today_on_start", True))
+        ttk.Checkbutton(bottom, text="하루에 한 번 시작할 때 보여 주기", variable=start,
+                        command=lambda: save_settings({"today_on_start": start.get()})).pack(side="left")
+        ttk.Button(bottom, text="닫기", command=dialog.destroy).pack(side="right")
+
+    def go_view(self, step, view):
+        self.show(step)
+        self.app.view.set(view)
+        self.app.refresh()
+
+    def show_pairs(self, pairs):
+        self.show(3)
+        close = self.close
+        close.view.set("전체")
+        close.refresh()
+        keys = [item.key for pair in pairs for item in pair if close.cards.exists(item.key)]
+        if keys:
+            close.cards.selection_set(keys[:2])
+            close.cards.see(keys[0])
+        close.status.set("이중 결제 의심: " + " / ".join(
+            f"{close.record(a.key).get('number', '')}·{close.record(b.key).get('number', '')} {a.amount} {a.currency}" for a, b in pairs[:5]))
+
+    def today_on_start(self):
+        from invoice_renamer import load_settings, save_settings
+        settings = load_settings()
+        today = date.today().isoformat()
+        if self.practice_folder or not settings.get("today_on_start", True) or settings.get("today_shown") == today:
+            return
+        save_settings({"today_shown": today})
+        self.show_today()
+
+    def on_close(self):
+        """Closing the window: small automatic backup of the records first (if switched on)."""
+        if self.close is not None:
+            self.close.backup_now("종료")
+        self.root.destroy()
 
     def open_past_month(self):
         if self.close:
