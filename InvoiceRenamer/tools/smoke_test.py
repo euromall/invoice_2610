@@ -65,6 +65,10 @@ def run():
         app.state["inquiries"] = [{"month": record["period"], "number": "611-001", "question": "Bitte Beleg prüfen",
                                    "status": "답변 필요", "asked_at": "2026-11-26"},
                                   {"month": "2001-01", "number": "", "question": "OTHER_MONTH", "status": "답변 필요"}]
+        app.state["cash"] = [{"id": "K2611-001", "month": record["period"], "day": "2026-11-20", "amount": "12.50", "currency": "EUR",
+                              "vendor": "Bäckerei", "purpose": "Bewirtung", "doc": document.key},
+                             {"id": "K2611-002", "month": record["period"], "day": "2026-11-21", "amount": "3", "currency": "EUR",
+                              "vendor": "Kiosk", "purpose": "", "doc": ""}]
         package = root / "Monatsabschluss.zip"
         app.write_package(package)
         with ZipFile(package) as result:
@@ -79,10 +83,14 @@ def run():
             inquiries = list(csv.DictReader(io.StringIO(result.read("12_Rueckfragen.csv").decode("utf-8-sig")), delimiter=";"))
             check(len(inquiries) == 1 and inquiries[0]["Status"] == "Offen" and inquiries[0]["Rückfrage"] == "Bitte Beleg prüfen",
                   f"v1.14 Rückfragen of the package month only {inquiries}")
+            cash = list(csv.DictReader(io.StringIO(result.read("13_Kasse.csv").decode("utf-8-sig")), delimiter=";"))
+            check([row["Kassennummer"] for row in cash] == ["K2611-001", "K2611-002"] and cash[0]["Betrag"] == "12,50"
+                  and cash[0]["Beleg im ZIP"].startswith("Kasse/") and cash[0]["Beleg im ZIP"] in result.namelist()
+                  and cash[1]["Beleg im ZIP"] == "ohne Beleg" and "Kasse" in book.sheetnames, f"v1.14 Kasse in the ZIP {cash}")
             import pymupdf
             with pymupdf.open(stream=result.read("00_Begleitschreiben.pdf")) as letter:
                 text = letter[0].get_text()
-            check("Buchungen: 1" in text and "Offene Posten: 0" in text and "Bitte Beleg prüfen" in text and "OTHER_MONTH" not in text,
+            check("Kassenbelege: 2" in text and "Buchungen: 1" in text and "Offene Posten: 0" in text and "Bitte Beleg prüfen" in text and "OTHER_MONTH" not in text,
                   f"v1.14 Begleitschreiben summary {text[:300]}")
 
         import pymupdf

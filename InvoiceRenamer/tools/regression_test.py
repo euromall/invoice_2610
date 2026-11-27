@@ -450,6 +450,22 @@ def run():
               and "608-002" in order[2] and order[3].startswith("Deutsche Bank") and order[4].startswith("Rechnung 1")
               and "608-004" in order[5], f"v1.12: print bundle order {order} {summary}")
         check(statement2.read_bytes() and all(b"608-" not in documents[key].path.read_bytes() for key in documents), "v1.12: originals unchanged")
+        # v1.14 print options
+        def pages(**options):
+            data, summary = mc.print_bundle(**options)
+            with pymupdf.open("pdf", data) as document:
+                return [" ".join(page.get_text().split())[:40] for page in document], summary
+        only_statements, _ = pages(content="statements")
+        check(len(only_statements) == 2 and all(text.startswith("Deutsche Bank") for text in only_statements), f"v1.14 print: statements only {only_statements}")
+        only_invoices, _ = pages(content="invoices")
+        check(len(only_invoices) == 4 and only_invoices[0].startswith("Rechnung 0") and "608-002" in only_invoices[1]
+              and only_invoices[2].startswith("Rechnung 1"), f"v1.14 print: invoices in number order {only_invoices}")
+        plain, _ = pages(content="invoices", stamp=False, notes=False)
+        check(plain == ["Rechnung 0", "Rechnung 1"], f"v1.14 print: no stamp, no note pages {plain}")
+        sheets, summary = pages(duplex=True)
+        check(len(sheets) % 2 == 0 and len(sheets) == 12 and "빈 쪽 6쪽" in summary, f"v1.14 print: blank pages for two-sided printing {sheets} {summary}")
+        check(mc.print_keys(first="608-002", last="608-003") == ["k1", "k2"] and mc.print_keys(status="인보이스 없음") == ["k1", "k3"]
+              and mc.print_keys(month="2026-07") == [], "v1.14 print: range and state")
 
         # refunds: an earlier, already sent month is not changed; partial refunds need the purchase invoice
         mc.state["records"]["old"] = {"number": "607-010", "period": "2026-07", "day": "2026-07-20", "amount": "62.80",
@@ -768,7 +784,115 @@ def run_v114():
                                                                for n in range(80)]})
     with pymupdf.open(stream=letter) as pdf:
         check(pdf.page_count >= 2 and "Händler ?? - x" in pdf[0].get_text(), "v1.14: long Begleitschreiben continues on a new page, Latin-1 text")
-    print("PASS: v1.14 tax remarks (reverse charge, EU/foreign VAT ID, missing tax/tax id, small invoice), exchange rate, monthly merchant missing, Rückfragen, notification mail, Begleitschreiben")
+    from advisor_workbook import cost_rows, cost_workbook
+    from openpyxl import load_workbook
+    import io
+    costs = cost_rows({"a": {"period": "2026-09", "number": "609-001", "merchant": "TELEFONICA | Lastschrift", "amount": "39.99", "currency": "EUR"},
+                       "b": {"period": "2026-10", "number": "610-001", "merchant": "TELEFONICA", "amount": "39.99", "currency": "EUR"},
+                       "c": {"period": "2026-10", "number": "610-002", "merchant": "AMAZON", "amount": "-20.00", "currency": "EUR"},
+                       "d": {"period": "2026-10", "number": "610-003", "merchant": "Kreditkarte", "amount": "500", "transfer": "x"},
+                       "e": {"period": "2026-10", "number": "610-004", "merchant": "AMZN Mktp", "amount": "62.80", "currency": "EUR"}},
+                      {"e": "AMAZON"}, {"a": "DKB"})
+    check([row["vendor"] for row in costs] == ["TELEFONICA", "TELEFONICA", "AMAZON", "AMAZON"] and costs[0]["account"] == "DKB",
+          f"v1.14: cost rows (transfer left out, invoice seller as vendor) {costs}")
+    book = load_workbook(io.BytesIO(cost_workbook(costs)))
+    vendors = [[cell.value for cell in row] for row in book["업체별"].iter_rows(min_row=2)]
+    pivot = [[cell.value for cell in row] for row in book["업체×월"].iter_rows()]
+    check(book.sheetnames == ["업체별", "월별", "업체×월", "거래"] and vendors[0][:3] == ["TELEFONICA", "EUR", 2]
+          and float(vendors[1][4]) == -20.0 and float(vendors[1][5]) == 42.8 and pivot[0] == ["업체", "통화", "2026-09", "2026-10", "합계"],
+          f"v1.14: cost workbook {vendors} {pivot}")
+    print("PASS: v1.14 tax remarks (reverse charge, EU/foreign VAT ID, missing tax/tax id, small invoice), exchange rate, monthly merchant missing, Rückfragen, notification mail, Begleitschreiben, cost Excel")
+
+
+def run_v114_folders():
+    """v1.14 환경설정 → 폴더 이름·위치."""
+    import invoice_renamer as ir
+    with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": str(Path(scratch) / "appdata")}):
+        root = Path(scratch)
+        work, outside = root / "work", root / "elsewhere"
+        work.mkdir()
+        outside.mkdir()
+        default = ir.folder_settings()
+        check(default["matched"] == {"name": "매칭완료", "location": ""} and ir.program_folder("excluded", work) == work / "제외",
+              f"v1.14 folders: defaults {default}")
+        check(not ir.valid_folder_name("a/b") and not ir.valid_folder_name("2026-10") and ir.valid_folder_name("Erledigt"),
+              "v1.14 folders: name rule")
+
+        def invoice(path, text):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with pymupdf.open() as pdf:
+                pdf.new_page().insert_text((60, 80), text)
+                pdf.save(path)
+
+        invoice(work / "매칭완료_2610" / "a.pdf", "Muster GmbH Rechnung 1 Gesamt 10,00 EUR")
+        invoice(work / "2026-09" / "매칭완료_2609" / "b.pdf", "Muster GmbH Rechnung 2 Gesamt 20,00 EUR")
+        invoice(work / "제외" / "중복" / "c.pdf", "copy")
+        invoice(work / "open.pdf", "Muster GmbH Rechnung 3 Gesamt 30,00 EUR")
+        old = ir.folder_settings()
+        new = {"matched": {"name": "Erledigt", "location": str(outside)}, "statements": {"name": "Auszuege", "location": ""},
+               "excluded": {"name": "Ablage", "location": ""}}
+        ir.save_settings({"program_folders": new})
+        check(ir.folder_settings() == new, "v1.14 folders: saved")
+        check(ir.is_matched_folder("매칭완료_2610") and ir.is_matched_folder("Erledigt_2610") and not ir.is_matched_folder("Erledigt"),
+              "v1.14 folders: old and new matched names known")
+        check({"Auszuege", "Ablage", "제외", "명세서"} <= ir.kept_apart_names(), "v1.14 folders: kept apart names")
+        pairs = [pair for kind in new for pair in ir.relocation_plan(kind, work, old, new)]
+        targets = sorted(str(target.relative_to(root)) for _, target in pairs)
+        check(targets == ["elsewhere/Erledigt_2609/b.pdf", "elsewhere/Erledigt_2610/a.pdf", "work/Ablage/중복/c.pdf"],
+              f"v1.14 folders: relocation plan {targets}")
+        moved, errors = ir.relocate_files(pairs, keep=[work, outside])
+        check(len(moved) == 3 and not errors and not (work / "매칭완료_2610").exists() and (work / "2026-09").is_dir() is False,
+              f"v1.14 folders: moved, empty folders removed {errors}")
+        found = sorted(doc.path.name for doc in index_pdfs(work)[0])
+        check(found == ["a.pdf", "b.pdf", "open.pdf"], f"v1.14 folders: step 3 reads the matched folders in the other place {found}")
+        check([path.name for path in ir.evidence_in(work)] == ["open.pdf"], "v1.14 folders: step 1 leaves Ablage out")
+        history, errors = ir.exclude_files(work, [work / "open.pdf"], "기타")
+        check(not errors and history[0][1].parent == work / "Ablage" / "기타", f"v1.14 folders: exclusion uses the new name {history}")
+        ir.update_exclusion_log([(history[0][1], root / "x.pdf")])
+        check(ir.load_exclusion_log()[-1]["to"] == str(root / "x.pdf"), "v1.14 folders: exclusion log follows a move")
+        restored, failed = ir.undo_moves(history)
+        check(restored and (work / "open.pdf").is_file(), "v1.14 folders: undo after exclusion")
+        back = {kind: {"name": ir.PROGRAM_FOLDERS[kind][0], "location": ""} for kind in ir.PROGRAM_FOLDERS}
+        pairs = [pair for kind in back for pair in ir.relocation_plan(kind, work, new, back)]
+        moved, errors = ir.relocate_files(pairs, keep=[work, outside])
+        check(outside.is_dir() and not any(outside.iterdir()), "v1.14 folders: chosen place itself is kept")
+        check(not errors and (work / "매칭완료_2610" / "a.pdf").is_file() and (work / "제외" / "중복" / "c.pdf").is_file(),
+              f"v1.14 folders: back to the work folder {[str(t) for _, t in pairs]}")
+        # sales invoices (Ausgangsrechnung) from their own folder count as money coming in
+        from monthly_close import Invoice, signed_total, candidates, Transaction, next_cash_number, cash_documents
+        from datetime import date as day
+        from decimal import Decimal
+        sales_dir = root / "Ausgang"
+        invoice(sales_dir / "2026-11" / "AR-100.pdf", "Euromall GmbH Rechnung AR-100 Gesamtbetrag 5.176,50 EUR")
+        ir.save_settings({"sales_folder": str(sales_dir)})
+        docs = {doc.path.name: doc for doc in index_pdfs(work)[0]}
+        check(docs["AR-100.pdf"].tax_fields.get("sales") and not (docs["open.pdf"].tax_fields or {}).get("sales"),
+              f"v1.14 sales: own invoices read and marked {list(docs)}")
+        sale = Invoice("s", Path("AR.pdf"), day(2026, 11, 3), "Euromall", Decimal("5176.50"), "EUR", "AR-100", False, {"sales": True})
+        paid = Transaction("t", day(2026, 11, 20), "LX PANTOS | Gutschrift", Decimal("-5176.50"), "EUR")
+        check(signed_total(sale) == Decimal("-5176.50") and candidates(paid, [sale], {}) == [sale]
+              and signed_total(Invoice("c", Path("G.pdf"), None, "", Decimal("10"), "EUR", "", True, {"sales": True})) == Decimal("10"),
+              "v1.14 sales: incoming money matches my invoice, my credit note counts as money out")
+        ir.save_settings({"sales_folder": ""})
+        cash_state = {"cash": [{"id": "K2611-001", "doc": "abc"}, {"id": "K2611-007"}, {"id": "K2610-002"}, "odd"]}
+        check(next_cash_number(cash_state, "2026-11") == "K2611-008" and next_cash_number({}, "2026-12") == "K2612-001"
+              and cash_documents(cash_state) == {"abc"}, "v1.14 Kasse: numbers per month, receipts count as used")
+        # phone photos
+        phone = root / "Camera Uploads"
+        (phone / "2026").mkdir(parents=True)
+        for name in ("a.jpg", "b.png", "notes.txt"):
+            (phone / "2026" / name).write_bytes(b"x" * 10)
+        (phone / "old.jpg").write_bytes(b"y")
+        import os, time
+        old_time = time.time() - 100 * 86400
+        os.utime(phone / "old.jpg", (old_time, old_time))
+        recent = sorted(path.name for path, _ in ir.new_photos(phone, 30))
+        everything = sorted(path.name for path, _ in ir.new_photos(phone, None))
+        check(recent == ["a.jpg", "b.png"] and everything == ["a.jpg", "b.png", "old.jpg"], f"v1.14 photos: new photos {recent} {everything}")
+        ir.remember_photos([phone / "2026" / "a.jpg"], "가져옴")
+        ir.remember_photos([phone / "old.jpg"], "숨김")
+        check([path.name for path, _ in ir.new_photos(phone, None)] == ["b.png"], "v1.14 photos: taken in or hidden photos are not offered again")
+    print("PASS: v1.14 folder names and places (old names still known, move existing files, step 1/3 reading, exclusion, undo), phone photos, sales invoices, Kasse numbers")
 
 
 if __name__ == "__main__":
@@ -776,3 +900,4 @@ if __name__ == "__main__":
     run_v113()
     run_v1131()
     run_v114()
+    run_v114_folders()

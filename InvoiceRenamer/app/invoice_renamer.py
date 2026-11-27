@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import tkinter as tk
+from copy import deepcopy
 import unicodedata
 from datetime import date
 from decimal import Decimal
@@ -445,7 +446,7 @@ def split_pdf(path, ranges):
                     part.insert_pdf(document, from_page=first, to_page=last)
                     part.save(target)
                 created.append(target)
-        keep = path.parent / EXCLUDED_FOLDER / "나누기 원본"
+        keep = program_folder("excluded", path.parent) / "나누기 원본"
         keep.mkdir(parents=True, exist_ok=True)
         move_evidence(path, free_name(keep, f"{path.stem}__나누기전_원본{path.suffix}"))
     except (OSError, RuntimeError, ValueError):
@@ -1450,7 +1451,7 @@ def duplicate_groups(entries):
 
     def keep_first(entry):
         path = entry[1]
-        matched = path.name.startswith("[") or path.parent.name.startswith("매칭완료_")
+        matched = path.name.startswith("[") or is_matched_folder(path.parent.name)
         try:
             received = path.stat().st_mtime_ns  # the copy that arrived first is kept
         except OSError:
@@ -1629,7 +1630,7 @@ def import_evidence(sources, folder, copy=False, progress=None, base=None):
 
 def evidence_in(folder):
     """Evidence files in a folder and its subfolders, leaving out folders the program keeps apart."""
-    skip = {EXCLUDED_FOLDER, STATEMENT_FOLDER, DUPLICATE_FOLDER}
+    skip = kept_apart_names()
     return sorted(path for path in Path(folder).rglob("*")
                   if path.suffix.lower() in RENAMER_EXTENSIONS and path.is_file() and not path.is_symlink()
                   and not skip & set(path.relative_to(folder).parts[:-1]))
@@ -1756,7 +1757,7 @@ def undo_moves(history, progress=None):
             if current.is_symlink() or digest(current) != checksum:
                 raise OSError("이동한 파일이 변경됐어요.")
             original.parent.mkdir(parents=True, exist_ok=True)
-            move_evidence(current, original)
+            move_across(current, original)  # v1.14: folders may be on another drive
         except OSError as error:
             failed.append((original, current, checksum, str(error)))
         else:
@@ -1766,7 +1767,7 @@ def undo_moves(history, progress=None):
 
 CONFLICTED_COPY = r"(?i)conflicted copy|Konfliktkopie|in Konflikt stehende Kopie|충돌 사본"
 VIEWS = ("전체", "필수 누락", "확인 필요", "인보이스 아님", "변경 가능", "보류", "정리 완료", "매칭 완료")
-MATCHED_PATTERN = r"매칭완료_\d{2}(?:0[1-9]|1[0-2])"  # same as monthly_close.MATCHED_FOLDER
+MATCHED_PATTERN = r"매칭완료_\d{2}(?:0[1-9]|1[0-2])"  # the default name; v1.14 is_matched_folder() also knows a chosen name
 # v1.13: files set aside go to 제외/<reason>; nothing is deleted. Matched files stay in 매칭완료_YYMM (not here).
 EXCLUDE_REASONS = ("중복", "인보이스 아님", "통관·배송 서류", "개인 지출", "기간 밖", "나누기 원본", "기타")
 EXCLUDE_HELP = {
@@ -1778,6 +1779,210 @@ EXCLUDE_HELP = {
     "나누기 원본": "여러 인보이스를 나눈 뒤 남은 원본",
     "기타": "그 밖의 이유",
 }
+
+
+# v1.14: name and place of the folders the program keeps apart (환경설정 → 폴더). Old names keep working.
+PROGRAM_FOLDERS = {
+    "matched": ("매칭완료", "연결이 끝난 인보이스 · 마감월별 ‘이름_YYMM’ 폴더"),
+    "statements": (STATEMENT_FOLDER, "불러온 명세서 원본 · 월별 폴더"),
+    "excluded": (EXCLUDED_FOLDER, "제외한 파일 · 사유별 폴더 (중복 포함)"),
+}
+_FOLDER_CACHE = {}
+
+
+def valid_folder_name(name):
+    """A plain folder name: no path signs, not a month (YYYY-MM), at most 40 letters."""
+    return (isinstance(name, str) and bool(re.fullmatch(r"[^<>:\"/\\|?*\x00-\x1f]{1,40}", name))
+            and name.strip(" .") == name and not re.fullmatch(MONTH_FOLDER, name))
+
+
+def folder_settings():
+    """{kind: {"name", "location"}} for PROGRAM_FOLDERS; location "" means inside the work folder."""
+    try:
+        stamp = settings_path().stat().st_mtime_ns
+    except OSError:
+        stamp = None
+    if stamp is not None and _FOLDER_CACHE.get("stamp") == stamp:
+        return deepcopy(_FOLDER_CACHE["value"])
+    saved = load_settings().get("program_folders")
+    saved = saved if isinstance(saved, dict) else {}
+    result = {}
+    for kind, (default, _) in PROGRAM_FOLDERS.items():
+        entry = saved.get(kind) if isinstance(saved.get(kind), dict) else {}
+        name = str(entry.get("name", "")).strip()
+        location = str(entry.get("location", "")).strip()
+        result[kind] = {"name": name if valid_folder_name(name) else default, "location": location}
+    _FOLDER_CACHE.update(stamp=stamp, value=result)
+    return deepcopy(result)
+
+
+def folder_base(kind, root, settings=None):
+    """Where the folders of one kind are made: the chosen location, else root."""
+    location = (settings or folder_settings())[kind]["location"]
+    return Path(location) if location else Path(root)
+
+
+def program_folder(kind, root, settings=None):
+    """The 명세서 / 제외 folder (configured name, in the chosen place or in root)."""
+    settings = settings or folder_settings()
+    return folder_base(kind, root, settings) / settings[kind]["name"]
+
+
+def matched_folder(root, month, settings=None):
+    """매칭완료_YYMM (configured name) for a closing month ‘YYYY-MM’."""
+    settings = settings or folder_settings()
+    return folder_base("matched", root, settings) / f"{settings['matched']['name']}_{month[2:4]}{month[5:7]}"
+
+
+def matched_pattern(settings=None):
+    names = {PROGRAM_FOLDERS["matched"][0], (settings or folder_settings())["matched"]["name"]}
+    return r"(?:%s)_\d{2}(?:0[1-9]|1[0-2])" % "|".join(sorted(map(re.escape, names)))
+
+
+def is_matched_folder(name, settings=None):
+    return re.fullmatch(matched_pattern(settings), name) is not None
+
+
+def kept_apart_names(settings=None):
+    """Folder names whose files are not invoices to work on (statements, excluded, old 중복), old and new names."""
+    settings = settings or folder_settings()
+    return {STATEMENT_FOLDER, EXCLUDED_FOLDER, DUPLICATE_FOLDER, settings["statements"]["name"], settings["excluded"]["name"]}
+
+
+def relocation_plan(kind, work, old, new):
+    """[(source file, target file)] to bring existing files from the old folder setting to the new one.
+    matched: every ‘매칭완료_YYMM’ folder in the work folder (and its month folders) or in the old place."""
+    pairs = []
+    if kind == "matched":
+        pattern = matched_pattern(old)
+        roots = [folder_base(kind, work, old)]
+        if not old[kind]["location"]:
+            roots += [child for child in Path(work).iterdir() if child.is_dir() and re.fullmatch(MONTH_FOLDER, child.name)] \
+                if Path(work).is_dir() else []
+        for base in roots:
+            if not base.is_dir():
+                continue
+            for child in base.iterdir():
+                if not child.is_dir() or child.is_symlink() or not re.fullmatch(pattern, child.name):
+                    continue
+                suffix = child.name.rsplit("_", 1)[1]
+                target_base = folder_base(kind, work if old[kind]["location"] else base, new)
+                target = target_base / f"{new[kind]['name']}_{suffix}"
+                if target.resolve() != child.resolve():
+                    pairs += [(path, target / path.relative_to(child)) for path in child.rglob("*") if path.is_file()]
+        return pairs
+    source, target = program_folder(kind, work, old), program_folder(kind, work, new)
+    if not source.is_dir() or source.resolve() == target.resolve():
+        return []
+    return [(path, target / path.relative_to(source)) for path in source.rglob("*") if path.is_file()]
+
+
+def relocate_files(pairs, progress=None, keep=()):
+    """Move the files of relocation_plan (never overwriting). Returns (moved [(old, new)], errors).
+    Folders left empty are removed, but never one in keep (the work folder, chosen places) or above it."""
+    keep = [Path(folder).resolve() for folder in keep]
+    moved, errors = [], []
+    for position, (source, target) in enumerate(pairs, 1):
+        if progress:
+            progress(position, len(pairs), source.name)
+        if not source.is_file():  # a Markdown summary that already went with its invoice
+            continue
+        try:
+            if target.exists():
+                raise OSError("같은 이름의 파일이 이미 있어요.")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            move_across(source, target)
+        except OSError as error:
+            errors.append(f"{source.name}: {error}")
+            continue
+        moved.append((source, target))
+    for source, _ in moved:  # empty folders left behind are removed, never folders with files
+        folder = source.parent
+        while (folder.is_dir() and not any(folder.iterdir())
+               and not any(folder.resolve() == kept or kept.is_relative_to(folder.resolve()) for kept in keep)):
+            try:
+                folder.rmdir()
+            except OSError:
+                break
+            folder = folder.parent
+    return moved, errors
+
+
+def update_exclusion_log(moved):
+    """Keep ‘제외 기록’ restorable after the excluded folder moved."""
+    if not moved:
+        return
+    mapping = {str(old): str(new) for old, new in moved}
+    log = load_exclusion_log()
+    changed = False
+    for entry in log:
+        if isinstance(entry, dict) and entry.get("to") in mapping:
+            entry["to"] = mapping[entry["to"]]
+            changed = True
+    if changed:
+        path = exclusion_log_path()
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(log[-5000:], ensure_ascii=False, indent=1), encoding="utf-8")
+        temporary.replace(path)
+
+
+
+# v1.14: receipts photographed with the phone land in a synced folder (Dropbox camera uploads …); new ones are copied in
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
+
+
+def photo_log_path():
+    return user_data_folder() / "photo-imports.json"
+
+
+def load_photo_log():
+    try:
+        data = json.loads(photo_log_path().read_text(encoding="utf-8")) if photo_log_path().is_file() else {}
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def photo_key(path, info=None):
+    info = info or Path(path).stat()
+    return f"{Path(path).name}|{info.st_size}|{int(info.st_mtime)}"
+
+
+def new_photos(folder, days=30, log=None):
+    """[(path, modified datetime)] of photos/PDFs in folder (and below) not taken in or hidden before, newest first.
+    days: only files changed in the last days (None: all)."""
+    from datetime import datetime, timedelta
+    log = load_photo_log() if log is None else log
+    limit = datetime.now() - timedelta(days=days) if days else None
+    found = []
+    for path in Path(folder).rglob("*"):
+        if path.suffix.lower() not in PHOTO_EXTENSIONS or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        changed = datetime.fromtimestamp(info.st_mtime)
+        if (limit and changed < limit) or photo_key(path, info) in log:
+            continue
+        found.append((path, changed))
+    return sorted(found, key=lambda item: item[1], reverse=True)
+
+
+def remember_photos(paths, action):
+    """Mark photos as taken in (‘가져옴’) or hidden (‘숨김’) so they are not offered again."""
+    log = load_photo_log()
+    today = date.today().isoformat()
+    for path in paths:
+        try:
+            log[photo_key(path)] = {"date": today, "action": action}
+        except OSError:
+            continue
+    path = photo_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
+    temporary.replace(path)
 
 
 def exclusion_log_path():
@@ -1807,7 +2012,7 @@ def log_exclusions(entries):
 def exclude_files(root, paths, reason, progress=None):
     """Move files to root/제외/<reason>. Returns (history for undo_moves, errors). Nothing is deleted."""
     from datetime import datetime
-    target_folder = Path(root) / EXCLUDED_FOLDER / reason
+    target_folder = program_folder("excluded", root) / reason
     target_folder.mkdir(parents=True, exist_ok=True)
     occupied = {item.name.casefold() for item in target_folder.iterdir()}
     history, errors, entries = [], [], []
@@ -1820,7 +2025,7 @@ def exclude_files(root, paths, reason, progress=None):
             if target is None:
                 raise OSError("파일명이 너무 길어요.")
             checksum = digest(path)
-            move_evidence(path, target)
+            move_across(path, target)
         except OSError as error:
             errors.append(f"{path.name}: {error}")
             continue
@@ -1929,6 +2134,7 @@ class App:
         self.on_import_statements = None  # step 1 right-click ‘명세서로 불러오기’ → step 2 import
         self.on_loaded = None  # called after the folder was read (the main window then stops announcing changes)
         self.on_manage_rules = None  # automatic rules for recurring payments (step 3)
+        self.on_folders_moved = None  # v1.14: step 2-5 updates saved statement paths after 폴더 이름·위치 moved files
         if container is None:
             title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
             root.title(f"[연습 모드] {title}" if practice_folder else title)
@@ -1959,6 +2165,7 @@ class App:
             ("작업 폴더 열기 (탐색기)", self.reveal_work_folder),
             ("다른 폴더 열기 (옮기지 않고 보기)", self.choose),
             ("새 인보이스 (미분류)", self.open_inbox),
+            ("휴대폰 사진 가져오기", self.import_photos),
             ("배운 인보이스 양식", self.manage_learned),
             ("제외 기록 보기", self.show_exclusion_log),
             ("새로고침 (바뀐 파일만, F5)", lambda: self.load_folder()),
@@ -2196,6 +2403,111 @@ class App:
                 return
         self.finish_import(files)
 
+    def import_photos(self, ask_folder=False):
+        """v1.14: new receipt photos from the phone folder (환경설정 → 폴더). Always copied; the photos stay where they are.
+        Photos taken in or hidden are not offered again."""
+        if self.practice_folder:
+            self.notice("연습 모드에서는 파일을 가져오지 않아요.")
+            return
+        folder = load_settings().get("photo_folder") or ""
+        if ask_folder or not folder or not Path(folder).is_dir():
+            folder = filedialog.askdirectory(parent=self.root, title="휴대폰 영수증 사진이 올라오는 폴더 (예: Dropbox/카메라 업로드)")
+            if not folder:
+                return
+            source, target = Path(folder).resolve(), work_folder().resolve()
+            if source.is_relative_to(target) or target.is_relative_to(source):
+                self.notice("작업 폴더이거나 작업 폴더를 품은 폴더예요. 다른 폴더를 고르세요.", kind="warn")
+                return
+            save_settings({"photo_folder": str(Path(folder))})
+        dialog = InlineDialog(self.root)
+        dialog.title("휴대폰 사진 가져오기")
+        dialog.center(820, 560)
+        top = ttk.Frame(dialog, padding=(12, 10))
+        top.pack(fill="x")
+        ttk.Label(top, text=f"폴더: {folder}", wraplength=560).pack(side="left")
+        days = ttk.Combobox(top, values=("최근 7일", "최근 30일", "최근 90일", "전체"), state="readonly", width=10)
+        days.set(load_settings().get("photo_days", "최근 30일"))
+        days.pack(side="right")
+        footer = ttk.Frame(dialog, padding=(12, 8))
+        footer.pack(side="bottom", fill="x")
+        hide_rest = tk.BooleanVar(value=True)
+        ttk.Checkbutton(footer, text="고르지 않은 사진은 다음부터 숨기기", variable=hide_rest).pack(side="left")
+        table_frame = ttk.Frame(dialog, padding=(12, 0))
+        table_frame.pack(fill="both", expand=True)
+        table = ttk.Treeview(table_frame, columns=("pick", "when", "name", "size"), show="headings", selectmode="extended")
+        for column, title, width in (("pick", "넣기", 50), ("when", "찍은·바뀐 때", 140), ("name", "파일", 470), ("size", "크기", 80)):
+            table.heading(column, text=title)
+            table.column(column, width=width, anchor="w")
+        table.pack(side="left", fill="both", expand=True)
+        bar = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
+        bar.pack(side="right", fill="y")
+        table.configure(yscrollcommand=bar.set)
+        found, picked = {}, set()
+        summary = tk.StringVar()
+        ttk.Label(dialog, textvariable=summary, padding=(12, 4)).pack(side="bottom", anchor="w")
+
+        def fill(*_):
+            save_settings({"photo_days": days.get()})
+            limit = {"최근 7일": 7, "최근 30일": 30, "최근 90일": 90}.get(days.get())
+            try:
+                items = new_photos(folder, limit)
+            except OSError as error:
+                summary.set(f"폴더를 읽지 못했어요: {error}")
+                return
+            table.delete(*table.get_children())
+            found.clear()
+            picked.clear()
+            for index, (path, changed) in enumerate(items[:2000]):
+                iid = str(index)
+                found[iid] = path
+                picked.add(iid)
+                try:
+                    size = f"{path.stat().st_size / 1024:,.0f} KB"
+                except OSError:
+                    size = ""
+                table.insert("", "end", iid=iid, values=("☑", changed.strftime("%Y-%m-%d %H:%M"), str(path.relative_to(folder)), size))
+            summary.set(f"새 사진·PDF {len(found)}개 · 행을 누르면 넣기/빼기 · 사진은 복사만 하고 원본은 그대로 둬요."
+                        if found else "새 사진이 없어요. 기간을 늘려 보세요.")
+
+        def toggle(event):
+            row = table.identify_row(event.y)
+            if not row:
+                return
+            picked.symmetric_difference_update({row})
+            table.set(row, "pick", "☑" if row in picked else "☐")
+
+        def take():
+            chosen = [found[iid] for iid in found if iid in picked]
+            rest = [found[iid] for iid in found if iid not in picked]
+            if not chosen and not (rest and hide_rest.get()):
+                show_notice(dialog, "가져올 사진을 고르세요.")
+                return
+            dialog.destroy()
+            if not self.use_work_folder(load=False):
+                return
+            history, errors = [], []
+            if chosen:
+                with Busy(self.root, "사진을 작업 폴더로 복사하고 있어요") as busy:
+                    history, _inside, errors = import_evidence(chosen, self.folder, copy=True, progress=busy.step)
+            try:
+                remember_photos([source for source, _target, _checksum in history], "가져옴")
+                if hide_rest.get():
+                    remember_photos(rest, "숨김")
+            except OSError as error:
+                record_error("photo_log", error)
+            self.load_folder()
+            self.notice(f"사진 {len(history)}개를 작업 폴더로 복사했어요." + (f" 숨긴 사진 {len(rest)}개." if hide_rest.get() and rest else "")
+                        + (f"\n복사하지 못한 사진 {len(errors)}개: " + " / ".join(errors[:3]) if errors else "")
+                        + "\n빨간 행은 편집에서 날짜·업체·금액을 적어 주세요.", kind="warn" if errors else "info", title="사진 가져오기")
+            if self.on_change:
+                self.on_change()
+
+        table.bind("<Button-1>", toggle)
+        days.bind("<<ComboboxSelected>>", fill)
+        ttk.Button(footer, text="가져오기 (복사)", style="Primary.TButton", command=take).pack(side="right")
+        ttk.Button(footer, text="폴더 바꾸기", command=lambda: (dialog.destroy(), self.import_photos(ask_folder=True))).pack(side="right", padx=6)
+        fill()
+
     def finish_import(self, files, base=None):
         if not self.use_work_folder(load=False):
             return
@@ -2236,7 +2548,7 @@ class App:
         """Settings in tabs: 일반, 폴더, 메일, 명세서·계좌, 인보이스 양식, 사유, 자동 규칙 (v1.13)."""
         dialog = InlineDialog(self.root)
         dialog.title("환경설정")
-        dialog.geometry("780x480")
+        dialog.geometry("840x600")
         dialog.grab_set()
         tabs = ttk.Notebook(dialog)
         tabs.pack(fill="both", expand=True, padx=12, pady=(10, 0))
@@ -2293,11 +2605,36 @@ class App:
         ttk.Button(buttons, text="작업 폴더 바꾸기", command=lambda: (self.change_work_folder(), folder_text.set(str(work_folder())))
                    ).pack(side="left")
         ttk.Button(buttons, text="탐색기로 열기", command=self.reveal_work_folder).pack(side="left", padx=8)
-        note(folders, f"작업 폴더 안에 프로그램이 만드는 폴더: 발행월 폴더(YYYY-MM), 매칭완료_YYMM, ‘{STATEMENT_FOLDER}’, "
-                      f"‘{EXCLUDED_FOLDER}’(사유별: {', '.join(EXCLUDE_REASONS)}). 이 폴더들은 프로그램이 이름으로 찾으니 "
-                      "탐색기에서 이름을 바꾸지 마세요. 폴더 위치를 따로 정하는 기능은 다음 버전(v1.14)에서 넣을게요.", 3)
-        ttk.Button(folders, text="제외 기록 보기", command=lambda: (dialog.destroy(), self.show_exclusion_log())).grid(
-            row=4, column=0, sticky="w", pady=(14, 0))
+        note(folders, "프로그램이 만드는 폴더는 아래에서 이름과 위치를 정해요. 탐색기에서 직접 이름을 바꾸면 프로그램이 찾지 못해요. "
+                      f"제외 폴더 안에는 사유별 폴더({', '.join(EXCLUDE_REASONS)})가 생겨요.", 3)
+        extra = ttk.Frame(folders)
+        extra.grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Button(extra, text="제외 기록 보기", command=lambda: (dialog.destroy(), self.show_exclusion_log())).pack(side="left")
+        ttk.Button(extra, text="휴대폰 사진 폴더 정하기", command=lambda: (dialog.destroy(), self.import_photos(ask_folder=True))).pack(
+            side="left", padx=8)
+        sales = tk.StringVar(value=load_settings().get("sales_folder") or "")
+        sales_text = tk.StringVar()
+
+        def show_sales():
+            sales_text.set(f"매출 인보이스 폴더: {sales.get()}" if sales.get() else "매출 인보이스 폴더: 없음 (내가 발행한 인보이스를 들어온 돈과 연결하려면 정하세요)")
+
+        def pick_sales(clear=False):
+            chosen = "" if clear else filedialog.askdirectory(parent=dialog, title="내가 발행한 인보이스(Ausgangsrechnung) 폴더")
+            if not clear and not chosen:
+                return
+            save_settings({"sales_folder": str(Path(chosen)) if chosen else ""})
+            sales.set(str(Path(chosen)) if chosen else "")
+            show_sales()
+            if self.on_work_folder and self.folder is not None:
+                self.on_work_folder(self.folder)  # step 3 reads the folder again
+
+        show_sales()
+        sales_row = ttk.Frame(folders)
+        sales_row.grid(row=8, column=0, columnspan=3, sticky="w", pady=(16, 0))
+        ttk.Label(sales_row, textvariable=sales_text, wraplength=560).pack(side="left")
+        ttk.Button(sales_row, text="정하기", style="Small.TButton", command=pick_sales).pack(side="left", padx=6)
+        ttk.Button(sales_row, text="해제", style="Small.TButton", command=lambda: pick_sales(True)).pack(side="left")
+        self.program_folder_rows(folders, 5, dialog)
         # 메일 ---------------------------------------------------------
         if self.on_manage_mail:
             mail = page("메일")
@@ -2332,6 +2669,92 @@ class App:
         titles = [tabs.tab(index, "text") for index in tabs.tabs()]
         if tab in titles:
             tabs.select(titles.index(tab))
+
+    def program_folder_rows(self, parent, row, dialog):
+        """v1.14 환경설정 → 폴더: name and place of 매칭완료 / 명세서 / 제외. Saving offers to move the existing files."""
+        ttk.Label(parent, text="프로그램 폴더 이름·위치", font=FONT_BOLD).grid(row=row, column=0, sticky="w", pady=(18, 4))
+        table = ttk.Frame(parent)
+        table.grid(row=row + 1, column=0, columnspan=3, sticky="we")
+        current = folder_settings()
+        fields = {}
+        for line, (kind, (default, meaning)) in enumerate(PROGRAM_FOLDERS.items()):
+            ttk.Label(table, text=meaning, style="Muted.TLabel").grid(row=line * 2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+            name = ttk.Entry(table, width=16)
+            name.insert(0, current[kind]["name"])
+            name.grid(row=line * 2 + 1, column=0, sticky="w")
+            place = tk.StringVar(value=current[kind]["location"])
+            shown = tk.StringVar()
+
+            def show(place=place, shown=shown):
+                shown.set(f"위치: {place.get()}" if place.get() else "위치: 작업 폴더 안 (기본)")
+
+            def pick(place=place, show=show, default=default):
+                chosen = filedialog.askdirectory(parent=dialog, title=f"‘{default}’ 폴더를 만들 위치",
+                                                 initialdir=place.get() or str(work_folder()))
+                if chosen:
+                    place.set("" if Path(chosen).resolve() == work_folder().resolve() else str(Path(chosen)))
+                    show()
+
+            show()
+            ttk.Label(table, textvariable=shown, wraplength=470).grid(row=line * 2 + 1, column=1, sticky="w", padx=8)
+            ttk.Button(table, text="위치 바꾸기", style="Small.TButton", command=pick).grid(row=line * 2 + 1, column=2, padx=2)
+            ttk.Button(table, text="기본으로", style="Small.TButton",
+                       command=lambda place=place, show=show, name=name, default=default: (
+                           place.set(""), name.delete(0, "end"), name.insert(0, default), show())).grid(row=line * 2 + 1, column=3)
+            fields[kind] = (name, place)
+        table.columnconfigure(1, weight=1)
+
+        def save():
+            old = folder_settings()
+            new = {}
+            for kind, (name, place) in fields.items():
+                text = name.get().strip()
+                if not valid_folder_name(text):
+                    show_notice(dialog, f"‘{text}’은 폴더 이름으로 쓸 수 없어요. \\ / : * ? \" < > | 없이 40자 이내로, "
+                                        "YYYY-MM 모양이 아니게 적어 주세요.")
+                    return
+                new[kind] = {"name": text, "location": place.get()}
+            if len({entry["name"].casefold() for entry in new.values()}) < len(new):
+                show_notice(dialog, "세 폴더의 이름이 서로 달라야 해요.")
+                return
+            if new == old:
+                show_notice(dialog, "바뀐 것이 없어요.")
+                return
+            work = work_folder()
+            try:
+                pairs = [pair for kind in new if new[kind] != old[kind] for pair in relocation_plan(kind, work, old, new)]
+            except OSError as error:
+                show_notice(dialog, f"기존 폴더를 읽지 못했어요: {error}", kind="error")
+                return
+            move = bool(pairs) and ask_yes_no(
+                "폴더 이름·위치", f"지금 있는 폴더의 파일 {len(pairs)}개를 새 이름·위치로 옮길까요?\n"
+                "옮기지 않으면 예전 폴더는 그대로 남아요. 다른 위치에 남은 매칭완료 파일은 3단계에서 읽지 않아요.",
+                parent=dialog, ok="옮기기", cancel="설정만 바꾸기")
+            try:
+                save_settings({"program_folders": new})
+            except OSError as error:
+                show_notice(dialog, f"설정을 저장하지 못했어요: {error}", kind="error")
+                return
+            moved, errors = [], []
+            if move:
+                places = [work] + [entry["location"] for setting in (old, new) for entry in setting.values() if entry["location"]]
+                with Busy(self.root, "폴더를 옮기고 있어요") as busy:
+                    moved, errors = relocate_files(pairs, busy.step, keep=places)
+                try:
+                    update_exclusion_log(moved)
+                except OSError as error:
+                    record_error("exclusion_log", error)
+                if self.on_folders_moved and moved:
+                    self.on_folders_moved(moved)
+            self.status.set(f"폴더 이름·위치를 저장했어요 · 옮긴 파일 {len(moved)}개" + (f" · 실패 {len(errors)}개" if errors else ""))
+            if errors:
+                show_notice(dialog, "옮기지 못한 파일 (원래 자리에 그대로 있어요):\n" + "\n".join(errors[:10]), kind="error")
+            if self.folder is not None and not self.practice_folder:
+                self.load_folder()
+            if self.on_work_folder and self.folder is not None:
+                self.on_work_folder(self.folder)
+
+        ttk.Button(parent, text="폴더 이름·위치 저장", command=save).grid(row=row + 2, column=0, sticky="w", pady=(10, 0))
 
     def update_import_labels(self):
         """‘파일 가져오기 (복사)’ or ‘(이동)’: the button says what happens to the originals."""
@@ -2387,11 +2810,12 @@ class App:
                 candidates = (self.folder / "미분류").rglob("*")
             else:
                 candidates = self.folder.rglob("*") if self.include_subfolders.get() else self.folder.iterdir()
+            kept_apart = kept_apart_names()
             paths = sorted(
                 path for path in candidates
                 if path.suffix.lower() in RENAMER_EXTENSIONS and not path.is_symlink() and path.is_file()
                 and path.resolve().is_relative_to(root)
-                and not {EXCLUDED_FOLDER, STATEMENT_FOLDER, DUPLICATE_FOLDER} & set(path.relative_to(self.folder).parts[:-1])
+                and not kept_apart & set(path.relative_to(self.folder).parts[:-1])
             )
         except OSError as error:
             self.status.set(str(error))
@@ -2492,11 +2916,12 @@ class App:
         shown = []
         view = self.view.get() if hasattr(self, "view") else "전체"
         marks = getattr(self, "marks", {})
+        matched_rule = matched_pattern()
         for key, (path, fields, note, number) in self.rows.items():
             source_label = str(path.relative_to(self.folder))
             check, tag = self.row_check(path, fields, note, number)
             counts[tag] += 1
-            matched = any(re.fullmatch(MATCHED_PATTERN, part) for part in path.relative_to(self.folder).parts[:-1])
+            matched = any(re.fullmatch(matched_rule, part) for part in path.relative_to(self.folder).parts[:-1])
             hold = marks.get(path, {}).get("hold")
             folder = self.folder / fields[0][:7] if organize and fields[0] else path.parent
             name = proposed_name(fields, path, number)
@@ -2633,7 +3058,7 @@ class App:
             if not chosen:
                 show_notice(dialog, "옮길 파일을 체크하세요.")
                 return
-            target_folder = self.folder / EXCLUDED_FOLDER / "중복"
+            target_folder = program_folder("excluded", self.folder) / "중복"
             if not ask_yes_no("중복 정리", f"체크한 파일 {len(chosen)}개를 ‘{EXCLUDED_FOLDER}/중복’ 폴더로 옮길까요?\n"
                                          "묶음마다 남길 파일 한 개는 그대로 있어요.", parent=dialog,
                               warnings=["‘정보만 같음’ 파일은 독촉장·재발행본일 수 있어요. 열어 보고 체크했는지 확인하세요."]
@@ -2961,7 +3386,7 @@ class App:
             show_toast(self.root, f"{len(history)}개를 원래 자리로 되돌렸어요")
 
         ttk.Button(footer, text="선택 되돌리기", command=restore).pack(side="left")
-        ttk.Button(footer, text="제외 폴더 열기", command=lambda: self.folder and self.reveal(self.folder / EXCLUDED_FOLDER / ".")).pack(side="left", padx=8)
+        ttk.Button(footer, text="제외 폴더 열기", command=lambda: self.folder and self.reveal(program_folder("excluded", self.folder) / ".")).pack(side="left", padx=8)
         ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right")
 
     def row_fields(self, path):
@@ -3295,7 +3720,7 @@ class App:
                     self.stamps[paths[row[0]]] = file_stamp(paths[row[0]])
             self.load_folder()
         back = [{"at": date.today().isoformat(), "from": str(current), "to": str(original), "reason": "", "action": "되돌림"}
-                for current, original in restored if EXCLUDED_FOLDER in current.parts]
+                for current, original in restored if kept_apart_names() & set(current.parts)]
         try:
             log_exclusions(back)
         except OSError as error:

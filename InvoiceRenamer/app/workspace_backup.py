@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from invoice_renamer import EVIDENCE_EXTENSIONS, STATEMENT_FOLDER, digest
+from invoice_renamer import EVIDENCE_EXTENSIONS, STATEMENT_FOLDER, digest, folder_base, folder_settings, matched_pattern
 
 
 ATTACHMENT_EXTENSIONS = {".pdf", ".xml", ".png", ".jpg", ".jpeg", ".eml", ".txt", ".csv"}
@@ -63,10 +63,19 @@ def create_backup(target, state, evidence_folder, attachments, edits):
 
     if evidence_folder and evidence_folder.is_dir():
         root = evidence_folder.resolve()
+        choice = folder_settings()
+        statement_names = {STATEMENT_FOLDER, choice["statements"]["name"]}
         for path in evidence_folder.rglob("*"):
             if path.suffix.lower() in EVIDENCE_EXTENSIONS | {".md", ".xml"} and path.is_file() and not path.is_symlink():
-                if path.resolve().is_relative_to(root) and path.relative_to(evidence_folder).parts[0] != STATEMENT_FOLDER:
+                if path.resolve().is_relative_to(root) and path.relative_to(evidence_folder).parts[0] not in statement_names:
                     include(path, f"Belege/{path.relative_to(evidence_folder).as_posix()}")
+        outside = folder_base("matched", evidence_folder, choice)  # v1.14: 매칭완료 folders kept in another place
+        if choice["matched"]["location"] and outside.is_dir() and not outside.resolve().is_relative_to(root):
+            for folder in outside.iterdir():
+                if folder.is_dir() and re.fullmatch(matched_pattern(choice), folder.name):
+                    for path in folder.rglob("*"):
+                        if path.suffix.lower() in EVIDENCE_EXTENSIONS | {".md", ".xml"} and path.is_file() and not path.is_symlink():
+                            include(path, f"Belege/{path.relative_to(outside).as_posix()}")
     else:
         missing.append("Belege/ (인보이스 폴더를 열지 않음)")
     for index, (key, path) in enumerate(sources.items(), 1):

@@ -130,6 +130,7 @@ class Shell:
             self.close.on_month = self.set_month
             self.app.on_manage_rules = self.close.manage_recurring
             self.app.on_manage_formats = self.close.manage_formats
+            self.app.on_folders_moved = self.close.paths_moved
         except RuntimeError:
             self.close = None
         self.build_sidebar()
