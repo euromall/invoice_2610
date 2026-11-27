@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import atexit
 import json
 import os
 import re
@@ -265,9 +266,117 @@ def open_evidence(path):
         return pymupdf.open("pdf", image.convert_to_pdf())
 
 
+TEXT_CACHE_VERSION = 1  # bump when the way pages are read (OCR settings) changes
+_DIGEST_INDEX = {"loaded": False, "data": {}, "dirty": False}
+
+
+def text_cache_folder():
+    """v1.13.1: what was read from each file (text layer and OCR), so unchanged files are not read again next time."""
+    return user_data_folder() / "text-cache"
+
+
+def _stamp_key(path):
+    info = Path(path).stat()
+    return f"{info.st_size}|{info.st_mtime_ns}|{Path(path).resolve()}"
+
+
+def _digest_index():
+    if not _DIGEST_INDEX["loaded"]:
+        _DIGEST_INDEX["loaded"] = True
+        try:
+            data = json.loads((text_cache_folder() / "files.json").read_text(encoding="utf-8"))
+            _DIGEST_INDEX["data"] = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _DIGEST_INDEX["data"] = {}
+    return _DIGEST_INDEX["data"]
+
+
+def known_digest(path):
+    """Content hash of a file, remembered across starts by size + change time + path (no need to read the file again)."""
+    try:
+        stamp = _stamp_key(path)
+    except OSError:
+        return None
+    index = _digest_index()
+    if stamp not in index:
+        try:
+            index[stamp] = digest(Path(path))
+        except OSError:
+            return None
+        _DIGEST_INDEX["dirty"] = True
+    return index[stamp]
+
+
+def flush_text_cache():
+    """Write the file → content hash list (called after a folder is read and when the program ends)."""
+    if not _DIGEST_INDEX["dirty"]:
+        return
+    index = _digest_index()
+    if len(index) > 50000:  # old entries of files that no longer exist: keep the newest part
+        for stamp in list(index)[:len(index) - 40000]:
+            index.pop(stamp, None)
+    try:
+        folder = text_cache_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=folder, delete=False, suffix=".tmp") as stream:
+            json.dump(index, stream, ensure_ascii=False)
+        os.replace(stream.name, folder / "files.json")
+        _DIGEST_INDEX["dirty"] = False
+    except OSError as error:
+        record_error("text_cache", error)
+
+
+def _cached_pages(checksum):
+    try:
+        data = json.loads((text_cache_folder() / checksum[:2] / f"{checksum}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("v") != TEXT_CACHE_VERSION or not isinstance(data.get("pages"), list):
+        return None
+    return [tuple(page) for page in data["pages"] if isinstance(page, list) and len(page) == 3]
+
+
+def _store_pages(checksum, pages):
+    try:
+        folder = text_cache_folder() / checksum[:2]
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{checksum}.json"
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=folder, delete=False, suffix=".tmp") as stream:
+            json.dump({"v": TEXT_CACHE_VERSION, "pages": [list(page) for page in pages]}, stream, ensure_ascii=False)
+        os.replace(stream.name, target)
+    except OSError as error:
+        record_error("text_cache", error)
+
+
+def forget_text(paths):
+    """‘다시 읽기’: drop what was stored for these files so they are really read (and OCR'd) again."""
+    for path in paths:
+        checksum = known_digest(path)
+        if checksum:
+            try:
+                (text_cache_folder() / checksum[:2] / f"{checksum}.json").unlink()
+            except OSError:
+                pass
+
+
+atexit.register(flush_text_cache)
+
+
 def read_pdf_pages(path):
+    """(text, sorted text, note) per page. Unchanged files come from the text cache; a page that could not be
+    read completely (no OCR data, OCR failed) is not stored, so it is tried again next time."""
     if Path(path).suffix.lower() == ".xml":
         return
+    checksum = known_digest(path)
+    pages = _cached_pages(checksum) if checksum else None
+    if pages is None:
+        pages = list(_read_pdf_pages(path))
+        if checksum and pages and not any(note for _, _, note in pages):
+            _store_pages(checksum, pages)
+    yield from pages
+
+
+def _read_pdf_pages(path):
     with open_evidence(path) as document:
         for page in document:
             text = page.get_text()
@@ -358,7 +467,7 @@ def read_invoice_details(path, info=None):
     structured = structured_fields(Path(path))
     if structured and (all(structured[0]) or Path(path).suffix.lower() == ".xml"):
         fields, number, correction = structured
-        override = load_invoice_edits().get(digest(path))
+        override = load_invoice_edits().get(known_digest(path))
         if override:
             fields = tuple(override[:3])
             if len(override) > 3:
@@ -393,7 +502,7 @@ def read_invoice_details(path, info=None):
     for layout in layouts:
         numbers.extend(re.findall(INVOICE_NUMBER, layout))
         correction |= bool(re.search(r"(?im)^\s*(?:Gutschrift|Stornorechnung|Credit Note)\b", layout))
-    override = load_invoice_edits().get(digest(path))
+    override = load_invoice_edits().get(known_digest(path))
     number = unique(numbers)
     checks = {}  # field -> why the value needs a look (shown as ‘확인 필요’)
     if len(set(numbers)) > 1:
@@ -423,7 +532,7 @@ def read_invoice_details(path, info=None):
             number = override[3]
         checks = {}
     flags = load_flags() if not info["invoice_like"] else {}
-    if flags and flags.get(digest(path), {}).get("invoice"):
+    if flags and flags.get(known_digest(path), {}).get("invoice"):
         info["invoice_like"] = True
         info.pop("kind", None)
     info["checks"] = checks
@@ -1118,22 +1227,11 @@ TRANSACTION_PREFIX = r"\[\d{3}-\d{3}\]_"
 SHORT_TOTAL = r"-?\d+(?:\.\d{1,2})?(?: [A-Z]{3})?"
 SHORT_DATE = r"\d{2}-\d{2}-\d{2}"
 DUPLICATE_SUFFIX = r" \(\d+\)"
-_DIGESTS = {}
 
 
 def cached_digest(path):
-    path = Path(path)
-    try:
-        info = path.stat()
-    except OSError:
-        return None
-    key = (str(path), info.st_size, info.st_mtime_ns)
-    if key not in _DIGESTS:
-        try:
-            _DIGESTS[key] = digest(path)
-        except OSError:
-            return None
-    return _DIGESTS[key]
+    """Content hash, remembered by size + change time (v1.13.1: also across starts, see known_digest)."""
+    return known_digest(path)
 
 
 def original_names_path():
@@ -2323,6 +2421,7 @@ class App:
             self.table.insert("", "end", iid=str(index))
         if busy:
             busy.close()
+        flush_text_cache()
         try:
             self.marks = marks_for([row[0] for row in self.rows.values()])
         except OSError:
@@ -2627,6 +2726,7 @@ class App:
                           warnings=[f"파일이 많으면 몇 분 걸릴 수 있어요 (스캔 PDF는 글자 인식 포함)."] if count > 300 else (),
                           undo="읽기만 하므로 파일은 바뀌지 않아요.", ok="모두 읽기"):
             return
+        forget_text([row[0] for row in self.rows.values()])
         try:
             from monthly_close import clear_index_cache
             clear_index_cache()
@@ -2766,6 +2866,7 @@ class App:
         """Read the chosen files again (after the file changed or a mark was removed)."""
         wanted = set(paths)
         keys = [key for key, row in self.rows.items() if row[0] in wanted]
+        forget_text([self.rows[key][0] for key in keys])
         with Busy(self.root, "다시 읽고 있어요") as busy:
             for index, key in enumerate(keys, 1):
                 path = self.rows[key][0]

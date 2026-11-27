@@ -460,6 +460,7 @@ class Shell:
         """Start overview: what is left in each step, with a button that goes there."""
         from ui_theme import InlineDialog
         from monthly_close import backup_folder, double_payments
+        from invoice_renamer import load_settings
         dialog = InlineDialog(self.root)
         dialog.title("오늘 할 일")
         dialog.center(860, 560)
@@ -502,8 +503,8 @@ class Shell:
             if late:
                 items.append(("3단계", f"인보이스 요청 기한이 지난 거래 {len(late)}건", lambda: (self.show(3), close.followup_list())))
         files = sorted(backup_folder().glob("auto_*.json")) if backup_folder().is_dir() else []
-        if not files:
-            items.append(("백업", "작업 기록 백업이 아직 없어요", self.open_backups))
+        if not files and not load_settings().get("auto_backup", True):
+            items.append(("백업", "자동 백업이 꺼져 있어요 · 백업·복원에서 지금 백업할 수 있어요", self.open_backups))
         ttk.Label(body, text="지금 남은 일", font=FONT_BOLD).pack(anchor="w", pady=(0, 8))
         if not items:
             ttk.Label(body, text="남은 일이 없어요. 4단계 ‘누락 점검’과 5단계 ‘세무사 제출’을 확인하세요.").pack(anchor="w")
@@ -539,11 +540,25 @@ class Shell:
         close.status.set("이중 결제 의심: " + " / ".join(
             f"{close.record(a.key).get('number', '')}·{close.record(b.key).get('number', '')} {a.amount} {a.currency}" for a, b in pairs[:5]))
 
-    def today_on_start(self):
+    def today_on_start(self, tries=0):
         from invoice_renamer import load_settings, save_settings
+        from ui_theme import Busy, InlineDialog
         settings = load_settings()
         today = date.today().isoformat()
         if self.practice_folder or not settings.get("today_on_start", True) or settings.get("today_shown") == today:
+            return
+        # v1.13.1: wait until the first reading (progress card), a pop-up or another panel is finished,
+        # so ‘오늘 할 일’ never covers the progress and its counts are complete
+        try:
+            self.root.focus_get()
+            dialog_open = False
+        except (KeyError, tk.TclError):
+            dialog_open = True  # a message box has the focus
+        busy = Busy._active is not None and Busy._active.frame.winfo_exists()
+        panel = any(isinstance(child, InlineDialog) for child in self.root.winfo_children())
+        if busy or panel or dialog_open:
+            if tries < 600:  # give up after about 10 minutes
+                self.root.after(1000, lambda: self.today_on_start(tries + 1))
             return
         save_settings({"today_shown": today})
         self.show_today()

@@ -621,7 +621,70 @@ def run_v113():
     print("PASS: v1.13 learning labels, file-name number, field guess, value check, duplicate words, not-invoice rule, customs papers,"
           " exclusion reasons, marks, link check, import subfolders")
 
+def run_v1131():
+    """v1.13.1: what was read is stored on disk, so unchanged (or only renamed/moved) files are not read or OCR'd again."""
+    import invoice_renamer as ir
+    from monthly_close import index_pdfs, clear_index_cache
+    with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
+        ir._DIGEST_INDEX.update(loaded=False, data={}, dirty=False)
+        root = Path(scratch) / "work"
+        root.mkdir()
+        pdf = root / "a.pdf"
+        with pymupdf.open() as document:
+            page = document.new_page()
+            page.insert_text((60, 80), "Druckerei Schmidt GmbH\nRechnungsnummer R-77\nRechnungsdatum: 03.11.2026\nGesamtbetrag 119,00 EUR")
+            document.save(pdf)
+        calls = []
+        original = ir._read_pdf_pages
+
+        def counted(path):
+            calls.append(Path(path).name)
+            return original(path)
+
+        with patch.object(ir, "_read_pdf_pages", counted):
+            first = ir.read_invoice_details(pdf)
+            ir.flush_text_cache()
+            ir._DIGEST_INDEX.update(loaded=False, data={}, dirty=False)  # like a new start
+            second = ir.read_invoice_details(pdf)
+            check(calls == ["a.pdf"] and first == second, f"v1.13.1: second start uses the stored text {calls}")
+            moved = root / "2026-11"
+            moved.mkdir()
+            renamed = moved / "119.00_26-11-03_Druckerei_Nr_R-77_invoice.pdf"
+            pdf.rename(renamed)
+            check(ir.read_invoice_details(renamed) == first and calls == ["a.pdf"], f"v1.13.1: renamed file not read again {calls}")
+            clear_index_cache()
+            invoices, _ = index_pdfs(root)
+            check(len(invoices) == 1 and calls == ["a.pdf"], f"v1.13.1: step 3 shares the stored text {calls}")
+            ir.forget_text([renamed])
+            ir.read_invoice_details(renamed)
+            check(calls[-1] == renamed.name and len(calls) == 2, f"v1.13.1: ‘다시 읽기’ really reads again {calls}")
+        # a page that could not be read completely (no OCR data) is not stored
+        scan = root / "scan.pdf"
+        with pymupdf.open() as document:
+            document.new_page()
+            document.save(scan)
+        with patch.object(ir, "tessdata_folder", lambda: (None, "")):
+            note = ir.read_invoice_details(scan)[1]
+        stored = list((Path(scratch) / "InvoiceRenamer" / "text-cache").rglob(f"{ir.known_digest(scan)}.json"))
+        check(note and not stored, f"v1.13.1: incomplete OCR is tried again next time {note} {stored}")
+    # the ‘오늘 할 일’ panel can open while a message box has the focus
+    import tkinter as tk
+    from ui_theme import InlineDialog
+    try:
+        window = tk.Tk()
+    except tk.TclError:
+        print("SKIP: v1.13.1 panel focus (no display)")
+    else:
+        window.withdraw()
+        with patch.object(tk.Tk, "focus_get", side_effect=KeyError("__tk__messagebox")):
+            panel = InlineDialog(window)
+        check(panel._previous_focus is None, "v1.13.1: panel opens while a message box has the focus")
+        panel.destroy()
+        window.destroy()
+    print("PASS: v1.13.1 stored text (new start, renamed, step 3, re-read, incomplete OCR), panel focus")
+
 
 if __name__ == "__main__":
     run()
     run_v113()
+    run_v1131()

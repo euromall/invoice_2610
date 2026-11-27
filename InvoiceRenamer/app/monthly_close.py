@@ -24,7 +24,7 @@ import pymupdf
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import quote, urlencode
 
-from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MoneyEntry, pick_value, import_mode, make_copyable, open_file, source_preview, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
+from invoice_renamer import DATE, EVIDENCE_EXTENSIONS, MoneyEntry, pick_value, import_mode, make_copyable, open_file, source_preview, MONEY, MONTH_FOLDER, STATEMENT_FOLDER, digest, evidence_stem, filename_fields, flush_text_cache, known_digest, invoice_edits_path, load_invoice_edits, move_evidence, move_without_overwrite, open_evidence, number_label, normalized_date, normalized_money, original_stem, read_invoice_details, remember_original_name, read_pdf_pages, show_source_locations, undo_moves
 from tax_documents import pdf_tax_fields, read_structured
 from advisor_workbook import advisor_workbook, localized_csv
 from release_info import VERSION, record_error
@@ -582,9 +582,8 @@ def index_pdfs(folder, progress=None):
             continue
         if progress:
             progress(position, len(paths), path.name)
-        try:
-            key = digest(path)
-        except OSError:
+        key = known_digest(path)
+        if not key:
             issues.append(path.name)
             continue
         before = len(issues)
@@ -616,6 +615,7 @@ def index_pdfs(folder, progress=None):
             issues.append(path.name)
         if cache_key and result and result[-1].path == path:
             _INDEX_CACHE[cache_key] = (result[-1], path.name if len(issues) > before else "", edits.get(key))
+    flush_text_cache()
     return result, issues
 
 

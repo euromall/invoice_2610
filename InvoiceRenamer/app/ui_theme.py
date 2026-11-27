@@ -388,7 +388,10 @@ class InlineDialog(tk.Frame):
         self._centered = None  # (width, height) when the panel floats in the middle
         self._moved = None  # (x, y) after the user dragged it by its title bar
         self._tag = f"InlineDialog{id(self)}"
-        self._previous_focus = root.focus_get()
+        try:
+            self._previous_focus = root.focus_get()
+        except (KeyError, tk.TclError):  # the focus is in a message box (not a Tk widget we know)
+            self._previous_focus = None
         header = tk.Frame(self, background=COLORS["navy"], padx=14, pady=9)
         header.pack(side="top", fill="x")
         self._title = tk.Label(header, text="", background=COLORS["navy"], foreground="#ffffff",
