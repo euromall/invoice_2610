@@ -837,7 +837,7 @@ def run_v114_folders():
               "v1.14 folders: old and new matched names known")
         check({"Auszuege", "Ablage", "제외", "명세서"} <= ir.kept_apart_names(), "v1.14 folders: kept apart names")
         pairs = [pair for kind in new for pair in ir.relocation_plan(kind, work, old, new)]
-        targets = sorted(str(target.relative_to(root)) for _, target in pairs)
+        targets = sorted(target.relative_to(root).as_posix() for _, target in pairs)
         check(targets == ["elsewhere/Erledigt_2609/b.pdf", "elsewhere/Erledigt_2610/a.pdf", "work/Ablage/중복/c.pdf"],
               f"v1.14 folders: relocation plan {targets}")
         moved, errors = ir.relocate_files(pairs, keep=[work, outside])
