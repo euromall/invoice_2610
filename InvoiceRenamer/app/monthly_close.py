@@ -521,8 +521,37 @@ def parse_transactions(rows, columns, default_currency, date_order, account="", 
 MATCHED_FOLDER = r"매칭완료_\d{2}(?:0[1-9]|1[0-2])"
 
 
+_INDEX_CACHE = {}  # (path, size, mtime) -> (Invoice, issue name or "", edit entry used); v1.13: unchanged files are not read again
+_INDEX_STAMP = [None]  # learned-formats.json change time: a new layout can fill files that missed values
+
+
+def clear_index_cache():
+    _INDEX_CACHE.clear()
+
+
+def _file_stamp(path):
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return str(path), info.st_size, info.st_mtime_ns
+
+
 def index_pdfs(folder, progress=None):
-    """progress(index, total, name) is called for each file (for a progress bar)."""
+    """progress(index, total, name) is called for each file (for a progress bar).
+
+    Files whose size and change time are the same as at the last read, and whose correction (invoice-edits.json) did
+    not change, come from memory instead of being read again."""
+    import learned_formats
+    try:
+        stamp = learned_formats.storage_path().stat().st_mtime_ns
+    except OSError:
+        stamp = None
+    if stamp != _INDEX_STAMP[0]:
+        _INDEX_STAMP[0] = stamp
+        for cache_key in [key for key, (invoice, *_rest) in _INDEX_CACHE.items()
+                          if invoice.day is None or not invoice.seller or invoice.amount is None or not invoice.number]:
+            _INDEX_CACHE.pop(cache_key)
     result = []
     issues = []
     paths = list(folder.iterdir())
@@ -543,6 +572,13 @@ def index_pdfs(folder, progress=None):
     for position, path in enumerate(paths, 1):
         if not path.is_file() or path.suffix.lower() not in (EVIDENCE_EXTENSIONS | {".xml"}):
             continue
+        cache_key = _file_stamp(path)
+        cached = _INDEX_CACHE.get(cache_key)
+        if cached and edits.get(cached[0].key) == cached[2]:
+            result.append(cached[0])
+            if cached[1]:
+                issues.append(cached[1])
+            continue
         if progress:
             progress(position, len(paths), path.name)
         try:
@@ -550,6 +586,7 @@ def index_pdfs(folder, progress=None):
         except OSError:
             issues.append(path.name)
             continue
+        before = len(issues)
         try:
             meta = read_structured(path) if path.suffix.lower() in (".pdf", ".xml") else {}
             if meta:
@@ -576,6 +613,8 @@ def index_pdfs(folder, progress=None):
         except (OSError, ValueError, RuntimeError, ParseError, ArithmeticError):
             result.append(Invoice(key, path, None, "", None, "", "", False))
             issues.append(path.name)
+        if cache_key and result and result[-1].path == path:
+            _INDEX_CACHE[cache_key] = (result[-1], path.name if len(issues) > before else "", edits.get(key))
     return result, issues
 
 
@@ -2740,6 +2779,8 @@ class MonthlyClose:
             if len(keys) > 1:
                 self.duplicates.update(keys)
         self.refresh()
+        if getattr(self, "on_loaded", None):
+            self.on_loaded()
 
     def review_pairs(self, title, rows, commit, hint=""):
         """Checkbox list of (first, second, first label, second label[, reason, checked]) pairs to link at once."""

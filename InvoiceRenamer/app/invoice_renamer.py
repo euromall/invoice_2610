@@ -1445,6 +1445,14 @@ def import_mode():
     return "move" if load_settings().get("import_mode") == "move" else "copy"
 
 
+def file_stamp(path):
+    try:
+        info = Path(path).stat()
+    except OSError:
+        return None
+    return info.st_size, info.st_mtime_ns
+
+
 def free_name(folder, name, taken=()):
     """name, or ‘name (2).pdf’ etc. when that name is already used in folder."""
     candidate = Path(name)
@@ -1798,6 +1806,7 @@ class App:
         self.checks = {}  # path -> {field: why it needs a look}, from reading (file name, learned layout, ...)
         self.reasons = {}  # path -> (kind, why it does not look like an invoice); kind "customs" for 통관·배송 서류
         self.marks = {}  # path -> marks the user set (‘인보이스 맞음’, 보류), see set_flag
+        self.stamps = {}  # path -> (size, change time) when it was read: unchanged files are not read again
         self.last_moves = []
         self.inbox_mode = False
         self.folder = None
@@ -1808,6 +1817,7 @@ class App:
         self.on_manage_mail = None  # mailboxes for the mail search
         self.on_account_order = None  # order of bank accounts and cards for numbering
         self.on_import_statements = None  # step 1 right-click ‘명세서로 불러오기’ → step 2 import
+        self.on_loaded = None  # called after the folder was read (the main window then stops announcing changes)
         if container is None:
             title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
             root.title(f"[연습 모드] {title}" if practice_folder else title)
@@ -1840,6 +1850,8 @@ class App:
             ("새 인보이스 (미분류)", self.open_inbox),
             ("배운 인보이스 양식", self.manage_learned),
             ("제외 기록 보기", self.show_exclusion_log),
+            ("새로고침 (바뀐 파일만, F5)", lambda: self.load_folder()),
+            ("전체 다시 읽기 (모든 파일)", self.reread_all),
             ("마크다운 다시 만들기", self.save_markdown),
         ]).pack(side="left", padx=4)
         options = ttk.Frame(container, padding=(18, 0, 18, 6))
@@ -2164,10 +2176,16 @@ class App:
         self.rows.clear()
         self.load_folder()
 
-    def load_folder(self):
+    def load_folder(self, full=False):
+        """Read the folder. Files read before and not changed since (size, change time) are not read again;
+        full=True (‘전체 다시 읽기’) reads every file."""
         if self.folder is None:
             return
-        scanned = {row[0]: row for row in self.rows.values()}
+        scanned = {} if full else {row[0]: row for row in self.rows.values()}
+        stamps = getattr(self, "stamps", {})
+        for path in list(scanned):
+            if stamps.get(path) != file_stamp(path):
+                scanned.pop(path)
         stale = {key for key in self.rows if self.table.exists(key)} | set(self.table.get_children())
         if stale:
             self.table.delete(*stale)
@@ -2217,6 +2235,7 @@ class App:
             else:
                 self.parts.pop(path, None)
             self.rows[str(index)] = (path, fields, note, number)
+            self.stamps[path] = file_stamp(path)
             self.table.insert("", "end", iid=str(index))
         if busy:
             busy.close()
@@ -2225,6 +2244,8 @@ class App:
         except OSError:
             self.marks = {}
         self.refresh()
+        if self.on_loaded:
+            self.on_loaded()
         groups = duplicate_groups((key, path, fields, number, cached_digest(path))
                                   for key, (path, fields, _, number) in self.rows.items())
         hint = f"  |  중복 의심 {len(groups)}묶음 · ‘중복 정리’를 눌러 확인하세요" if groups else ""
@@ -2513,6 +2534,20 @@ class App:
         if errors:
             self.notice("옮기지 못한 파일:\n" + "\n".join(errors[:8]), kind="error", title="이동 실패")
 
+    def reread_all(self):
+        count = len(self.rows)
+        if not ask_yes_no("전체 다시 읽기", f"작업 폴더의 파일 {count}개를 모두 다시 읽을까요?\n"
+                                         "보통은 ‘새로고침’(바뀐 파일만)으로 충분해요.", parent=self.root,
+                          warnings=[f"파일이 많으면 몇 분 걸릴 수 있어요 (스캔 PDF는 글자 인식 포함)."] if count > 300 else (),
+                          undo="읽기만 하므로 파일은 바뀌지 않아요.", ok="모두 읽기"):
+            return
+        try:
+            from monthly_close import clear_index_cache
+            clear_index_cache()
+        except ImportError:
+            pass
+        self.load_folder(full=True)
+
     def moved(self, history):
         """Remember the last moves for ‘정리 되돌리기’ and keep the marks on the moved files."""
         self.last_moves = history
@@ -2656,6 +2691,7 @@ class App:
                     record_error("pdf_read", error)
                     continue
                 self.rows[key] = (path, fields, note, number)
+                self.stamps[path] = file_stamp(path)
                 self.invoice_like[path] = info.get("invoice_like", True)
                 self.checks[path] = info.get("checks", {})
                 self.reasons[path] = (info.get("kind", ""), info.get("reason", ""))
@@ -3020,6 +3056,7 @@ class App:
                 errors.append(f"{path.name}: {error}")
                 continue
             self.rows[key] = (target, *self.rows[key][1:])
+            self.stamps[target] = file_stamp(target)
             self.invoice_like[target] = self.invoice_like.pop(path, True)
             self.checks[target] = self.checks.pop(path, {})
             self.reasons[target] = self.reasons.pop(path, ("", ""))
@@ -3053,6 +3090,7 @@ class App:
             for key, row in list(self.rows.items()):
                 if row[0] in paths:
                     self.rows[key] = (paths[row[0]], *row[1:])
+                    self.stamps[paths[row[0]]] = file_stamp(paths[row[0]])
             self.load_folder()
         back = [{"at": date.today().isoformat(), "from": str(current), "to": str(original), "reason": "", "action": "되돌림"}
                 for current, original in restored if EXCLUDED_FOLDER in current.parts]

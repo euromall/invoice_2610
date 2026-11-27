@@ -96,6 +96,14 @@ class Shell:
         self.sidebar.pack_propagate(False)
         self.content = ttk.Frame(body)
         self.content.pack(side="left", fill="both", expand=True)
+        # v1.13: outside changes (Dropbox, Explorer) are announced here instead of being read at once
+        self.change_bar = tk.Frame(self.content, background=COLORS["amber_light"], padx=14, pady=6)
+        self.change_text = tk.StringVar()
+        tk.Label(self.change_bar, textvariable=self.change_text, background=COLORS["amber_light"],
+                 foreground=COLORS["ink"]).pack(side="left")
+        ttk.Button(self.change_bar, text="나중에", style="Small.TButton", command=self.later).pack(side="right")
+        ttk.Button(self.change_bar, text="지금 읽기", style="Small.TButton",
+                   command=lambda: self.check_folder(force=True)).pack(side="right", padx=6)
         root.dialog_area = self.content  # detail panels open over this area
         self.status_bar = ttk.Label(root, style="Status.TLabel")
         self.status_bar.pack(side="bottom", fill="x", before=body)
@@ -103,6 +111,7 @@ class Shell:
         self.page1 = ttk.Frame(self.content)
         self.page2 = ttk.Frame(self.content)
         self.app = App(root, practice_folder, container=self.page1, on_change=self.update_overview)
+        self.app.on_loaded = self.remember_folder
         root.report_callback_exception = self.app.report_callback_error
         splash_text("작업 기록을 불러오고 있어요…")
         try:
@@ -116,6 +125,7 @@ class Shell:
             self.app.on_manage_mail = self.close.manage_mailboxes
             self.app.on_account_order = self.close.edit_account_order
             self.app.on_import_statements = lambda paths: (self.show(2), self.close.open_batch([str(path) for path in paths]))
+            self.close.on_loaded = self.remember_folder
         except RuntimeError:
             self.close = None
         self.build_sidebar()
@@ -144,7 +154,16 @@ class Shell:
             return None
 
     def remember_folder(self):
+        """The program read the folder itself (or changed it): what is there now counts as seen."""
+        if getattr(self, "folder_seen", None) is None and not hasattr(self, "folder_check_job"):
+            return  # still starting up
         self.folder_seen = self.folder_signature()
+        self.change_bar.pack_forget()
+
+    def later(self):
+        """‘나중에’: keep working with the lists as they are; the bar comes back on the next outside change."""
+        self.folder_seen = self.folder_signature()
+        self.change_bar.pack_forget()
 
     def schedule_folder_check(self, event):
         if event.widget is not self.root:
@@ -163,7 +182,19 @@ class Shell:
         if signature is None or (signature == self.folder_seen and not force):
             return
         before = self.folder_seen or frozenset()
-        added = len({name for name, *_ in signature} - {name for name, *_ in before})
+        names, old_names = {name for name, *_ in signature}, {name for name, *_ in before}
+        added = len(names - old_names)
+        if not force:
+            removed = len(old_names - names)
+            changed = len({entry for entry in signature if entry[0] in old_names} - set(before))
+            parts = [f"새 파일 {added}개" if added else "", f"없어진 파일 {removed}개" if removed else "",
+                     f"내용이 바뀐 파일 {changed}개" if changed else ""]
+            self.change_text.set("작업 폴더가 밖에서 바뀌었어요 (" + " · ".join(part for part in parts if part)
+                                 + "). 작업이 끝나면 ‘지금 읽기’를 누르세요. 바뀐 파일만 읽어요.  F5 = 지금 읽기")
+            if not self.change_bar.winfo_ismapped():
+                self.change_bar.pack(side="top", fill="x", before=self.page1 if self.page1.winfo_ismapped() else self.page2)
+            return
+        self.change_bar.pack_forget()
         self.folder_seen = signature
         if self.current == 1:
             self.app.load_folder()
@@ -178,7 +209,7 @@ class Shell:
             return
         self.folder_seen = self.folder_signature()  # names the program changed while reading count as seen
         if force:
-            status.set("작업 폴더를 다시 읽었어요.")
+            status.set("작업 폴더에서 바뀐 파일을 읽었어요." + (f" 새 파일 {added}개." if added else ""))
         elif added:
             status.set(f"작업 폴더에 새로 넣은 파일 {added}개를 읽었어요.")
         else:
