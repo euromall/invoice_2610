@@ -1328,7 +1328,36 @@ def apply_recurring(state, transactions):
     return count
 
 
-REVIEW_KINDS = ("인보이스 없는 거래", "거래 없는 인보이스", "번역 대기", "세무사 확인", "명세서 공백")
+REVIEW_KINDS = ("인보이스 없는 거래", "거래 없는 인보이스", "번역 대기", "세무사 확인", "명세서 공백", "매달 거래처 빠짐")
+
+
+def recurring_gaps(state, months=3):
+    """v1.14: merchants that appeared in each of the `months` months before a month but not in that month
+    (a subscription, phone or rent payment that is missing — or paid another way). {month: [(merchant, note)]}."""
+    seen = defaultdict(set)
+    names = {}
+    for record in state["records"].values():
+        period, merchant = record.get("period", ""), record.get("merchant", "")
+        if not re.fullmatch(r"\d{4}-\d{2}", period) or not merchant:
+            continue
+        key = merchant_key(merchant)[:18]
+        if key:
+            seen[key].add(period)
+            names.setdefault(key, merchant)
+    periods = sorted({period for found in seen.values() for period in found})
+    gaps = defaultdict(list)
+    for index, month in enumerate(periods):
+        if index < months:
+            continue
+        before = periods[index - months:index]
+        year, number = map(int, month.split("-"))
+        expected = [f"{year + (number - k - 1) // 12}-{(number - k - 1) % 12 + 1:02d}" for k in range(1, months + 1)]
+        if sorted(expected) != before:  # only when the months before were loaded without a hole
+            continue
+        for key, found in seen.items():
+            if all(previous in found for previous in before) and month not in found:
+                gaps[month].append((names[key], f"{before[0]}~{before[-1]} 매달 있었는데 이번 달 거래 없음"))
+    return gaps
 
 
 def review_months(state, invoices):
@@ -1352,6 +1381,8 @@ def review_months(state, invoices):
         if doc.key not in globally_linked:
             month = doc.day.strftime("%Y-%m") if doc.day else "미지정"
             rows[month].append((REVIEW_KINDS[1], doc.path.name, state.get("unlinked_invoice_flags", {}).get(doc.key, "")))
+    for month, found in recurring_gaps(state).items():
+        rows[month].extend((REVIEW_KINDS[5], merchant, note) for merchant, note in found)
     for account, kind, start, end in coverage_warnings(state.get("statement_periods", {}).values()):
         if kind != "누락 가능":
             continue
@@ -1478,7 +1509,7 @@ class MonthlyClose:
             4: [("최종 검수", self.final_review, "Primary.TButton"), ("인쇄 묶음", self.open_print_bundle, None), ("누락 점검표", self.monthly_review, None), ("세무 점검", self.tax_overview, None), ("미연결 인보이스", self.show_unlinked_invoices, None),
                 ("후속 할 일", self.followup_list, None), ("기간 점검", self.show_statement_periods, None),
                 ("전체 검색", self.search_all_months, None)],
-            5: [("세무사 ZIP", self.export_zip, "Primary.TButton"),
+            5: [("마감 전 점검", self.pre_close_check, None), ("세무사 ZIP", self.export_zip, "Primary.TButton"),
                 ("추가 ZIP", lambda: self.export_zip(supplemental=True), None),
                 ("전달 이력", self.export_history, None), ("마감 확정·해제", self.manage_period, None),
                 ("CSV 저장", self.export_csv, None)],
@@ -3932,8 +3963,7 @@ class MonthlyClose:
         dialog.geometry("1100x480")
         controls = ttk.Frame(dialog, padding=8)
         controls.pack(fill="x")
-        summary = self.table(dialog, ("월", "인보이스 없는 거래", "거래 없는 인보이스", "번역 대기", "세무사 확인", "명세서 공백"),
-                             (125, 175, 175, 150, 175, 175))
+        summary = self.table(dialog, ("월", *REVIEW_KINDS), (110, 150, 150, 110, 120, 120, 140))
         detail = self.table(dialog, ("구분", "거래번호·파일", "확인할 내용"), (180, 270, 530))
         for month, items in sorted(rows.items(), reverse=True):
             counts = Counter(kind for kind, _, _ in items)
@@ -3989,6 +4019,8 @@ class MonthlyClose:
         if kind == REVIEW_KINDS[1]:  # evidence without a transaction
             self.manage_unmatched()
             return
+        if kind in (REVIEW_KINDS[4], REVIEW_KINDS[5]):  # statement gap / missing monthly merchant: the month is enough
+            return
         for key in self.cards.get_children():
             if self.record(key).get("number") == name:
                 self.cards.selection_set(key)
@@ -4002,6 +4034,127 @@ class MonthlyClose:
                 self.cards.selection_set(key)
                 self.cards.see(key)
                 return
+
+    def missing_links(self, month=None):
+        """v1.14: invoices linked to transactions whose file is no longer in the work folder {hash: [(number, month)]}."""
+        if not self.invoices:
+            return {}
+        missing = defaultdict(list)
+        for record in self.state["records"].values():
+            if month and record.get("period") != month:
+                continue
+            for link in record.get("links", []):
+                if link not in self.by_key:
+                    missing[link].append((record.get("number", ""), record.get("period", "")))
+        return dict(missing)
+
+    def find_missing_files(self, parent=None):
+        """Look for moved or renamed linked invoices in another folder by their content (hash) and copy them back
+        into the work folder. Nothing in the other folder is changed."""
+        missing = self.missing_links()
+        if not missing:
+            self.notice("연결된 인보이스 파일이 모두 작업 폴더에 있어요.")
+            return
+        source = filedialog.askdirectory(parent=parent or self.root, title=f"사라진 인보이스 {len(missing)}개를 찾을 폴더 고르기")
+        if not source:
+            return
+        candidates = [path for path in Path(source).rglob("*") if path.is_file() and path.suffix.lower() in (EVIDENCE_EXTENSIONS | {".xml"})]
+        found = {}
+        with Busy(self.root, "내용이 같은 파일을 찾고 있어요") as busy:
+            for index, path in enumerate(candidates, 1):
+                busy.step(index, len(candidates), path.name)
+                key = known_digest(path)
+                if key in missing and key not in found:
+                    found[key] = path
+        flush_text_cache()
+        if not found:
+            self.notice(f"‘{Path(source).name}’ 폴더에서 같은 파일을 찾지 못했어요. 파일 {len(candidates)}개를 확인했어요.")
+            return
+        target = Path(self.folder)
+        lines = [f"{path.name}  →  거래 {', '.join(number for number, _ in missing[key])}" for key, path in list(found.items())[:8]]
+        if not ask_yes_no("사라진 인보이스 되찾기", f"내용이 같은 파일 {len(found)}개를 찾았어요. 작업 폴더로 복사할까요?\n\n" + "\n".join(lines),
+                          parent=parent or self.root, undo="복사만 해요. 원래 폴더의 파일은 그대로예요.", ok="작업 폴더로 복사"):
+            return
+        copied, errors = 0, []
+        for key, path in found.items():
+            try:
+                destination = target / path.name
+                index = 2
+                while destination.exists():
+                    destination = target / f"{path.stem} ({index}){path.suffix}"
+                    index += 1
+                shutil.copy2(path, destination)
+                copied += 1
+            except OSError as error:
+                errors.append(f"{path.name}: {error}")
+        self.load_pdfs(self.folder)
+        left = len(self.missing_links())
+        self.notice(f"{copied}개를 작업 폴더로 복사했어요." + (f" 아직 못 찾은 파일 {left}개." if left else "")
+                    + ("\n" + "\n".join(errors[:5]) if errors else ""))
+
+    def pre_close_check(self):
+        """v1.14 ‘마감 전 점검’: everything that is still open for the chosen month on one screen, each with a way to go there."""
+        month = self.month_filter.get()
+        if month == "전체":
+            months = sorted({record.get("period", "") for record in self.state["records"].values() if record.get("period")})
+            month = months[-1] if months else ""
+        if not month:
+            self.notice("먼저 명세서를 불러오세요.")
+            return
+        review = review_months(self.state, self.invoices).get(month, [])
+        kinds = Counter(kind for kind, _, _ in review)
+        keys = [key for key in self.transactions if self.record(key).get("period") == month]
+        link_counts = Counter(link for other in self.state["records"].values() for link in other.get("links", []))
+        warned = [key for key in keys if [found for found in self.final_checks(key, link_counts)
+                                           if found not in ("인보이스 없음", "인보이스 없이 처리 · 세무사 확인")]]
+        unchecked = [key for key in keys if review_state(self.state, key) != "ok"]
+        missing = self.missing_links(month)
+        tax = [key for key in keys if self.tax_hints(key)]
+        rows = [
+            ("인보이스 없는 거래", kinds[REVIEW_KINDS[0]], True, lambda: self.go_view(month, "인보이스 없음")),
+            ("세무사 확인이 필요한 거래", kinds[REVIEW_KINDS[3]], True, self.monthly_review),
+            ("번역 대기 메모 (독일어 칸 비어 있음)", kinds[REVIEW_KINDS[2]], True, self.monthly_review),
+            ("명세서 기간 공백", kinds[REVIEW_KINDS[4]], True, self.show_statement_periods),
+            ("자동 점검에 걸린 거래 (금액·업체·날짜·통화)", len(warned), True, self.final_review),
+            ("작업 폴더에서 사라진 인보이스 파일", len(missing), True, self.find_missing_files),
+            ("최종 검수를 안 한 거래", len(unchecked), False, self.final_review),
+            ("매달 있던 거래처가 이번 달 없음", kinds[REVIEW_KINDS[5]], False, self.monthly_review),
+            ("세무 참고가 있는 거래", len(tax), False, self.tax_overview),
+            ("거래 없는 인보이스 (다른 달·개인 지출일 수 있음)", kinds[REVIEW_KINDS[1]], False, self.manage_unmatched),
+        ]
+        blocking = sum(count for _, count, must, _ in rows if must)
+        dialog = InlineDialog(self.root)
+        dialog.title(f"마감 전 점검 · {month}")
+        dialog.center(860, 600)
+        head = ("✓ 꼭 처리할 것이 없어요. 세무사 ZIP을 만들어도 돼요." if not blocking else
+                f"꼭 처리할 것 {blocking}건이 남았어요. ‘가기’로 바로 이동해요.")
+        tk.Label(dialog, text=head, font=FONT_BOLD, anchor="w", padx=16, pady=12,
+                 background="#e8f6ee" if not blocking else "#fff4e5").pack(fill="x")
+        body = ttk.Frame(dialog, padding=(16, 8))
+        body.pack(fill="both", expand=True)
+        for row, (label, count, must, command) in enumerate(rows):
+            mark = "✓" if not count else ("!" if must else "·")
+            color = COLORS["green"] if not count else (COLORS["red"] if must else COLORS["muted"])
+            tk.Label(body, text=mark, foreground=color, background=COLORS["panel"], font=FONT_BOLD, width=2).grid(row=row, column=0, sticky="w", pady=3)
+            ttk.Label(body, text=label + ("" if must else "  (참고)")).grid(row=row, column=1, sticky="w")
+            ttk.Label(body, text=f"{count}건", font=FONT_BOLD if count else None).grid(row=row, column=2, sticky="e", padx=12)
+            if count:
+                ttk.Button(body, text="가기", style="Small.TButton",
+                           command=lambda command=command: (dialog.destroy(), command())).grid(row=row, column=3, sticky="e")
+        body.columnconfigure(1, weight=1)
+        footer = ttk.Frame(dialog, padding=(16, 8, 16, 12))
+        footer.pack(side="bottom", fill="x")
+        ttk.Button(footer, text="세무사 ZIP 만들기", style="Primary.TButton" if not blocking else "TButton",
+                   command=lambda: (dialog.destroy(), self.export_zip())).pack(side="left")
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right")
+
+    def go_view(self, month, view):
+        """Step 3 with a month and a view (e.g. ‘인보이스 없음’)."""
+        if self.navigate:
+            self.navigate(3)
+        self.go_to_month(month)
+        self.view.set(view)
+        self.refresh()
 
     def export_workspace_backup(self):
         target = filedialog.asksaveasfilename(parent=self.root, defaultextension=".zip",

@@ -737,7 +737,21 @@ def run_v114():
         amount, currency = Decimal("-92.15"), "EUR"
     doc = Invoice("k", Path("x.pdf"), day(2026, 11, 3), "Shop", Decimal("100.00"), "USD", "1", False)
     check(exchange_rate(Item, doc) == Decimal("0.9215"), f"v1.14: exchange rate {exchange_rate(Item, doc)}")
-    print("PASS: v1.14 tax remarks (reverse charge, EU/foreign VAT ID, missing tax/tax id, small invoice), exchange rate")
+    from monthly_close import recurring_gaps, review_months
+    records = {}
+    for index, (period, merchant) in enumerate([("2026-07", "TELEFONICA GERMANY"), ("2026-08", "Telefonica Germany"),
+                                                ("2026-09", "TELEFONICA GERMANY"), ("2026-10", "Amazon"),
+                                                ("2026-08", "Shop A"), ("2026-10", "Shop A"), ("2026-09", "Shop A")]):
+        records[f"r{index}"] = {"period": period, "merchant": merchant, "number": str(index)}
+    gaps = recurring_gaps({"records": records})
+    check(list(gaps) == ["2026-10"] and [name for name, _ in gaps["2026-10"]] == ["TELEFONICA GERMANY"],
+          f"v1.14: monthly merchant missing {dict(gaps)}")
+    holes = recurring_gaps({"records": {"a": {"period": "2026-01", "merchant": "X"}, "b": {"period": "2026-02", "merchant": "X"},
+                                        "c": {"period": "2026-03", "merchant": "X"}, "d": {"period": "2026-06", "merchant": "Y"}}})
+    check(not holes, f"v1.14: no warning after months that were not loaded {dict(holes)}")
+    review = review_months({"records": records}, [])
+    check(any(kind == "매달 거래처 빠짐" for kind, _, _ in review["2026-10"]), "v1.14: monthly review lists the missing merchant")
+    print("PASS: v1.14 tax remarks (reverse charge, EU/foreign VAT ID, missing tax/tax id, small invoice), exchange rate, monthly merchant missing")
 
 
 if __name__ == "__main__":

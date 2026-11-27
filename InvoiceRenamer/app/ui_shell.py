@@ -141,6 +141,7 @@ class Shell:
         self.folder_seen = None
         self.folder_check_job = None
         if not practice_folder:
+            self.backup_on_new_version()
             root.after(1500, self.remember_folder)
             root.bind("<FocusIn>", self.schedule_folder_check, add="+")
             root.bind("<F5>", lambda event: self.check_folder(force=True), add="+")
@@ -502,6 +503,10 @@ class Shell:
                     and close.record(key).get("due", "9999") < today]
             if late:
                 items.append(("3단계", f"인보이스 요청 기한이 지난 거래 {len(late)}건", lambda: (self.show(3), close.followup_list())))
+        if self.close is not None:
+            gone = self.close.missing_links()
+            if gone:
+                items.append(("3단계", f"작업 폴더에서 사라진 인보이스 파일 {len(gone)}개", self.close.find_missing_files))
         files = sorted(backup_folder().glob("auto_*.json")) if backup_folder().is_dir() else []
         if not files and not load_settings().get("auto_backup", True):
             items.append(("백업", "자동 백업이 꺼져 있어요 · 백업·복원에서 지금 백업할 수 있어요", self.open_backups))
@@ -539,6 +544,22 @@ class Shell:
             close.cards.see(keys[0])
         close.status.set("이중 결제 의심: " + " / ".join(
             f"{close.record(a.key).get('number', '')}·{close.record(b.key).get('number', '')} {a.amount} {a.currency}" for a, b in pairs[:5]))
+
+    def backup_on_new_version(self):
+        """v1.14: the first start of a new version keeps a backup of the records first (also when auto backup is off)."""
+        from invoice_renamer import load_settings, save_settings
+        from monthly_close import auto_backup
+        last = load_settings().get("last_version")
+        if last == VERSION:
+            return
+        if self.close is not None and self.close.state.get("records"):
+            try:
+                auto_backup(self.close.state, f"버전변경-{last or '이전'}-to-{VERSION}", int(load_settings().get("backup_keep", 20)))
+            except (OSError, ValueError, TypeError) as error:
+                from release_info import record_error
+                record_error("auto_backup", error)
+                return  # try again next start
+        save_settings({"last_version": VERSION})
 
     def today_on_start(self, tries=0):
         from invoice_renamer import load_settings, save_settings
