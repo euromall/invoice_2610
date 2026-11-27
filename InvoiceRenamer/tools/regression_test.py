@@ -603,8 +603,18 @@ def run_v113():
         check(any("후보가 1개 더" in c for c in link_concerns(item, [good], [good, twin], {})), "v1.13: same amount twin noted")
         usd = Invoice("u", Path("u.pdf"), day(2026, 8, 10), "Buerobedarf Nord KG", Decimal("129.90"), "USD", "R-4", False)
         check(any("통화" in c for c in link_concerns(item, [usd], [usd], {})), "v1.13: currency differs")
+
+        # folder import keeping the subfolders
+        source = root / "drop"
+        (source / "2026-08").mkdir(parents=True)
+        (source / "top.pdf").write_bytes(pdf.read_bytes())
+        (source / "2026-08" / "inner.pdf").write_bytes(pdf.read_bytes() + b"%x")
+        target = root / "target"
+        history, _, errors = import_evidence([source / "top.pdf", source / "2026-08" / "inner.pdf"], target, copy=True, base=source)
+        check(not errors and (target / "top.pdf").is_file() and (target / "2026-08" / "inner.pdf").is_file(),
+              f"v1.13: import keeps subfolders {errors}")
     print("PASS: v1.13 learning labels, file-name number, field guess, value check, duplicate words, not-invoice rule, customs papers,"
-          " exclusion reasons, marks, link check")
+          " exclusion reasons, marks, link check, import subfolders")
 
 
 if __name__ == "__main__":

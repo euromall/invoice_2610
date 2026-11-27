@@ -1484,11 +1484,13 @@ def move_across(source, target):
     move_sidecar(source, target)
 
 
-def import_evidence(sources, folder, copy=False, progress=None):
+def import_evidence(sources, folder, copy=False, progress=None, base=None):
     """Move (or copy) picked evidence files into the work folder.
+    base: keep the subfolders below this folder (else every file goes straight into the work folder).
     Returns (history: (original, new, checksum), already there, errors). Undo applies to moves only."""
     folder.mkdir(parents=True, exist_ok=True)
     history, inside, errors, taken = [], 0, [], set()
+    top = folder
     root = folder.resolve()
     sources = list(sources)
     for position, source in enumerate(sources, 1):
@@ -1501,8 +1503,13 @@ def import_evidence(sources, folder, copy=False, progress=None):
             if source.resolve().is_relative_to(root):
                 inside += 1
                 continue
-            target = free_name(folder, source.name, taken)
-            taken.add(target.name.casefold())
+            folder = top
+            if base is not None and source.parent != Path(base) and source.is_relative_to(base):
+                folder = top.joinpath(*source.parent.relative_to(base).parts)
+                folder.mkdir(parents=True, exist_ok=True)
+            prefix = str(folder).casefold() + "|"
+            target = free_name(folder, source.name, {name[len(prefix):] for name in taken if name.startswith(prefix)})
+            taken.add(prefix + target.name.casefold())
             checksum = digest(source)
             if copy:
                 shutil.copy2(source, target)
@@ -2056,14 +2063,39 @@ class App:
         if not files:
             self.notice("고른 폴더에 PDF·사진·XML 인보이스가 없어요.")
             return
+        direct = [path for path in files if path.parent == source]
+        if len(direct) != len(files):  # v1.13: subfolders: only this folder, all into one, or keep the folders
+            choices = [(f"이 폴더의 파일만 ({len(direct)}개)", "direct"),
+                       (f"하위 폴더까지 모두 · 작업 폴더 한곳에 모으기 ({len(files)}개)", "flat"),
+                       (f"하위 폴더까지 모두 · 폴더 구조 그대로 ({len(files)}개)", "keep")]
+            last = load_settings().get("import_subfolders", "flat")
+            choices.sort(key=lambda item: item[1] != last)
+            word = "복사" if import_mode() == "copy" else "이동"
+            answer = ask_yes_no("폴더 가져오기", f"‘{source.name}’에 하위 폴더가 있어요. 어떻게 가져올까요? ({word})",
+                                parent=self.root, choices=choices, ok="가져오기",
+                                undo="복사는 원본이 그대로 있어요." if word == "복사" else "이동은 ‘정리 되돌리기’로 되돌릴 수 있어요.")
+            if not answer:
+                return
+            save_settings({"import_subfolders": answer})
+            if answer == "direct":
+                files = direct
+            elif answer == "keep":
+                self.finish_import(files, base=source)
+                return
+            if not files:
+                self.notice("이 폴더 바로 안에는 인보이스가 없어요.")
+                return
         self.finish_import(files)
 
-    def finish_import(self, files):
+    def finish_import(self, files, base=None):
         if not self.use_work_folder(load=False):
             return
         copy = import_mode() == "copy"
         with Busy(self.root, "작업 폴더로 복사하고 있어요" if copy else "작업 폴더로 옮기고 있어요") as busy:
-            history, inside, errors = import_evidence(files, self.folder, copy=copy, progress=busy.step)
+            history, inside, errors = import_evidence(files, self.folder, copy=copy, progress=busy.step, base=base)
+        if base is not None and not self.include_subfolders.get():
+            self.include_subfolders.set(True)  # files went into subfolders: show them
+            self.remember_options()
         if history and not copy:
             self.moved(history)
         self.load_folder()
