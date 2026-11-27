@@ -663,6 +663,52 @@ def candidates(transaction, invoices, aliases):
     return [row[-1] for row in sorted(ranked, key=lambda row: row[:-1])]
 
 
+def seller_named(transaction, invoice, aliases):
+    """The payee on the statement and the seller on the invoice name the same business (or a learned alias)."""
+    merchant = merchant_key(transaction.merchant)
+    seller = merchant_key(invoice.seller)
+    known = aliases.get(merchant, [])
+    return bool(seller and (seller in known or seller in merchant or merchant in seller)) or amazon_marketplace(
+        transaction.merchant, invoice)
+
+
+def link_concerns(transaction, docs, invoices, aliases, used_by=None, duplicate_reasons=None, days=7):
+    """Reasons to look again before linking docs to one transaction ([] when nothing looks odd).
+
+    used_by: {doc key: number of another transaction it is already linked to}; duplicate_reasons: {doc key: text}."""
+    concerns = []
+    used_by = used_by or {}
+    duplicate_reasons = duplicate_reasons or {}
+    currencies = {doc.currency for doc in docs if doc.amount is not None}
+    if currencies and currencies != {transaction.currency}:
+        concerns.append(f"통화가 달라요: 거래 {transaction.currency} · 인보이스 {', '.join(sorted(currencies))}")
+    elif all(doc.amount is not None for doc in docs):
+        total = sum((signed_total(doc) for doc in docs), Decimal("0"))
+        if total != transaction.amount:
+            concerns.append(f"금액이 달라요: 거래 {transaction.amount} · 인보이스 {total} {transaction.currency}")
+    else:
+        concerns.append("인보이스 총액을 읽지 못했어요. 금액을 직접 확인하세요.")
+    for doc in docs:
+        name = doc.path.name if len(doc.path.name) <= 40 else doc.path.name[:37] + "…"
+        if doc.day and abs((doc.day - transaction.day).days) > days:
+            concerns.append(f"날짜 차이 {abs((doc.day - transaction.day).days)}일: 거래 {transaction.day} · 인보이스 {doc.day} ({name})")
+        if doc.seller and not seller_named(transaction, doc, aliases):
+            concerns.append(f"업체명이 달라요: 거래 ‘{transaction.merchant[:40]}’ · 인보이스 ‘{doc.seller}’")
+        if doc.key in used_by:
+            concerns.append(f"이미 거래 {used_by[doc.key]}에 연결된 인보이스예요 ({name})")
+        if doc.key in duplicate_reasons:
+            concerns.append(f"{duplicate_reasons[doc.key]} ({name})")
+        elif re.search(r"\(\d\)\.\w+$|conflicted copy|Konfliktkopie|충돌 사본", doc.path.name, re.I):
+            concerns.append(f"이름에 ‘(1)’·‘충돌 사본’이 붙은 사본일 수 있어요 ({name})")
+    if len(docs) == 1:
+        same = [invoice for invoice in invoices if invoice.key != docs[0].key and invoice.amount is not None
+                and invoice.currency == transaction.currency and signed_total(invoice) == transaction.amount
+                and invoice.key not in used_by and (not invoice.day or abs((invoice.day - transaction.day).days) <= days)]
+        if same:
+            concerns.append(f"같은 금액·가까운 날짜 후보가 {len(same)}개 더 있어요. 맞는 인보이스인지 확인하세요.")
+    return concerns
+
+
 def gmail_url(merchant, day):
     safe = merchant.replace('"', " ").replace("\n", " ").replace("\r", " ")
     term = f"from:{safe}" if re.fullmatch(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", safe) else f'"{safe}"'
@@ -2775,9 +2821,18 @@ class MonthlyClose:
             if invoice.seller and invoice.number:
                 numbers[(merchant_key(invoice.seller), invoice.number.casefold())].add(invoice.key)
         self.duplicates = {key for key, count in hashes.items() if count > 1}
-        for keys in numbers.values():
+        self.duplicate_reasons = {}
+        paths = defaultdict(list)
+        for invoice in self.invoices:
+            paths[invoice.key].append(invoice.path.name)
+        for key in self.duplicates:
+            self.duplicate_reasons[key] = f"중복 · 같은 파일 {hashes[key]}개 ({', '.join(paths[key][:2])})"
+        for (_seller, number), keys in numbers.items():
             if len(keys) > 1:
                 self.duplicates.update(keys)
+                for key in keys:
+                    others = [name for other in keys - {key} for name in paths[other]]
+                    self.duplicate_reasons.setdefault(key, f"중복 · 같은 업체·번호 {number.upper()} (다른 파일: {', '.join(others[:2])})")
         self.refresh()
         if getattr(self, "on_loaded", None):
             self.on_loaded()
@@ -3342,7 +3397,7 @@ class MonthlyClose:
             if doc.key in self.state.get("corrections", {}):
                 labels.append("정정·원본 연결됨")
             if doc.key in self.duplicates:
-                labels.append("중복 확인")
+                labels.append(getattr(self, "duplicate_reasons", {}).get(doc.key, "중복 확인"))
             if doc.credit:
                 labels.append("전자 정정 문서")
             if doc.tax_fields and doc.tax_fields.get("special"):
@@ -3957,14 +4012,27 @@ class MonthlyClose:
             if not ask_yes_no("연결 해제", prompt, parent=self.root):
                 return
         else:
-            repeated = any(keys.intersection(record.get("links", []))
-                           for key, record in self.state["records"].items() if key not in cards)
-            if repeated or len(cards) > 1 or len(docs) > 1:
-                prompt = f"거래 {len(cards)}건 각각에 PDF {len(keys)}개를 연결할까요?"
-                if repeated:
-                    prompt += "\n선택한 PDF 중 다른 거래에 연결된 파일이 있어요."
-                if not ask_yes_no("여러 거래 또는 PDF 연결", prompt, parent=self.root):
+            used_by = {link: record.get("number", key[:8]) for key, record in self.state["records"].items() if key not in cards
+                       for link in record.get("links", []) if link in keys}
+            if len(cards) > 1:
+                prompt = f"거래 {len(cards)}건 각각에 인보이스 {len(keys)}개를 연결할까요?"
+                warnings = ["보통 거래 한 건에 인보이스를 연결해요. 여러 거래가 같은 인보이스를 나눠 낸 경우에만 쓰세요."]
+                if used_by:
+                    warnings.append("선택한 인보이스 중 다른 거래에 연결된 파일이 있어요.")
+                if not ask_yes_no("여러 거래에 연결", prompt, parent=self.root, warnings=warnings,
+                                  undo="‘해제’로 되돌릴 수 있어요.", ok="연결"):
                     return
+            else:
+                item = self.transactions[cards[0]]
+                concerns = link_concerns(item, docs, self.invoices, self.state["aliases"], used_by,
+                                         getattr(self, "duplicate_reasons", {}))
+                if concerns:
+                    names = "\n".join(f"• {doc.path.name}" for doc in docs[:4])
+                    if not ask_yes_no("연결 전 확인", f"{self.card_label(item)}\n에 아래 인보이스를 연결할까요?\n{names}",
+                                      parent=self.root, warnings=concerns, undo="연결 후에도 ‘해제’로 되돌릴 수 있어요.",
+                                      ok="그래도 연결", cancel="다시 보기"):
+                        return
+        previous = deepcopy(self.state)
         state = deepcopy(self.state)
         for key in cards:
             record = state["records"].setdefault(key, {})
@@ -3989,8 +4057,22 @@ class MonthlyClose:
                 if alias not in aliases:
                     aliases.append(alias)
         before = list(self.cards.get_children())
-        if self.save(state) and not remove and len(cards) == 1:
-            self.select_next_open(before, cards[0])
+        if self.save(state) and not remove:
+            number = self.record(cards[0]).get("number", "")
+            show_toast(self.root, f"연결함 · {number} ↔ {docs[0].path.name[:40]}" + (f" 외 {len(docs) - 1}개" if len(docs) > 1 else ""),
+                       action=("되돌리기", lambda: self.undo_link(previous, state)))
+            if len(cards) == 1:
+                self.select_next_open(before, cards[0])
+
+    def undo_link(self, previous, linked):
+        """Toast ‘되돌리기’ right after linking: back to the state before, unless something else changed since."""
+        if self.state != linked:
+            self.notice("연결한 뒤 다른 변경이 있어서 되돌리지 않았어요. 거래를 골라 ‘해제’를 누르세요.")
+            return
+        restored = deepcopy(previous)
+        restored["audit"] = deepcopy(linked.get("audit", []))  # the link stays in the history; the undo is added to it
+        if self.save(restored):
+            self.status.set("방금 한 연결을 되돌렸어요.")
 
     def link(self):
         self.change_links(False)

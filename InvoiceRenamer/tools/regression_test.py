@@ -586,8 +586,25 @@ def run_v113():
         check(marks_for([renamed]) == {}, "v1.13: a renamed file is not found by its old name")
         follow_flags([(ad, renamed, history[0][2])])
         check(marks_for([renamed]).get(renamed, {}).get("hold"), "v1.13: marks follow the renamed file")
+
+        # step 3: reasons to look again before linking
+        from datetime import date as day
+        from decimal import Decimal
+        from monthly_close import Invoice, Transaction, link_concerns
+        item = Transaction("t", day(2026, 8, 10), "BUEROBEDARF NORD KG", Decimal("129.90"), "EUR")
+        good = Invoice("g", Path("2026-08-09_Buerobedarf.pdf"), day(2026, 8, 9), "Buerobedarf Nord KG", Decimal("129.90"), "EUR", "R-1", False)
+        check(link_concerns(item, [good], [good], {}) == [], "v1.13: a clean link has no concerns")
+        late = Invoice("l", Path("x (1).pdf"), day(2026, 7, 1), "Other Shop", Decimal("99.00"), "EUR", "R-2", False)
+        concerns = link_concerns(item, [late], [good, late], {}, used_by={"l": "607-004"})
+        text = " | ".join(concerns)
+        check("금액" in text and "날짜 차이 40일" in text and "업체명" in text and "607-004" in text and "(1)" in text,
+              f"v1.13: concerns listed {concerns}")
+        twin = Invoice("w", Path("b.pdf"), day(2026, 8, 11), "Buerobedarf Nord KG", Decimal("129.90"), "EUR", "R-3", False)
+        check(any("후보가 1개 더" in c for c in link_concerns(item, [good], [good, twin], {})), "v1.13: same amount twin noted")
+        usd = Invoice("u", Path("u.pdf"), day(2026, 8, 10), "Buerobedarf Nord KG", Decimal("129.90"), "USD", "R-4", False)
+        check(any("통화" in c for c in link_concerns(item, [usd], [usd], {})), "v1.13: currency differs")
     print("PASS: v1.13 learning labels, file-name number, field guess, value check, duplicate words, not-invoice rule, customs papers,"
-          " exclusion reasons, marks")
+          " exclusion reasons, marks, link check")
 
 
 if __name__ == "__main__":
