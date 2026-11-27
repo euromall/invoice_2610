@@ -6,6 +6,7 @@ import getpass
 import io
 import json
 import os
+import subprocess
 import re
 import tempfile
 import tkinter as tk
@@ -1506,6 +1507,8 @@ class MonthlyClose:
         configure_tags(self.cards)
         self.cards.bind("<<TreeviewSelect>>", lambda event: self.show_invoices())
         self.cards.bind("<Return>", lambda event: self.link_best() if self.best_doc is not None else None)
+        self.cards.bind("<Double-1>", self.card_double_click)
+        self.cards.bind("<Button-3>", self.card_menu, add="+")
         self.detail_strip = tk.Frame(upper, background="#f6f8fa", padx=10, pady=6)
         detail_buttons = tk.Frame(self.detail_strip, background="#f6f8fa")
         detail_buttons.pack(side="right", fill="y", padx=(8, 0))
@@ -4503,9 +4506,10 @@ class MonthlyClose:
             state["records"].setdefault(key, {})["refund_group"] = keys
         self.save(state)
 
-    def refund_candidates(self, key, query=""):
+    def refund_candidates(self, key, query="", within=None):
         """Earlier payments a refund may belong to, from every month: [(score, record key, record)], best first.
-        Same payee and an amount at least as large rank first; query narrows by text."""
+        Same payee and an amount at least as large rank first; query narrows by text.
+        within: closing months (‘2026-08’, …) to list in full, so a payment can be picked without searching."""
         item = self.transactions[key]
         payee = payee_key(item.merchant)
         merchant = merchant_key(item.merchant)
@@ -4525,10 +4529,12 @@ class MonthlyClose:
             text = f"{record.get('number', '')} {record.get('merchant', '')} {amount} {day}".casefold().replace(",", ".")
             if tokens and not all(token in text for token in tokens):
                 continue
+            if within is not None and record.get("period", "") not in within:
+                continue
             same_payee = payee_key(record.get("merchant", "")) == payee or merchant_key(record.get("merchant", "")) == merchant
             exact = abs(amount) == abs(item.amount)
             covers = abs(amount) >= abs(item.amount)
-            if not tokens and not same_payee and not exact:
+            if not tokens and within is None and not same_payee and not exact:
                 continue
             rows.append(((not exact, not same_payee, not covers, (item.day - day).days), other, record))
         return sorted(rows, key=lambda row: row[0])
@@ -4550,7 +4556,15 @@ class MonthlyClose:
                   wraplength=940, padding=(14, 10, 14, 6)).pack(anchor="w")
         bar = ttk.Frame(dialog, padding=(14, 0, 14, 6))
         bar.pack(fill="x")
-        query = ttk.Entry(bar, width=40)
+        periods = sorted({entry.get("period", "") for entry in self.state["records"].values() if entry.get("period")}, reverse=True)
+        earlier = [period for period in periods if period <= (record.get("period") or str(item.day)[:7])]
+        ranges = {"최근 3개월": earlier[:3], "최근 6개월": earlier[:6], "같은 업체·금액만 (모든 달)": None}
+        ranges.update({period: [period] for period in earlier})
+        ttk.Label(bar, text="마감월").pack(side="left")
+        months = ttk.Combobox(bar, values=list(ranges), state="readonly", width=24)
+        months.set("최근 3개월")
+        months.pack(side="left", padx=(6, 12))
+        query = ttk.Entry(bar, width=30)
         query.pack(side="left")
         footer = ttk.Frame(dialog, padding=(14, 8))
         footer.pack(side="bottom", fill="x")
@@ -4560,10 +4574,11 @@ class MonthlyClose:
         def fill(_event=None):
             table.delete(*table.get_children())
             found.clear()
-            for index, (score, other, entry) in enumerate(self.refund_candidates(key, query.get())[:300]):
+            within = ranges.get(months.get())
+            for index, (score, other, entry) in enumerate(self.refund_candidates(key, query.get(), within)[:500]):
                 found[str(index)] = other
                 period = entry.get("period", "")
-                sent = "이미 보냄" if self.state.get("exports", {}).get(period) else ""
+                sent = "전달함" if self.state.get("exports", {}).get(period) else ""
                 status = " · ".join(filter(None, ["금액 같음" if not score[0] else "", "같은 업체" if not score[1] else "", sent]))
                 table.insert("", "end", iid=str(index), values=(period, entry.get("number", ""), entry.get("day", ""),
                                                                  entry.get("merchant", "")[:80], f"{entry.get('amount', '')} {entry.get('currency', '')}", status))
@@ -4589,8 +4604,10 @@ class MonthlyClose:
             if self.save(state):
                 dialog.destroy()
 
-        ttk.Button(bar, text="찾기", command=fill).pack(side="left", padx=6)
-        ttk.Label(bar, text="번호·업체·금액으로 찾을 수 있어요", foreground=COLORS["muted"]).pack(side="left")
+        ttk.Button(bar, text="좁히기", command=fill).pack(side="left", padx=6)
+        ttk.Label(bar, text="번호·업체·금액을 적으면 목록이 좁혀져요. 같은 업체·같은 금액이 위에 와요.",
+                  foreground=COLORS["muted"]).pack(side="left")
+        months.bind("<<ComboboxSelected>>", fill)
         ttk.Button(footer, text="이 결제의 환불로 연결", style="Primary.TButton", command=choose).pack(side="right")
         ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
         query.bind("<Return>", fill)
@@ -4791,46 +4808,161 @@ class MonthlyClose:
             ttk.Button(buttons, text="원본에서 보기·값 고르기", command=lambda: fields.pick(fields.first_missing())).pack(side="left")
         ttk.Button(buttons, text="저장", style="Primary.TButton", command=save).pack(side="right")
 
-    def exclude_document(self, doc=None, parent=None):
-        """Move an evidence file that is not an invoice (or not for this close) to the ‘제외’ folder. Nothing is deleted."""
-        from invoice_renamer import EXCLUDED_FOLDER, free_name
+    def exclude_document(self, doc=None, parent=None, reason=None):
+        """Move an evidence file that is not an invoice (or not for this close) to 제외/<reason>. Nothing is deleted."""
         doc = doc or self.chosen_document()
         if doc is None:
             return False
+        return self.exclude_documents([doc], parent, reason)
+
+    def exclude_documents(self, docs, parent=None, reason=None):
+        """Several evidence files to 제외/<reason> after one confirmation (linked ones are skipped and named)."""
+        from invoice_renamer import EXCLUDE_HELP, EXCLUDE_REASONS, EXCLUDED_FOLDER, exclude_files
         parent = parent or self.root
-        used = [self.record(key).get("number", "") or key[:8] for key, record in self.state["records"].items()
-                if doc.key in record.get("links", [])]
-        if used:
-            show_notice(parent, f"{doc.path.name}\n거래 {', '.join(used)}에 연결된 증빙이에요. 먼저 ‘해제’한 뒤 제외하세요.")
+        used = {link: self.record(key).get("number", "") or key[:8] for key, record in self.state["records"].items()
+                for link in record.get("links", [])}
+        linked = [doc for doc in docs if doc.key in used]
+        docs = [doc for doc in docs if doc.key not in used]
+        if not docs:
+            show_notice(parent, f"{linked[0].path.name}\n거래 {used[linked[0].key]}에 연결된 증빙이에요. 먼저 ‘해제’한 뒤 제외하세요."
+                        if linked else "제외할 증빙을 고르세요.")
             return False
-        if not ask_yes_no("제외 폴더로", f"{doc.path.name}\n인보이스가 아니거나 이번 마감과 상관없는 파일이면 ‘제외’ 폴더로 옮길까요?\n"
-                                                   "지우지 않아요. 1단계 ‘정리 되돌리기’나 탐색기에서 다시 꺼낼 수 있어요.", parent=parent):
+        warnings = []
+        if linked:
+            warnings.append(f"거래에 연결된 {len(linked)}개는 옮기지 않아요 (먼저 ‘해제’).")
+        no_statement = self.months_without_statement(docs)
+        if no_statement:
+            warnings.append(f"{', '.join(no_statement)}은 명세서를 불러오지 않은 달이라 ‘거래 없음’으로 보일 수 있어요. "
+                            "그 달 명세서를 불러온 뒤 정리하는 게 안전해요.")
+        sent = sorted({doc.day.strftime("%Y-%m") for doc in docs if doc.day and self.state.get("exports", {}).get(doc.day.strftime("%Y-%m"))})
+        if sent:
+            warnings.append(f"{', '.join(sent)}은 이미 세무사에게 전달한 달이에요.")
+        warnings.append("독일은 인보이스 보관의무(8년)가 있어요. 제외는 지우지 않고 폴더만 옮겨요.")
+        choices = None
+        if reason is None:
+            choices = [(f"{name} · {EXCLUDE_HELP[name]}", name) for name in EXCLUDE_REASONS if name != "나누기 원본"]
+        names = "\n".join(f"• {doc.path.name[:60]}" for doc in docs[:5]) + (f"\n… 외 {len(docs) - 5}개" if len(docs) > 5 else "")
+        answer = ask_yes_no("제외 폴더로", f"증빙 {len(docs)}개를 ‘{EXCLUDED_FOLDER}/{reason or '사유'}’ 폴더로 옮길까요?\n{names}",
+                            parent=parent, warnings=warnings, undo="1단계 ‘정리 되돌리기’나 ‘제외 기록 보기’에서 되돌릴 수 있어요.",
+                            ok="옮기기", choices=choices)
+        if not answer:
             return False
-        try:
-            target_folder = doc.path.parent / EXCLUDED_FOLDER
-            target_folder.mkdir(exist_ok=True)
-            move_evidence(doc.path, free_name(target_folder, doc.path.name))
-        except OSError as error:
-            show_notice(parent, f"옮기지 못했어요: {error}", kind="error")
-            return False
+        reason = answer if choices else reason
+        root = self.folder or docs[0].path.parent
+        with Busy(parent, "제외 폴더로 옮기고 있어요") as busy:
+            try:
+                history, errors = exclude_files(root, [doc.path for doc in docs], reason, busy.step)
+            except OSError as error:
+                show_notice(parent, f"옮기지 못했어요: {error}", kind="error")
+                return False
+        self.last_exclusion = history
         self.load_pdfs(self.folder)
-        return True
+        message = f"{len(history)}개를 ‘{EXCLUDED_FOLDER}/{reason}’로 옮겼어요" + (f" · 실패 {len(errors)}개" if errors else "")
+        show_toast(self.root, message, action=("되돌리기", self.undo_exclusion) if history else None)
+        if errors:
+            show_notice(parent, "옮기지 못한 파일:\n" + "\n".join(errors[:8]), kind="error")
+        return bool(history)
+
+    def undo_exclusion(self):
+        from invoice_renamer import undo_moves
+        history = getattr(self, "last_exclusion", None)
+        if not history:
+            return
+        restored, failed = undo_moves(history)
+        self.last_exclusion = None
+        self.load_pdfs(self.folder)
+        self.status.set(f"{len(restored)}개를 원래 자리로 되돌렸어요" + (f" · 실패 {len(failed)}개" if failed else ""))
+
+    def months_without_statement(self, docs):
+        """Months of these documents for which no statement was loaded (their transactions are simply not known)."""
+        loaded = {item.day.strftime("%Y-%m") for item in self.transactions.values()}
+        months = {doc.day.strftime("%Y-%m") for doc in docs if doc.day}
+        return sorted(months - loaded) if loaded else []
+
+    def card_double_click(self, event):
+        """Double-click on a transaction: show it in the statement (where it came from)."""
+        if self.cards.identify_region(event.x, event.y) != "cell":
+            return None
+        row = self.cards.identify_row(event.y)
+        if row in self.transactions:
+            self.cards.selection_set(row)
+            self.show_in_statement(self.transactions[row])
+        return "break"
+
+    def card_menu(self, event):
+        """Right-click on a transaction: the things done with one transaction, in one place."""
+        if self.cards.identify_region(event.x, event.y) in ("heading", "separator"):
+            return None
+        row = self.cards.identify_row(event.y)
+        if not row or row not in self.transactions:
+            return None
+        if row not in self.cards.selection():
+            self.cards.selection_set(row)
+        item = self.transactions[row]
+        record = self.record(row)
+        menu = tk.Menu(self.cards, tearoff=False)
+        menu.add_command(label=f"{record.get('number', '')} · {item.amount} {item.currency} · {item.merchant[:30]}", state="disabled")
+        menu.add_separator()
+        menu.add_command(label="명세서에서 보기 (더블클릭)", command=lambda: self.show_in_statement(item))
+        menu.add_command(label="메모·기록", command=self.edit_note)
+        without = tk.Menu(menu, tearoff=False)
+        without.add_command(label="사유 고르기 (세무사 확인)…", command=self.mark_statement_evidence)
+        without.add_command(label="사유 관리", command=self.manage_reasons)
+        menu.add_cascade(label="증빙 없이 처리", menu=without)
+        menu.add_command(label="메일 검색", command=self.search_gmail)
+        menu.add_command(label="인보이스 요청 초안", command=self.draft_invoice_request)
+        if item.amount < 0:
+            menu.add_command(label="환불의 원래 결제 찾기", command=lambda: self.find_refunded_purchase(row))
+        menu.add_separator()
+        linked = bool(self.linked(row) or record.get("transfer") or record.get("refund_group") or record.get("refund_of"))
+        menu.add_command(label="연결 해제", state="normal" if linked else "disabled", command=self.unlink)
+        menu.add_command(label="번호 복사", command=lambda: self.copy_text(record.get("number", "")))
+        menu.add_command(label="거래 내용 복사", command=lambda: self.copy_text(
+            f"{record.get('number', '')}\t{item.day}\t{item.merchant}\t{item.amount} {item.currency}"))
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def copy_text(self, text):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status.set(f"복사했어요: {text[:60]}")
 
     def evidence_menu(self, event):
         row = self.pdfs.identify_row(event.y)
         if not row or self.pdfs.identify_region(event.x, event.y) == "heading":
             return None
         self.pdfs.selection_set(row)
+        doc = self.visible_pdfs.get(row)
         menu = tk.Menu(self.pdfs, tearoff=False)
-        for label, command in (("열기", self.open_pdf), ("선택 연결", self.link), ("해제", self.unlink), (None, None),
-                               ("값 고치기 (발행일·업체·총액·번호)", self.edit_document_values),
-                               ("제외 폴더로 (인보이스 아님·이번 달 아님)", self.exclude_document)):
+        for label, command in (("열기 (더블클릭)", self.open_pdf), ("선택 연결", self.link), ("해제", self.unlink),
+                               ("거래와 나란히 보기", self.compare_documents), (None, None),
+                               ("값 고치기 (발행일·업체·총액·번호)", self.edit_document_values)):
             if label is None:
                 menu.add_separator()
             else:
                 menu.add_command(label=label, command=lambda c=command: c())
+        if doc is not None:
+            from invoice_renamer import EXCLUDE_HELP, EXCLUDE_REASONS
+            exclude = tk.Menu(menu, tearoff=False)
+            for reason in EXCLUDE_REASONS:
+                if reason != "나누기 원본":
+                    exclude.add_command(label=f"{reason} · {EXCLUDE_HELP[reason]}",
+                                        command=lambda r=reason: self.exclude_document(doc, reason=r))
+            menu.add_cascade(label="제외 폴더로", menu=exclude)
+            menu.add_separator()
+            menu.add_command(label="탐색기에서 보기", command=lambda: self.reveal_file(doc.path))
+            menu.add_command(label="파일 이름 복사", command=lambda: self.copy_text(doc.path.name))
         menu.tk_popup(event.x_root, event.y_root)
         return "break"
+
+    def reveal_file(self, path):
+        try:
+            if os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(Path(path).parent)])
+        except OSError as error:
+            self.notice(f"탐색기를 열지 못했어요: {error}")
 
     def manage_unmatched(self):
         """Evidence that no transaction uses yet: look, fix the values, set aside, or link to a transaction."""
@@ -4845,8 +4977,33 @@ class MonthlyClose:
         near_only = tk.BooleanVar(value=True)
         ttk.Checkbutton(dialog, text=f"불러온 명세서 기간 앞뒤 {CANDIDATE_DAYS}일 안의 증빙만 (날짜 없는 증빙 포함)", variable=near_only,
                         command=lambda: fill()).pack(anchor="w", padx=14)
+        older = ttk.Frame(dialog, padding=(14, 2))
+        older.pack(fill="x")
+        ttk.Label(older, text="발행일이").pack(side="left")
+        age = ttk.Spinbox(older, from_=1, to=36, width=4)
+        age.set(6)
+        age.pack(side="left", padx=4)
+        ttk.Label(older, text="개월보다 오래된 것").pack(side="left")
         table = self.table(dialog, ("파일", "발행일", "업체명", "총액", "번호", "금액 맞는 거래"), (300, 90, 180, 100, 120, 150))
+        table.configure(selectmode="extended")
         shown = {}
+
+        def pick_older():
+            try:
+                months = int(age.get())
+            except ValueError:
+                months = 6
+            today = date.today()
+            month_index = today.year * 12 + today.month - 1 - months
+            limit = date(month_index // 12, month_index % 12 + 1, 1)
+            rows = [key for key, (doc, _fits) in shown.items() if doc.day and doc.day < limit]
+            table.selection_set(rows)
+            if rows:
+                table.see(rows[0])
+            caption.set(f"{limit} 이전 발행 증빙 {len(rows)}개를 골랐어요. ‘제외 폴더로’를 누르면 사유를 고르고 한 번에 옮겨요.")
+
+        ttk.Button(older, text="모두 고르기", command=pick_older).pack(side="left", padx=6)
+        ttk.Button(older, text="전체 선택", command=lambda: table.selection_set(table.get_children())).pack(side="left")
 
         def fill():
             table.delete(*table.get_children())
@@ -4880,9 +5037,13 @@ class MonthlyClose:
                 self.edit_document_values(picked[0], after=fill)
 
         def exclude_selected():
-            picked = chosen()
-            if picked and self.exclude_document(picked[0], dialog):
+            docs = [shown[key][0] for key in table.selection()]
+            if not docs:
+                show_notice(dialog, "제외할 증빙을 고르세요. Ctrl·Shift로 여러 개, ‘N개월보다 오래된 것’으로 한 번에 고를 수 있어요.")
+                return
+            if self.exclude_documents(docs, dialog):
                 fill()
+                dialog.grab_set()
 
         def link_selected():
             picked = chosen()
