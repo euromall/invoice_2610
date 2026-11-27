@@ -751,7 +751,24 @@ def run_v114():
     check(not holes, f"v1.14: no warning after months that were not loaded {dict(holes)}")
     review = review_months({"records": records}, [])
     check(any(kind == "매달 거래처 빠짐" for kind, _, _ in review["2026-10"]), "v1.14: monthly review lists the missing merchant")
-    print("PASS: v1.14 tax remarks (reverse charge, EU/foreign VAT ID, missing tax/tax id, small invoice), exchange rate, monthly merchant missing")
+    from monthly_close import advisor_notice, open_inquiries, NOTICE_KINDS, german_money, cover_letter_pdf
+    asked = {"inquiries": [{"month": "2026-10", "question": "a", "status": "답변 필요"},
+                           {"month": "2026-10", "question": "b", "status": "답변함"},
+                           {"month": "2026-09", "question": "c"}, "broken"]}
+    check([e["question"] for e in open_inquiries(asked, "2026-10")] == ["a"] and len(open_inquiries(asked)) == 2,
+          "v1.14: open Rückfragen (no state counts as open, odd entries skipped)")
+    subjects = [advisor_notice(kind, ["2026-10"], "M.zip", {"bookings": 3, "documents": 2, "open": 1})[0] for kind in NOTICE_KINDS]
+    first = advisor_notice(NOTICE_KINDS[0], ["2026-10"], "M.zip", {"bookings": 3, "documents": 2, "open": 1}, "Firma", "Frau Muster")[1]
+    check(subjects == ["Unterlagen Monatsabschluss 10/2026", "Nachreichung Unterlagen 10/2026", "Rückfrage zum Monatsabschluss 10/2026"]
+          and first.startswith("Guten Tag Frau Muster,") and "3 Buchungen, 2 Belege, 1 offene Posten" in first and first.endswith("Firma"),
+          f"v1.14: notification mail {subjects} {first}")
+    check(german_money(Decimal("-1234.5"), "EUR") == "-1.234,50 EUR", "v1.14: German amount")
+    import pymupdf
+    letter = cover_letter_pdf({"months": ["2026-10"], "open": [(f"K-{n}", day(2026, 10, 1), Decimal("5"), "EUR", "Händler 상점 – x", "offen")
+                                                               for n in range(80)]})
+    with pymupdf.open(stream=letter) as pdf:
+        check(pdf.page_count >= 2 and "Händler ?? - x" in pdf[0].get_text(), "v1.14: long Begleitschreiben continues on a new page, Latin-1 text")
+    print("PASS: v1.14 tax remarks (reverse charge, EU/foreign VAT ID, missing tax/tax id, small invoice), exchange rate, monthly merchant missing, Rückfragen, notification mail, Begleitschreiben")
 
 
 if __name__ == "__main__":

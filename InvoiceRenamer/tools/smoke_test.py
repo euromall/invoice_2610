@@ -62,6 +62,9 @@ def run():
                       attachments=[add_attachment(app.attachment_folder(), supporting)])
         check(app.status_for(transaction.key) == "금액 대조 완료", "Reconciliation status")
 
+        app.state["inquiries"] = [{"month": record["period"], "number": "611-001", "question": "Bitte Beleg prüfen",
+                                   "status": "답변 필요", "asked_at": "2026-11-26"},
+                                  {"month": "2001-01", "number": "", "question": "OTHER_MONTH", "status": "답변 필요"}]
         package = root / "Monatsabschluss.zip"
         app.write_package(package)
         with ZipFile(package) as result:
@@ -73,6 +76,14 @@ def run():
             check(any(path.startswith("Anlagen/") for path in result.namelist()), "Supporting attachment")
             book = load_workbook(io.BytesIO(result.read("Abgleich.xlsx")))
             check(book["Abgleich"]["F2"].data_type == "n" and book["Abgleich"]["I2"].hyperlink, "Excel amounts and file links")
+            inquiries = list(csv.DictReader(io.StringIO(result.read("12_Rueckfragen.csv").decode("utf-8-sig")), delimiter=";"))
+            check(len(inquiries) == 1 and inquiries[0]["Status"] == "Offen" and inquiries[0]["Rückfrage"] == "Bitte Beleg prüfen",
+                  f"v1.14 Rückfragen of the package month only {inquiries}")
+            import pymupdf
+            with pymupdf.open(stream=result.read("00_Begleitschreiben.pdf")) as letter:
+                text = letter[0].get_text()
+            check("Buchungen: 1" in text and "Offene Posten: 0" in text and "Bitte Beleg prüfen" in text and "OTHER_MONTH" not in text,
+                  f"v1.14 Begleitschreiben summary {text[:300]}")
 
         import pymupdf
         statement = root / "Auszug.pdf"
@@ -89,11 +100,11 @@ def run():
             check(any(name.endswith("_Auszug_nummeriert.pdf") for name in names), "Numbered PDF statement in ZIP")
             load_workbook(io.BytesIO(result.read("Abgleich.xlsx")))
         trimmed = root / "Monatsabschluss-auswahl.zip"
-        app.write_package(trimmed, omit={"nummeriert", "04_Importfehler.csv", "Hinweise.txt", "Belege", "01_Abgleich.csv"})
+        app.write_package(trimmed, omit={"nummeriert", "04_Importfehler.csv", "Hinweise.txt", "Belege", "01_Abgleich.csv", "00_Begleitschreiben.pdf"})
         with ZipFile(trimmed) as result:
             names = result.namelist()
             check(not any(name.endswith("_nummeriert.pdf") for name in names) and "04_Importfehler.csv" not in names
-                  and "Hinweise.txt" not in names, "Parts left out of the ZIP")
+                  and "Hinweise.txt" not in names and "00_Begleitschreiben.pdf" not in names, "Parts left out of the ZIP")
             check("01_Abgleich.csv" in names and any(name.startswith("Belege/") for name in names), "Required parts kept")
         del app.statement_sources[digest(statement)]
         del app.state["transaction_sources"]

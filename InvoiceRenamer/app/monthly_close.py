@@ -814,7 +814,9 @@ PACKAGE_PARTS = [
     ("09_Rechnungskorrekturen.csv", "09_Rechnungskorrekturen.csv", "수정 인보이스(Gutschrift·Storno)와 원래 인보이스 연결.", False),
     ("10_Anlagen.csv", "10_Anlagen.csv", "보조 자료 목록.", False),
     ("11_Endkontrolle.csv", "11_Endkontrolle.csv", "최종 검수 기록: 검수한 거래의 결과(검수 완료·다시 확인)와 날짜.", False),
+    ("12_Rueckfragen.csv", "12_Rueckfragen.csv", "세무사 문의(Rückfrage)와 우리 답변, 상태.", False),
     ("Hinweise.txt", "Hinweise.txt", "세무사에게 드리는 짧은 독일어 안내문 (파일 구성 설명).", False),
+    ("00_Begleitschreiben.pdf", "00_Begleitschreiben.pdf", "독일어 전달 요약 1쪽: 마감월·건수·미해결 거래·특이사항·열린 문의.", False),
 ]
 
 
@@ -1443,6 +1445,152 @@ def german_request(item, merchant):
     return subject, body
 
 
+# v1.14: questions from the tax advisor (Rückfragen) and our answers, kept per closing month
+INQUIRY_STATES = {"답변 필요": "Offen", "답변함": "Beantwortet", "완료": "Erledigt"}
+
+
+def advisor_profile():
+    """Settings → 세무사 정보: {company, advisor, email}; empty when not set or unreadable."""
+    try:
+        from invoice_renamer import load_settings
+        profile = load_settings().get("advisor_profile") or {}
+    except (OSError, ValueError, TypeError):
+        profile = {}
+    return {field: str(profile.get(field, "")) for field in ("company", "advisor", "email")} if isinstance(profile, dict) else {}
+
+
+def open_inquiries(state, month=None):
+    """Rückfragen still waiting for our answer (of one month, or of all months)."""
+    return [entry for entry in state.get("inquiries", []) or []
+            if isinstance(entry, dict) and entry.get("status", "답변 필요") == "답변 필요"
+            and (month is None or entry.get("month") == month)]
+
+
+def german_money(value, currency=""):
+    """1234.5 → ‘1.234,50 EUR’."""
+    try:
+        text = format(abs(Decimal(str(value))), ",.2f").translate(str.maketrans(",.", ".,"))
+    except (ArithmeticError, ValueError):
+        return str(value)
+    sign = "-" if Decimal(str(value)) < 0 else ""
+    return f"{sign}{text} {currency}".strip()
+
+
+def month_span(months):
+    """['2026-09', '2026-10'] → ‘09/2026 – 10/2026’."""
+    labels = [f"{month[5:7]}/{month[:4]}" if re.fullmatch(r"\d{4}-\d{2}", month or "") else str(month) for month in months]
+    labels = list(dict.fromkeys(labels))
+    return " – ".join([labels[0], labels[-1]] if len(labels) > 1 else labels) if labels else ""
+
+
+def pdf_text(text):
+    """The PDF base fonts know Latin-1 only (German is fine); other letters become ‘?’."""
+    text = " ".join(str(text).split()).translate(str.maketrans({"–": "-", "—": "-", "…": "...", "„": '"', "“": '"', "”": '"', "’": "'", "‘": "'", "€": "EUR"}))
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def cover_letter_pdf(info):
+    """v1.14 ‘Begleitschreiben’: one German summary page (more when long) for the advisor ZIP.
+    info: months, supplemental, company, advisor, counts {bookings, documents, attachments, open},
+    open [(Nr, date, amount, currency, text, status)], special [(Nr, note)], inquiries [(Nr, question)]."""
+    document = pymupdf.open()
+    page, y = None, 0
+    left, right, bottom = 56, 539, 790
+
+    def new_page():
+        nonlocal page, y
+        page = document.new_page(width=595, height=842)
+        y = 60
+
+    def line(text, size=10, bold=False, indent=0, gap=4, color=(0, 0, 0)):
+        nonlocal y
+        if page is None or y + size > bottom:
+            new_page()
+        text, font = pdf_text(text), "hebo" if bold else "helv"
+        width = right - left - indent
+        while pymupdf.get_text_length(text, fontname=font, fontsize=size) > width and len(text) > 4:
+            text = text[:-2]
+            if pymupdf.get_text_length(text + "...", fontname=font, fontsize=size) <= width:
+                text += "..."
+                break
+        page.insert_text((left + indent, y + size), text, fontsize=size, fontname=font, color=color)
+        y += size + gap
+
+    title = "Nachreichung" if info.get("supplemental") else "Monatsabschluss"
+    line(f"Begleitschreiben – {title} {month_span(info.get('months', []))}", 16, True, gap=10, color=(0.14, 0.22, 0.30))
+    if info.get("company"):
+        line(f"Von: {info['company']}")
+    if info.get("advisor"):
+        line(f"An: {info['advisor']}")
+    line(f"Erstellt am: {info.get('created', date.today()):%d.%m.%Y}", gap=14)
+    counts = info.get("counts", {})
+    line("Überblick", 12, True, gap=6)
+    for label, field in (("Buchungen", "bookings"), ("Belege", "documents"), ("Anlagen", "attachments"),
+                         ("Offene Posten", "open")):
+        line(f"{label}: {counts.get(field, 0)}", indent=12)
+    line(f"Offene Rückfragen: {len(info.get('inquiries', []))}", indent=12, gap=14)
+    line("Offene Posten", 12, True, gap=6)
+    if info.get("open"):
+        for number, day, amount, currency, text, status in info["open"]:
+            when = day.strftime("%d.%m.%Y") if hasattr(day, "strftime") else str(day)
+            line(f"{number}  {when}  {german_money(amount, currency)}  {text}", indent=12, gap=1)
+            line(status, 9, indent=24, color=(0.45, 0.45, 0.45))
+    else:
+        line("Keine – zu allen Buchungen liegen Belege oder Begründungen vor.", indent=12)
+    y += 10
+    line("Besonderheiten", 12, True, gap=6)
+    if info.get("special"):
+        for number, note in info["special"]:
+            line(f"{number}  {note}", indent=12)
+    else:
+        line("Keine besonderen Steuerhinweise erkannt.", indent=12)
+    y += 10
+    if info.get("inquiries"):
+        line("Offene Rückfragen", 12, True, gap=6)
+        for number, question in info["inquiries"]:
+            line(f"{number or '–'}  {question}", indent=12)
+        y += 10
+    line("Alle Einzelheiten stehen in Abgleich.xlsx und den CSV-Tabellen. Die Hinweise des Programms sind", 9, gap=1)
+    line("keine steuerliche Beurteilung; bitte prüfen Sie die Belege.", 9, gap=12)
+    line("Mit freundlichen Grüßen")
+    if info.get("company"):
+        line(info["company"])
+    data = document.tobytes(garbage=3, deflate=True)
+    document.close()
+    return data
+
+
+NOTICE_KINDS = ("업로드 알림", "추가 제출 알림", "회신 요청")
+
+
+def advisor_notice(kind, months, filename="", counts=None, sender="", advisor=""):
+    """German e-mail text for the advisor: (subject, body). kind: one of NOTICE_KINDS."""
+    span = month_span(months)
+    counts = counts or {}
+    greeting = f"Guten Tag {advisor},".replace(" ,", ",") if advisor else "Guten Tag,"
+    facts = ""
+    if counts:
+        facts = (f"\nUmfang: {counts.get('bookings', 0)} Buchungen, {counts.get('documents', 0)} Belege, "
+                 f"{counts.get('open', 0)} offene Posten.\n")
+    file_line = f" (Datei: {filename})" if filename else ""
+    if kind == NOTICE_KINDS[1]:
+        subject = f"Nachreichung Unterlagen {span}"
+        text = (f"wir haben die nachgereichten Unterlagen zum Monatsabschluss {span} hochgeladen{file_line}.\n"
+                f"{facts}\nDie bereits übermittelten Unterlagen gelten weiter. Die geänderten Buchungen stehen in "
+                "06_Nachreichungen.csv.\n")
+    elif kind == NOTICE_KINDS[2]:
+        subject = f"Rückfrage zum Monatsabschluss {span}"
+        text = (f"die Unterlagen zum Monatsabschluss {span}{file_line} haben wir Ihnen übermittelt.\n"
+                "Könnten Sie uns kurz bestätigen, ob alles vollständig ist, oder uns Ihre Rückfragen mitteilen?\n")
+    else:
+        subject = f"Unterlagen Monatsabschluss {span}"
+        text = (f"die Unterlagen zum Monatsabschluss {span} sind hochgeladen{file_line}.\n{facts}\n"
+                "Eine Übersicht steht im Begleitschreiben, alle Einzelheiten in Abgleich.xlsx.\n"
+                "Bitte prüfen Sie die Unterlagen und melden Sie sich bei Rückfragen.\n")
+    body = f"{greeting}\n\n{text}\nVielen Dank.\n\nMit freundlichen Grüßen" + (f"\n{sender}" if sender else "")
+    return subject, body
+
+
 class MonthlyClose:
     def __init__(self, parent, folder, practice_folder=None, container=None, on_change=None):
         self.embedded = container is not None
@@ -1509,7 +1657,7 @@ class MonthlyClose:
             4: [("최종 검수", self.final_review, "Primary.TButton"), ("인쇄 묶음", self.open_print_bundle, None), ("누락 점검표", self.monthly_review, None), ("세무 점검", self.tax_overview, None), ("미연결 인보이스", self.show_unlinked_invoices, None),
                 ("후속 할 일", self.followup_list, None), ("기간 점검", self.show_statement_periods, None),
                 ("전체 검색", self.search_all_months, None)],
-            5: [("마감 전 점검", self.pre_close_check, None), ("세무사 ZIP", self.export_zip, "Primary.TButton"),
+            5: [("마감 전 점검", self.pre_close_check, None), ("세무사 문의", self.inquiries, None), ("세무사 ZIP", self.export_zip, "Primary.TButton"),
                 ("추가 ZIP", lambda: self.export_zip(supplemental=True), None),
                 ("전달 이력", self.export_history, None), ("마감 확정·해제", self.manage_period, None),
                 ("CSV 저장", self.export_csv, None)],
@@ -4120,6 +4268,7 @@ class MonthlyClose:
             ("최종 검수를 안 한 거래", len(unchecked), False, self.final_review),
             ("매달 있던 거래처가 이번 달 없음", kinds[REVIEW_KINDS[5]], False, self.monthly_review),
             ("세무 참고가 있는 거래", len(tax), False, self.tax_overview),
+            ("답변하지 않은 세무사 문의", len(open_inquiries(self.state, month)), False, self.inquiries),
             ("거래 없는 인보이스 (다른 달·개인 지출일 수 있음)", kinds[REVIEW_KINDS[1]], False, self.manage_unmatched),
         ]
         blocking = sum(count for _, count, must, _ in rows if must)
@@ -4819,11 +4968,196 @@ class MonthlyClose:
             if self.save(state):
                 fill()
 
+        def notice_mail():
+            choice = table.selection()
+            if len(choice) != 1:
+                messagebox.showinfo("알림 메일", "마감본 한 개를 선택하세요.", parent=dialog)
+                return
+            month = choice[0].split(":", 1)[0]
+            self.advisor_mail(entries[choice[0]], month, dialog)
+
         ttk.Button(panel, text="전달 상태 저장", command=set_status).pack(side="left")
+        ttk.Button(panel, text="알림 메일 · E-Mail", command=notice_mail).pack(side="left", padx=5)
         fill()
         history = self.table(dialog, ("변경 시각", "사용자", "거래번호", "변경 항목"), (200, 130, 120, 455))
         for change in reversed(self.state.get("audit", [])):
             history.insert("", "end", values=(change["at"], change.get("user", ""), change["number"], change["fields"]))
+
+    def advisor_mail(self, entry, month, parent=None):
+        """v1.14 German notification text for the advisor (upload done, Nachreichung, asking for a reply).
+        Copy it or open the mail program (mailto). Nothing is sent by the program itself."""
+        parent = parent or self.root
+        window = InlineDialog(parent)
+        window.title(f"세무사 알림 메일 · {month}")
+        window.center(760, 560)
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill="both", expand=True)
+        profile = advisor_profile()
+        form = ttk.Frame(frame)
+        form.pack(fill="x")
+        fields = {}
+        for row, (field, label) in enumerate((("email", "세무사 메일 주소"), ("advisor", "세무사 이름 (인사말)"),
+                                              ("company", "보내는 회사 이름"))):
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            fields[field] = ttk.Entry(form, width=50)
+            fields[field].insert(0, profile.get(field, ""))
+            fields[field].grid(row=row, column=1, sticky="we", padx=8, pady=2)
+        kind = ttk.Combobox(form, values=NOTICE_KINDS, state="readonly", width=16)
+        kind.set(NOTICE_KINDS[1] if entry.get("kind") == "Nachreichung" else NOTICE_KINDS[0])
+        ttk.Label(form, text="종류").grid(row=3, column=0, sticky="w", pady=2)
+        kind.grid(row=3, column=1, sticky="w", padx=8, pady=2)
+        form.columnconfigure(1, weight=1)
+        subject_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=subject_var).pack(fill="x", pady=(10, 4))
+        bar = ttk.Frame(frame, padding=(0, 8, 0, 0))
+        bar.pack(side="bottom", fill="x")
+        ttk.Label(frame, text="프로그램이 메일을 직접 보내지는 않아요. 복사해서 붙이거나 ‘메일 프로그램 열기’를 누르세요.",
+                  foreground=COLORS["muted"]).pack(side="bottom", anchor="w", pady=(6, 0))
+        content = tk.Text(frame, height=10, wrap="word")
+        content.pack(fill="both", expand=True)
+
+        def generate(*_):
+            subject, body = advisor_notice(kind.get(), [month], Path(entry.get("path", "")).name, entry.get("counts"),
+                                           fields["company"].get().strip(), fields["advisor"].get().strip())
+            subject_var.set(subject)
+            content.delete("1.0", "end")
+            content.insert("1.0", body)
+
+        def remember():
+            from invoice_renamer import save_settings
+            save_settings({"advisor_profile": {field: widget.get().strip() for field, widget in fields.items()}})
+
+        def copy():
+            remember()
+            window.clipboard_clear()
+            window.clipboard_append(f"Betreff: {subject_var.get()}\n\n{content.get('1.0', 'end-1c')}")
+            self.status.set("세무사 알림 메일 문안을 복사했어요.")
+
+        def open_mail():
+            remember()
+            address = fields["email"].get().strip()
+            url = f"mailto:{quote(address, safe='@.')}?subject={quote(subject_var.get())}&body={quote(content.get('1.0', 'end-1c'))}"
+            if not webbrowser.open(url):
+                show_notice(window, "메일 프로그램을 열지 못했어요. ‘복사’ 후 직접 붙여 넣으세요.")
+
+        kind.bind("<<ComboboxSelected>>", generate)
+        self.buttons(bar, [("다시 만들기", generate), ("복사", copy), ("메일 프로그램 열기", open_mail)])
+        generate()
+
+    def inquiries(self):
+        """v1.14 ‘세무사 문의’: Rückfragen of the advisor per month, our answer and a state. Open ones show in
+        ‘마감 전 점검’, in the Begleitschreiben and as 12_Rueckfragen.csv in the ZIP."""
+        month = self.month_filter.get()
+        if month == "전체":
+            months = sorted({record.get("period", "") for record in self.state["records"].values() if record.get("period")})
+            month = months[-1] if months else date.today().strftime("%Y-%m")
+        dialog = InlineDialog(self.root)
+        dialog.title("세무사 문의 · Rückfragen")
+        dialog.center(980, 620)
+        top = ttk.Frame(dialog, padding=(10, 8))
+        top.pack(fill="x")
+        ttk.Label(top, text="세무사가 물어본 것과 우리 답변을 적어 두세요. ‘답변 필요’는 마감 전 점검과 전달 요약에 나와요.",
+                  foreground=COLORS["muted"]).pack(side="left")
+        show_all = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="모든 달 보기", variable=show_all, command=lambda: fill()).pack(side="right")
+        form = ttk.Frame(dialog, padding=(10, 0))
+        form.pack(side="bottom", fill="x", pady=(0, 10))
+        table = self.table(dialog, ("마감월", "거래번호", "문의", "답변", "상태", "받은 날"), (80, 90, 330, 290, 80, 90))
+        ttk.Label(form, text="마감월").grid(row=0, column=0, sticky="w")
+        month_entry = ttk.Entry(form, width=10)
+        month_entry.insert(0, month)
+        month_entry.grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(form, text="거래번호 (없으면 비움)").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        number_entry = ttk.Entry(form, width=14)
+        number_entry.grid(row=0, column=3, sticky="w", padx=4)
+        ttk.Label(form, text="상태").grid(row=0, column=4, sticky="w", padx=(12, 0))
+        state_box = ttk.Combobox(form, values=list(INQUIRY_STATES), state="readonly", width=10)
+        state_box.set("답변 필요")
+        state_box.grid(row=0, column=5, sticky="w", padx=4)
+        ttk.Label(form, text="문의 (독일어 그대로)").grid(row=1, column=0, columnspan=2, sticky="nw", pady=(6, 0))
+        question = tk.Text(form, height=3, wrap="word")
+        question.grid(row=1, column=2, columnspan=4, sticky="we", pady=(6, 0))
+        ttk.Label(form, text="우리 답변").grid(row=2, column=0, columnspan=2, sticky="nw", pady=(6, 0))
+        answer = tk.Text(form, height=3, wrap="word")
+        answer.grid(row=2, column=2, columnspan=4, sticky="we", pady=(6, 0))
+        form.columnconfigure(5, weight=1)
+        selected = {"index": None}
+
+        def fill():
+            table.delete(*table.get_children())
+            for index, entry in enumerate(self.state.get("inquiries", []) or []):
+                if not show_all.get() and entry.get("month") != month_entry.get().strip():
+                    continue
+                table.insert("", "end", iid=str(index), values=(entry.get("month", ""), entry.get("number", ""),
+                             " ".join(entry.get("question", "").split())[:120], " ".join(entry.get("answer", "").split())[:100],
+                             entry.get("status", "답변 필요"), entry.get("asked_at", "")))
+
+        def clear():
+            selected["index"] = None
+            table.selection_remove(*table.selection())
+            number_entry.delete(0, "end")
+            question.delete("1.0", "end")
+            answer.delete("1.0", "end")
+            state_box.set("답변 필요")
+
+        def pick(_event=None):
+            choice = table.selection()
+            if len(choice) != 1:
+                return
+            selected["index"] = int(choice[0])
+            entry = self.state["inquiries"][selected["index"]]
+            month_entry.delete(0, "end")
+            month_entry.insert(0, entry.get("month", ""))
+            number_entry.delete(0, "end")
+            number_entry.insert(0, entry.get("number", ""))
+            question.delete("1.0", "end")
+            question.insert("1.0", entry.get("question", ""))
+            answer.delete("1.0", "end")
+            answer.insert("1.0", entry.get("answer", ""))
+            state_box.set(entry.get("status", "답변 필요"))
+
+        def store():
+            text = question.get("1.0", "end-1c").strip()
+            chosen_month = month_entry.get().strip()
+            if not text or not re.fullmatch(r"\d{4}-\d{2}", chosen_month):
+                show_notice(dialog, "마감월(예: 2026-10)과 문의 내용을 적어 주세요.")
+                return
+            state = deepcopy(self.state)
+            items = state.setdefault("inquiries", [])
+            today = date.today().isoformat()
+            entry = items[selected["index"]] if selected["index"] is not None else {"asked_at": today}
+            reply = answer.get("1.0", "end-1c").strip()
+            status = state_box.get()
+            if reply and status == "답변 필요" and not entry.get("answer"):
+                status = "답변함"
+            if reply and reply != entry.get("answer", ""):
+                entry["answered_at"] = today
+            entry.update({"month": chosen_month, "number": number_entry.get().strip(), "question": text,
+                          "answer": reply, "status": status})
+            if selected["index"] is None:
+                items.append(entry)
+            if self.save(state):
+                clear()
+                fill()
+
+        def remove():
+            if selected["index"] is None:
+                show_notice(dialog, "지울 문의를 표에서 고르세요.")
+                return
+            if not ask_yes_no("문의 지우기", "고른 문의를 목록에서 지울까요?", parent=dialog):
+                return
+            state = deepcopy(self.state)
+            del state["inquiries"][selected["index"]]
+            if self.save(state):
+                clear()
+                fill()
+
+        table.bind("<<TreeviewSelect>>", pick)
+        month_entry.bind("<Return>", lambda _event: fill())
+        bar = ttk.Frame(form, padding=(0, 8, 0, 0))
+        bar.grid(row=3, column=0, columnspan=6, sticky="we")
+        self.buttons(bar, [("저장", store), ("새 문의", clear), ("지우기", remove), ("닫기", dialog.destroy)])
+        fill()
 
     def link_refunds(self):
         """Purchase and refund: two or more loaded transactions are tied together; one refund alone opens a search
@@ -6116,6 +6450,7 @@ class MonthlyClose:
                         "path": str(target), "delivery_status": DELIVERY_STATES[0], "kind": prefix,
                         "snapshot": {key: current[key] for key in keys if self.record(key)["period"] == month},
                         "omitted": sorted(omit),
+                        "counts": {"bookings": len(summary), "documents": evidence_count, "open": len(unresolved)},
                     })
                 saved = self.save(state)
                 dialog.destroy()
@@ -6184,6 +6519,7 @@ class MonthlyClose:
                             archive.writestr(numbered, copy)
                             source_writer.writerow([numbered, f"Kopie mit Belegnummern ({marked}/{len(entries)})",
                                                     hashlib.sha256(copy).hexdigest()])
+                letter_open, letter_special = [], []
                 for key in self.transactions if keys is None else keys:
                     item = self.transactions[key]
                     record = self.record(key)
@@ -6248,6 +6584,8 @@ class MonthlyClose:
                              if exchange_rate(item, doc) else ""),
                         )
                         details_writer.writerow([export_value(field) if isinstance(field, str) else field for field in fields])
+                        letter_special += [(transaction_id, german) for _, german in tax_notes(meta, doc.amount, doc.currency, doc.credit)
+                                           if german.startswith(("Reverse", "Innergemeinschaftlich", "Ausländisch"))]
                         value = record.get("allocations", {}).get(link)
                         if value is not None:
                             allocated += Decimal(value)
@@ -6291,6 +6629,8 @@ class MonthlyClose:
                     summary_writer.writerow(row)
                     if record.get("follow_up") in ("요청 중", "세무사 확인 필요", "인보이스 확보 불가") or status not in DONE_STATES:
                         unmatched_writer.writerow(row)
+                        letter_open.append((transaction_id, item.day, item.amount, item.currency, item.merchant,
+                                            FOLLOW_UP.get(record.get("follow_up", ""), "") or german_status))
                 errors = io.StringIO(newline="")
                 error_writer = csv.writer(errors, delimiter=";")
                 error_writer.writerow(["Quelle/Zeile", "Importhinweis"])
@@ -6308,13 +6648,22 @@ class MonthlyClose:
                     item, entry = self.transactions[key], self.state["final_review"][key]
                     review_writer.writerow([self.record(key).get("number", ""), item.day.isoformat(), str(item.amount), item.currency,
                                             REVIEW_GERMAN[checked], entry.get("at", "")[:10], export_value(entry.get("user", ""))])
+                package_months = sorted({self.record(key)["period"] for key in (self.transactions if keys is None else keys)})
+                inquiry_log = io.StringIO(newline="")
+                inquiry_writer = csv.writer(inquiry_log, delimiter=";")
+                inquiry_writer.writerow(["Abschlussmonat", "Belegnummer", "Rückfrage", "Antwort", "Status", "Gefragt am", "Beantwortet am"])
+                for entry in self.state.get("inquiries", []) or []:
+                    if entry.get("month") in package_months:
+                        inquiry_writer.writerow([entry["month"], export_value(entry.get("number", "")), export_value(entry.get("question", "")),
+                                                 export_value(entry.get("answer", "")), INQUIRY_STATES.get(entry.get("status", "답변 필요"), "Offen"),
+                                                 entry.get("asked_at", ""), entry.get("answered_at", "")])
                 tables = {name: localized_csv(stream.getvalue()) for name, stream in (
                     ("01_Abgleich.csv", overview), ("02_Belegdetails.csv", details),
                     ("03_Offene_Posten.csv", unmatched), ("04_Importfehler.csv", errors),
                     ("05_Kontoauszuege.csv", source_list), ("06_Nachreichungen.csv", changes),
                     ("07_Bewirtung.csv", hospitality), ("08_Betragszuordnung.csv", allocation),
                     ("09_Rechnungskorrekturen.csv", corrections), ("10_Anlagen.csv", attachment_list),
-                    ("11_Endkontrolle.csv", review_log),
+                    ("11_Endkontrolle.csv", review_log), ("12_Rueckfragen.csv", inquiry_log),
                 )}
                 for name, contents in tables.items():
                     if name not in omit:
@@ -6325,6 +6674,19 @@ class MonthlyClose:
                         archive.writestr("Druckmappe.pdf", bundle)
                     except (OSError, RuntimeError, ValueError) as error:
                         record_error("print_bundle", error)
+                if "00_Begleitschreiben.pdf" not in omit:
+                    profile = advisor_profile()
+                    archive.writestr("00_Begleitschreiben.pdf", cover_letter_pdf({
+                        "months": package_months, "supplemental": baselines is not None,
+                        "company": profile.get("company", ""), "advisor": profile.get("advisor", ""),
+                        "counts": {"bookings": len(overview.getvalue().strip().splitlines()) - 1,
+                                   "documents": sum(name.startswith("Belege/") for name in archive.namelist()),
+                                   "attachments": sum(name.startswith("Anlagen/") for name in archive.namelist()),
+                                   "open": len(letter_open)},
+                        "open": letter_open, "special": list(dict.fromkeys(letter_special)),
+                        "inquiries": [(entry.get("number", ""), entry.get("question", ""))
+                                      for month in package_months for entry in open_inquiries(self.state, month)],
+                    }))
                 archive.writestr("Abgleich.xlsx", advisor_workbook(tables, set(archive.namelist())))
                 if "Hinweise.txt" not in omit:
                     archive.writestr("Hinweise.txt", (
