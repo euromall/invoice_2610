@@ -382,7 +382,7 @@ def run():
         check(info.get("parts") == [(0, 0), (1, 2)] and "2개" in note and not fields[1], f"Combined PDF detected: {info} {note}")
         parts = split_pdf(combined, info["parts"])
         check([read_invoice_details(path)[0][1:] for path in parts] == [("Shop Eins GmbH", "18.99 EUR"), ("Shop Zwei GmbH", "11.00 EUR")]
-              and not combined.exists() and (combined.parent / "제외" / "order__나누기전_원본.pdf").exists(), "Combined PDF split")
+              and not combined.exists() and (combined.parent / "제외" / "나누기 원본" / "order__나누기전_원본.pdf").exists(), "Combined PDF split")
 
         # 15. v1.12: amount input, picking values, mail search, account order, Amazon sellers, print bundle, refunds.
         from datetime import date as day
@@ -565,7 +565,29 @@ def run_v113():
         info = {}
         read_invoice_details(customs, info)
         check(info["invoice_like"] is False, "v1.13: mark removed")
-    print("PASS: v1.13 learning labels, file-name number, field guess, value check, duplicate words, not-invoice rule, customs papers")
+
+        # exclusion by reason: moved (not deleted), logged, undoable; marks follow renamed files
+        from invoice_renamer import exclude_files, follow_flags, load_exclusion_log, marks_for, undo_moves
+        work = root / "work"
+        work.mkdir()
+        ad = work / "werbung.pdf"
+        ad.write_bytes(pdf.read_bytes() + b"%ad")
+        history, errors = exclude_files(work, [ad], "인보이스 아님")
+        moved = work / "제외" / "인보이스 아님" / "werbung.pdf"
+        check(not errors and moved.is_file() and not ad.exists(), f"v1.13: excluded by reason {errors}")
+        log = load_exclusion_log()
+        check(log[-1]["reason"] == "인보이스 아님" and log[-1]["from"] == str(ad), "v1.13: exclusion logged")
+        restored, failed = undo_moves(history)
+        check(ad.is_file() and not failed, "v1.13: exclusion undone")
+        set_flag([ad], "hold", "2026-11-27")
+        check(marks_for([ad]).get(ad, {}).get("hold") == "2026-11-27", "v1.13: hold mark found by name and content")
+        renamed = work / "2026-11-05_dm.pdf"
+        ad.rename(renamed)
+        check(marks_for([renamed]) == {}, "v1.13: a renamed file is not found by its old name")
+        follow_flags([(ad, renamed, history[0][2])])
+        check(marks_for([renamed]).get(renamed, {}).get("hold"), "v1.13: marks follow the renamed file")
+    print("PASS: v1.13 learning labels, file-name number, field guess, value check, duplicate words, not-invoice rule, customs papers,"
+          " exclusion reasons, marks")
 
 
 if __name__ == "__main__":

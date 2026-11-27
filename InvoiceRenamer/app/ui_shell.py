@@ -115,6 +115,7 @@ class Shell:
             self.app.on_manage_reasons = self.close.manage_reasons
             self.app.on_manage_mail = self.close.manage_mailboxes
             self.app.on_account_order = self.close.edit_account_order
+            self.app.on_import_statements = lambda paths: (self.show(2), self.close.open_batch([str(path) for path in paths]))
         except RuntimeError:
             self.close = None
         self.build_sidebar()

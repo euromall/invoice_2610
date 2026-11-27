@@ -63,6 +63,8 @@ def apply_style(root):
                   foreground=[("disabled", COLORS["muted"])])
     style.configure("TMenubutton", padding=(10, 5), background=COLORS["panel"])
     style.configure("Small.TButton", padding=(7, 4), width=-4, background=COLORS["panel"], bordercolor=COLORS["line"])
+    style.configure("Tool.TButton", padding=(10, 5), width=-4, background=COLORS["panel"], bordercolor=COLORS["line"])
+    style.map("Tool.TButton", background=[("active", COLORS["gray_light"])])
     style.configure("Chip.TRadiobutton", padding=(10, 3), background=COLORS["bg"])
     style.configure("Treeview", rowheight=26, background=COLORS["panel"], fieldbackground=COLORS["panel"],
                     bordercolor=COLORS["line"])
@@ -827,7 +829,7 @@ def default_anchor(label):
 def sort_value(value):
     """Numbers (also ‘-12.50 EUR’) by size, everything else as text; empty cells last."""
     text = str(value).strip()
-    if not text:
+    if not text or text.startswith("✕"):  # ‘✕ 없음’ marks an empty value
         return (2, 0, "")
     match = re.match(r"^[+-]?\d[\d,]*(?:\.\d+)?(?=\s|$)", text)
     if match:
@@ -856,6 +858,9 @@ def table_tools(tree, name, stretch=None, skip=()):
         if isinstance(width, int) and width >= 30:
             tree.column(column, width=width)
         tree.heading(column, anchor="center", command=lambda c=column: sort_table(tree, c, toggle=True))
+    hidden = [column for column in saved.get("hidden", []) if column in columns and column not in tree._tools["skip"]]
+    if hidden:
+        tree.configure(displaycolumns=[column for column in columns if column not in hidden])
 
     def column_at(x):
         number = tree.identify_column(x)
@@ -882,7 +887,25 @@ def table_tools(tree, name, stretch=None, skip=()):
         entry.setdefault("align", {})[column] = anchor
         _save_table_settings(name, entry)
 
+    def shown_columns():
+        shown = tree["displaycolumns"]
+        return columns if not shown or tuple(shown) == ("#all",) else list(shown)
+
+    def toggle_column(column):
+        shown = shown_columns()
+        if column in shown:
+            if len([c for c in shown if c not in tree._tools["skip"]]) <= 1:
+                return
+            shown = [c for c in shown if c != column]
+        else:
+            shown = [c for c in columns if c in shown or c == column]
+        tree.configure(displaycolumns=shown)
+        entry = _table_settings().get(name, {})
+        entry["hidden"] = [c for c in columns if c not in shown]
+        _save_table_settings(name, entry)
+
     def reset():
+        tree.configure(displaycolumns=columns)
         _save_table_settings(name, None)
         for column in columns:
             if column not in tree._tools["skip"]:
@@ -905,7 +928,16 @@ def table_tools(tree, name, stretch=None, skip=()):
             menu.add_command(label=("✓ " if str(tree.column(column, "anchor")) == anchor else "   ") + text,
                              command=lambda a=anchor: set_anchor(column, a))
         menu.add_separator()
-        menu.add_command(label="이 표의 칸 너비·맞춤 처음대로", command=reset)
+        columns_menu = tk.Menu(menu, tearoff=False)
+        for other in columns:
+            if other in tree._tools["skip"]:
+                continue
+            columns_menu.add_command(label=("✓ " if other in shown_columns() else "   ") + tree._tools["labels"][other],
+                                     command=lambda c=other: toggle_column(c))
+        menu.add_cascade(label="보이는 칸 고르기", menu=columns_menu)
+        menu.add_command(label=f"‘{label}’ 칸 숨기기", command=lambda: toggle_column(column))
+        menu.add_separator()
+        menu.add_command(label="이 표의 칸 너비·맞춤·숨김 처음대로", command=reset)
         menu.tk_popup(event.x_root, event.y_root)
         return "break"
 

@@ -1610,11 +1610,12 @@ class MonthlyClose:
             record_error("statement", error)
             messagebox.showerror("예시 명세서 열기 실패", str(error), parent=self.root)
 
-    def open_batch(self):
-        if self.practice_folder:
+    def open_batch(self, names=None):
+        """names: files picked elsewhere (step 1 right-click ‘명세서로 불러오기’); otherwise a file dialog."""
+        if self.practice_folder and not names:
             self.load_practice_statement(self.practice_folder)
             return
-        names = filedialog.askopenfilenames(parent=self.root, filetypes=[("CSV / TSV / PDF", "*.csv *.tsv *.pdf")])
+        names = names or filedialog.askopenfilenames(parent=self.root, filetypes=[("CSV / TSV / PDF", "*.csv *.tsv *.pdf")])
         if not names:
             return
         window = InlineDialog(self.root)

@@ -332,8 +332,8 @@ def split_pdf(path, ranges):
                     part.insert_pdf(document, from_page=first, to_page=last)
                     part.save(target)
                 created.append(target)
-        keep = path.parent / EXCLUDED_FOLDER
-        keep.mkdir(exist_ok=True)
+        keep = path.parent / EXCLUDED_FOLDER / "나누기 원본"
+        keep.mkdir(parents=True, exist_ok=True)
         move_evidence(path, free_name(keep, f"{path.stem}__나누기전_원본{path.suffix}"))
     except (OSError, RuntimeError, ValueError):
         for target in created:
@@ -384,7 +384,7 @@ def read_invoice_details(path, info=None):
         if customs:
             info["invoice_like"] = False
             info["kind"] = "customs"
-            info["reason"] = f"‘{customs}’ 문서 · 통관·배송 서류로 보여요 (실제 인보이스는 따로 있어야 해요)"
+            info["reason"] = f"‘{customs.title()}’ 문서 · 실제 인보이스는 따로 있어야 해요"
         elif not info["invoice_like"]:
             words = ", ".join(found[:4]) or "없음"
             info["reason"] = f"인보이스 단어 {len(found)}개({words})" + ("" if fields[2] else " · 총액 못 읽음")
@@ -1554,19 +1554,54 @@ def set_flag(paths, name, value=True):
     for path in paths:
         key = digest(Path(path))
         entry = flags.setdefault(key, {})
+        entry["name"] = Path(path).name
         if value is None:
             changed += int(entry.pop(name, None) is not None)
         elif entry.get(name) != value:
             entry[name] = value
             changed += 1
-        if not entry:
+        if set(entry) <= {"name"}:
             flags.pop(key)
+    _write_flags(flags)
+    return changed
+
+
+def _write_flags(flags):
     storage = flags_path()
     storage.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=storage.parent, mode="w", encoding="utf-8", delete=False) as output:
         json.dump(flags, output, ensure_ascii=False, indent=2)
     Path(output.name).replace(storage)
-    return changed
+
+
+def follow_flags(moves):
+    """Keep the file names in the marks current after files were renamed or moved: moves = [(old, new, digest)]."""
+    flags = load_flags()
+    changed = False
+    for _old, new, checksum in moves:
+        if checksum in flags and flags[checksum].get("name") != Path(new).name:
+            flags[checksum]["name"] = Path(new).name
+            changed = True
+    if changed:
+        _write_flags(flags)
+
+
+def marks_for(paths):
+    """{path: marks} for the files that carry marks (checked by name first, then by content, so it stays fast)."""
+    flags = load_flags()
+    if not flags:
+        return {}
+    by_name = {}
+    for key, entry in flags.items():
+        by_name.setdefault(entry.get("name", ""), []).append(key)
+    found = {}
+    for path in paths:
+        keys = by_name.get(Path(path).name)
+        if keys:
+            checksum = cached_digest(path)
+            if checksum in keys:
+                found[path] = flags[checksum]
+    return found
 
 
 def load_invoice_edits():
@@ -1610,6 +1645,75 @@ def undo_moves(history, progress=None):
         else:
             restored.append((current, original))
     return restored, failed
+
+
+VIEWS = ("전체", "필수 누락", "확인 필요", "인보이스 아님", "변경 가능", "보류", "정리 완료", "매칭 완료")
+MATCHED_PATTERN = r"매칭완료_\d{2}(?:0[1-9]|1[0-2])"  # same as monthly_close.MATCHED_FOLDER
+# v1.13: files set aside go to 제외/<reason>; nothing is deleted. Matched files stay in 매칭완료_YYMM (not here).
+EXCLUDE_REASONS = ("중복", "인보이스 아님", "통관·배송 서류", "개인 지출", "기간 밖", "나누기 원본", "기타")
+EXCLUDE_HELP = {
+    "중복": "같은 인보이스가 두 번 들어온 사본",
+    "인보이스 아님": "광고·안내문·주문 확인·배송 알림처럼 인보이스가 아닌 파일",
+    "통관·배송 서류": "Commercial Invoice·Air Waybill처럼 통관·배송에만 쓰는 서류",
+    "개인 지출": "회사 비용이 아닌 개인 결제",
+    "기간 밖": "이번 마감과 상관없는 오래된·다른 기간 인보이스",
+    "나누기 원본": "여러 인보이스를 나눈 뒤 남은 원본",
+    "기타": "그 밖의 이유",
+}
+
+
+def exclusion_log_path():
+    return user_data_folder() / "exclusion-log.json"
+
+
+def load_exclusion_log():
+    try:
+        data = json.loads(exclusion_log_path().read_text(encoding="utf-8")) if exclusion_log_path().is_file() else []
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def log_exclusions(entries):
+    """Append [{"at", "from", "to", "reason", "action"}] to the exclusion log (kept for the tax advisor's questions)."""
+    if not entries:
+        return
+    log = load_exclusion_log() + list(entries)
+    path = exclusion_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(log[-5000:], ensure_ascii=False, indent=1), encoding="utf-8")
+    temporary.replace(path)
+
+
+def exclude_files(root, paths, reason, progress=None):
+    """Move files to root/제외/<reason>. Returns (history for undo_moves, errors). Nothing is deleted."""
+    from datetime import datetime
+    target_folder = Path(root) / EXCLUDED_FOLDER / reason
+    target_folder.mkdir(parents=True, exist_ok=True)
+    occupied = {item.name.casefold() for item in target_folder.iterdir()}
+    history, errors, entries = [], [], []
+    for position, path in enumerate(paths, 1):
+        path = Path(path)
+        if progress:
+            progress(position, len(paths), path.name)
+        target = reserve_name(target_folder, path.name, path, occupied)
+        try:
+            if target is None:
+                raise OSError("파일명이 너무 길어요.")
+            checksum = digest(path)
+            move_evidence(path, target)
+        except OSError as error:
+            errors.append(f"{path.name}: {error}")
+            continue
+        history.append((path, target, checksum))
+        entries.append({"at": datetime.now().isoformat(timespec="seconds"), "from": str(path), "to": str(target),
+                        "reason": reason, "action": "제외"})
+    try:
+        log_exclusions(entries)
+    except OSError as error:
+        record_error("exclusion_log", error)
+    return history, errors
 
 
 def organize_invoice(source, target, fields, number):
@@ -1693,6 +1797,7 @@ class App:
         self.parts = {}  # combined PDFs: path -> page ranges of each invoice
         self.checks = {}  # path -> {field: why it needs a look}, from reading (file name, learned layout, ...)
         self.reasons = {}  # path -> (kind, why it does not look like an invoice); kind "customs" for 통관·배송 서류
+        self.marks = {}  # path -> marks the user set (‘인보이스 맞음’, 보류), see set_flag
         self.last_moves = []
         self.inbox_mode = False
         self.folder = None
@@ -1702,6 +1807,7 @@ class App:
         self.on_manage_reasons = None  # set by the main window: ‘증빙 없이 처리’ reasons (step 3)
         self.on_manage_mail = None  # mailboxes for the mail search
         self.on_account_order = None  # order of bank accounts and cards for numbering
+        self.on_import_statements = None  # step 1 right-click ‘명세서로 불러오기’ → step 2 import
         if container is None:
             title = f"인보이스 PDF 파일명 변경 · v{VERSION}"
             root.title(f"[연습 모드] {title}" if practice_folder else title)
@@ -1716,49 +1822,59 @@ class App:
             "빨간 행은 필수 누락, 회색 행은 인보이스가 아닌 것 같은 파일이에요.")).pack(anchor="w")
         toolbar = ttk.Frame(container, padding=(18, 8, 18, 4))
         toolbar.pack(fill="x")
-        self.import_buttons = (ttk.Button(toolbar, text="파일 가져오기", command=self.import_files),
-                               ttk.Button(toolbar, text="폴더 가져오기", command=self.import_folder))
+        self.import_buttons = (ttk.Button(toolbar, style="Tool.TButton", text="파일 가져오기", command=self.import_files),
+                               ttk.Button(toolbar, style="Tool.TButton", text="폴더 가져오기", command=self.import_folder))
         self.import_buttons[0].pack(side="left")
-        self.import_buttons[1].pack(side="left", padx=6)
+        self.import_buttons[1].pack(side="left", padx=4)
         self.update_import_labels()
-        ttk.Button(toolbar, text="편집", command=self.edit).pack(side="left", padx=6)
-        self.apply_button = ttk.Button(toolbar, text="파일명 변경", command=self.apply, style="Primary.TButton")
-        self.apply_button.pack(side="left", padx=6)
-        ttk.Button(toolbar, text="원본·내용 보기", command=self.view_contents).pack(side="left", padx=6)
-        ttk.Button(toolbar, text="중복 정리", command=self.clean_duplicates).pack(side="left", padx=6)
+        ttk.Button(toolbar, style="Tool.TButton", text="편집", command=self.edit).pack(side="left", padx=4)
+        self.apply_button = ttk.Button(toolbar, text="파일명 변경", command=self.apply, style="Primary.TButton", width=-4)
+        self.apply_button.pack(side="left", padx=4)
+        ttk.Button(toolbar, style="Tool.TButton", text="원본·내용 보기", command=self.view_contents).pack(side="left", padx=4)
+        ttk.Button(toolbar, style="Tool.TButton", text="중복 정리", command=self.clean_duplicates).pack(side="left", padx=4)
+        ttk.Button(toolbar, style="Tool.TButton", text="제외 폴더로", command=self.exclude_selected).pack(side="left", padx=4)
+        ttk.Button(toolbar, style="Tool.TButton", text="정리 되돌리기", command=self.undo).pack(side="left", padx=4)
         more_menu(toolbar, "더보기 ▾", [
             ("작업 폴더 열기 (탐색기)", self.reveal_work_folder),
-            ("환경설정 (작업 폴더·복사/이동)", self.open_settings),
             ("다른 폴더 열기 (옮기지 않고 보기)", self.choose),
             ("새 인보이스 (미분류)", self.open_inbox),
             ("배운 인보이스 양식", self.manage_learned),
-            ("인보이스 아닌 파일 → 제외 폴더", self.exclude_selected),
+            ("제외 기록 보기", self.show_exclusion_log),
             ("마크다운 다시 만들기", self.save_markdown),
-            ("정리 되돌리기", self.undo),
-        ]).pack(side="left", padx=6)
+        ]).pack(side="left", padx=4)
         options = ttk.Frame(container, padding=(18, 0, 18, 6))
         options.pack(fill="x")
-        self.include_subfolders = tk.BooleanVar()
-        ttk.Checkbutton(options, text="하위 폴더 포함", variable=self.include_subfolders, command=self.load_folder).pack(side="left")
-        self.by_month = tk.BooleanVar()
-        ttk.Checkbutton(options, text="발행월 폴더로 이동", variable=self.by_month, command=self.refresh).pack(side="left", padx=12)
+        remembered = load_settings().get("step1", {})
+        self.include_subfolders = tk.BooleanVar(value=bool(remembered.get("include_subfolders")))
+        ttk.Checkbutton(options, text="하위 폴더 포함", variable=self.include_subfolders,
+                        command=lambda: (self.remember_options(), self.load_folder())).pack(side="left")
+        self.by_month = tk.BooleanVar(value=bool(remembered.get("by_month")))
+        ttk.Checkbutton(options, text="발행월 폴더로 이동", variable=self.by_month,
+                        command=lambda: (self.remember_options(), self.refresh())).pack(side="left", padx=12)
         self.view = tk.StringVar(value="전체")
-        for label in ("전체", "필수 누락", "인보이스 아님 의심", "변경 가능"):
-            ttk.Radiobutton(options, text=label, value=label, variable=self.view, command=self.refresh,
-                            style="Chip.TRadiobutton").pack(side="left", padx=(8, 0))
+        self.view_buttons = {}
+        chips = ttk.Frame(container, padding=(14, 0, 18, 6))
+        chips.pack(fill="x")
+        for label in VIEWS:
+            button = ttk.Radiobutton(chips, text=label, value=label, variable=self.view, command=self.refresh,
+                                     style="Chip.TRadiobutton")
+            button.pack(side="left", padx=(8, 0))
+            self.view_buttons[label] = button
         self.status = tk.StringVar(value="‘파일 가져오기’나 ‘폴더 가져오기’로 인보이스를 작업 폴더에 넣으세요. 여러 행은 Ctrl 또는 Shift로 선택할 수 있어요.")
         if container is root:
             ttk.Label(root, textvariable=self.status, style="Status.TLabel").pack(fill="x", side="bottom")
         frame = ttk.Frame(container, padding=(18, 0, 18, 8))
         frame.pack(fill="both", expand=True)
-        self.table = ttk.Treeview(frame, columns=("check", "old", "new", "status"), show="headings")
-        for column, label, width in zip(self.table["columns"], ("☐", "현재 파일명", "변경할 파일명", "읽기 결과·상태"),
-                                        (38, 320, 470, 260)):
+        self.table = ttk.Treeview(frame, columns=("check", "old", "day", "seller", "total", "number", "new", "status"),
+                                  show="headings")
+        for column, label, width in zip(self.table["columns"],
+                                        ("☐", "현재 파일명", "발행일", "업체명", "총액", "번호", "변경할 파일명", "상태"),
+                                        (38, 190, 85, 140, 90, 100, 200, 200)):
             self.table.heading(column, text=label)
             self.table.column(column, width=width, minwidth=38 if column == "check" else 110,
                               stretch=column != "check", anchor="center" if column == "check" else "w")
         self.table.heading("check", command=self.toggle_all)
-        table_tools(self.table, "step1-files", stretch="new", skip=("check",))
+        table_tools(self.table, "step1-files-v113", stretch="status", skip=("check",))
         across = ttk.Scrollbar(frame, orient="horizontal", command=self.table.xview)
         self.table.configure(xscrollcommand=across.set)
         across.pack(side="bottom", fill="x")
@@ -1767,7 +1883,10 @@ class App:
         self.table.configure(yscrollcommand=bar.set)
         bar.pack(side="right", fill="y")
         self.table.pack(fill="both", expand=True)
-        self.table.bind("<Double-1>", lambda event: self.edit())
+        self.table.bind("<Double-1>", self.double_click)
+        self.table.bind("<Button-3>", self.row_menu, add="+")
+        self.table.bind("<Delete>", lambda event: self.exclude_selected())
+        self.table.bind("<F2>", lambda event: self.edit())
         if not practice_folder:
             self.folder = work_folder()  # v1.7: invoices live in one fixed work folder
             root.after(150, lambda: self.folder == work_folder() and not self.rows and self.use_work_folder())
@@ -1934,7 +2053,7 @@ class App:
         with Busy(self.root, "작업 폴더로 복사하고 있어요" if copy else "작업 폴더로 옮기고 있어요") as busy:
             history, inside, errors = import_evidence(files, self.folder, copy=copy, progress=busy.step)
         if history and not copy:
-            self.last_moves = history
+            self.moved(history)
         self.load_folder()
         lines = [f"{len(history)}개를 작업 폴더로 {'복사했어요. 원본은 그대로 있어요' if copy else '옮겼어요'}.\n{self.folder}"]
         if inside:
@@ -2101,6 +2220,10 @@ class App:
             self.table.insert("", "end", iid=str(index))
         if busy:
             busy.close()
+        try:
+            self.marks = marks_for([row[0] for row in self.rows.values()])
+        except OSError:
+            self.marks = {}
         self.refresh()
         groups = duplicate_groups((key, path, fields, number, cached_digest(path))
                                   for key, (path, fields, _, number) in self.rows.items())
@@ -2144,12 +2267,16 @@ class App:
             return
         occupied = {}
         counts = {"bad": 0, "muted": 0, "ok": 0, "warn": 0}
+        views = dict.fromkeys(VIEWS, 0)
         shown = []
         view = self.view.get() if hasattr(self, "view") else "전체"
+        marks = getattr(self, "marks", {})
         for key, (path, fields, note, number) in self.rows.items():
             source_label = str(path.relative_to(self.folder))
             check, tag = self.row_check(path, fields, note, number)
             counts[tag] += 1
+            matched = any(re.fullmatch(MATCHED_PATTERN, part) for part in path.relative_to(self.folder).parts[:-1])
+            hold = marks.get(path, {}).get("hold")
             folder = self.folder / fields[0][:7] if organize and fields[0] else path.parent
             name = proposed_name(fields, path, number)
             keep_name = organize and not self.inbox_mode and bool(fields[0]) and not name
@@ -2176,16 +2303,32 @@ class App:
                     status = f"{check} · {done}" if check else done
             elif not check:
                 status, tag = "확인 필요 · 파일명이 너무 김", "bad"
-            self.table.item(key, values=("☑" if key in self.table.selection() else "☐", source_label, target_label, status),
-                            tags=(tag,))
-            visible = (view == "전체" or (view == "필수 누락" and tag == "bad")
-                       or (view == "인보이스 아님 의심" and tag == "muted") or (view == "변경 가능" and key in self.targets))
-            if visible:
+            if matched:
+                self.targets.pop(key, None)
+                status, target_label = "매칭 완료 · 3단계에서 거래에 연결된 파일", ""
+            if hold:
+                status = f"보류 · {status}" if status else "보류"
+            done = not matched and "이름 정리 완료" in status
+            groups = {"전체": not matched, "필수 누락": tag == "bad" and not matched,
+                      "확인 필요": tag == "warn" and not matched, "인보이스 아님": tag == "muted" and not matched,
+                      "변경 가능": key in self.targets, "보류": bool(hold), "정리 완료": done, "매칭 완료": matched}
+            for name, member in groups.items():
+                views[name] += int(member)
+            missing = "인보이스 번호" in check
+            cells = (fields[0] or "✕ 없음", fields[1] or "✕ 없음", fields[2] or "✕ 없음",
+                     number or ("✕ 없음" if missing else ""))
+            if tag == "muted" or matched:
+                cells = tuple("" if cell == "✕ 없음" else cell for cell in cells)
+            self.table.item(key, values=("☑" if key in self.table.selection() else "☐", source_label, *cells, target_label,
+                                         status), tags=("muted" if matched else "warn" if hold and tag == "ok" else tag,))
+            if groups.get(view, False):
                 shown.append(key)
         self.table.detach(*self.table.get_children())
         for index, key in enumerate(shown):
             self.table.move(key, "", index)
         resort(self.table)
+        for name, button in getattr(self, "view_buttons", {}).items():
+            button.configure(text=f"{name} {views[name]}" if name != "전체" else f"전체 {views[name]}")
         self.summary = counts
         if self.on_change:
             self.on_change()
@@ -2269,10 +2412,16 @@ class App:
             if not chosen:
                 show_notice(dialog, "옮길 파일을 체크하세요.")
                 return
-            target_folder = self.folder / DUPLICATE_FOLDER
-            history, errors = [], []
+            target_folder = self.folder / EXCLUDED_FOLDER / "중복"
+            if not ask_yes_no("중복 정리", f"체크한 파일 {len(chosen)}개를 ‘{EXCLUDED_FOLDER}/중복’ 폴더로 옮길까요?\n"
+                                         "묶음마다 남길 파일 한 개는 그대로 있어요.", parent=dialog,
+                              warnings=["‘정보만 같음’ 파일은 독촉장·재발행본일 수 있어요. 열어 보고 체크했는지 확인하세요."]
+                              if any(rows[key][4] == "정보만 같음" for key in chosen) else (),
+                              undo="지우지 않아요. ‘정리 되돌리기’로 바로 되돌릴 수 있어요.", ok="옮기기"):
+                return
+            history, errors, logged = [], [], []
             try:
-                target_folder.mkdir(exist_ok=True)
+                target_folder.mkdir(parents=True, exist_ok=True)
                 occupied = {item.name.casefold() for item in target_folder.iterdir()}
             except OSError as error:
                 messagebox.showerror("중복 폴더 만들기 실패", str(error), parent=dialog)
@@ -2290,14 +2439,22 @@ class App:
                     remember_original_name(path, checksum)
                     move_evidence(path, target)
                     history.append((path, target, checksum))
+                    logged.append({"at": date.today().isoformat(), "from": str(path), "to": str(target), "reason": "중복",
+                                   "action": "제외"})
                 except OSError as error:
                     errors.append(f"{path.name}: {error}")
             busy.close()
+            try:
+                log_exclusions(logged)
+            except OSError as error:
+                record_error("exclusion_log", error)
             if history:
-                self.last_moves = history
+                self.moved(history)
             dialog.destroy()
             self.load_folder()
-            self.status.set(f"‘{DUPLICATE_FOLDER}’ 폴더로 {len(history)}개 이동 · 실패 {len(errors)}개 · 더보기 → 정리 되돌리기로 되돌릴 수 있어요")
+            self.status.set(f"‘{EXCLUDED_FOLDER}/중복’ 폴더로 {len(history)}개 이동 · 실패 {len(errors)}개")
+            if history:
+                show_toast(self.root, f"중복 {len(history)}개를 옮겼어요", action=("되돌리기", self.undo_now))
             if errors:
                 messagebox.showerror("이동 실패", "\n".join(errors[:8]), parent=self.root)
 
@@ -2311,42 +2468,267 @@ class App:
         ttk.Button(footer, text="체크한 파일을 중복 폴더로 이동", style="Primary.TButton", command=apply).pack(side="right")
         fill()
 
-    def exclude_selected(self):
+    def exclude_selected(self, reason=None):
+        """Move the selected files to 제외/<reason> after a confirmation that names the reason and the risks."""
         selection = [key for key in self.table.selection() if key in self.rows]
         if not selection or self.folder is None:
-            self.notice("제외 폴더로 옮길 파일을 선택하세요. ‘인보이스 아님 의심’ 보기에서 고르면 편해요.")
+            self.notice("제외 폴더로 옮길 파일을 선택하세요. ‘인보이스 아님’ 보기에서 고르면 편해요.")
             return
-        if not ask_yes_no("제외 폴더로 이동", f"선택한 파일 {len(selection)}개를 ‘{EXCLUDED_FOLDER}’ 폴더로 옮길까요?\n"
-                                   "파일은 지워지지 않고, ‘정리 되돌리기’로 되돌릴 수 있어요.", parent=self.root):
+        paths = [self.rows[key][0] for key in selection]
+        if reason is None:
+            customs = all(self.reasons.get(path, ("", ""))[0] == "customs" for path in paths)
+            suspicious = all(not self.invoice_like.get(path, True) for path in paths)
+            reason = "통관·배송 서류" if customs else "인보이스 아님" if suspicious else "기타"
+            choices = [(f"{name} · {EXCLUDE_HELP[name]}", name) for name in EXCLUDE_REASONS if name != "나누기 원본"]
+            choices.sort(key=lambda item: item[1] != reason)
+        else:
+            choices = None
+        warnings = []
+        looks = [path for path in paths if self.invoice_like.get(path, True) and all(self.row_fields(path))]
+        if looks:
+            warnings.append(f"{len(looks)}개는 발행일·업체명·총액을 모두 읽은 인보이스처럼 보여요. 이번 마감에 필요한지 확인하세요.")
+        warnings.append("독일은 인보이스 보관의무(8년)가 있어요. 제외는 지우지 않고 폴더만 옮겨요.")
+        message = f"선택한 파일 {len(paths)}개를 ‘{EXCLUDED_FOLDER}/사유’ 폴더로 옮길까요?\n" + "\n".join(
+            f"• {path.name[:60]}" for path in paths[:5]) + (f"\n… 외 {len(paths) - 5}개" if len(paths) > 5 else "")
+        if reason is not None and choices is None:
+            message = message.replace("사유", reason)
+        answer = ask_yes_no("제외 폴더로", message, parent=self.root, warnings=warnings,
+                            undo="바로 아래 ‘되돌리기’나 ‘정리 되돌리기’로 되돌릴 수 있어요.", ok="옮기기", choices=choices)
+        if not answer:
             return
-        target_folder = self.folder / EXCLUDED_FOLDER
-        history, errors = [], []
-        try:
-            target_folder.mkdir(exist_ok=True)
-            occupied = {item.name.casefold() for item in target_folder.iterdir()}
-        except OSError as error:
-            messagebox.showerror("제외 폴더 만들기 실패", str(error), parent=self.root)
-            return
-        busy = Busy(self.root, "제외 폴더로 옮기고 있어요")
-        for position, key in enumerate(selection, 1):
-            path = self.rows[key][0]
-            busy.step(position, len(selection), path.name)
-            target = reserve_name(target_folder, path.name, path, occupied)
+        reason = answer if choices else reason
+        with Busy(self.root, "제외 폴더로 옮기고 있어요") as busy:
             try:
-                if target is None:
-                    raise OSError("파일명이 너무 길어요.")
-                checksum = digest(path)
-                move_evidence(path, target)
-                history.append((path, target, checksum))
+                history, errors = exclude_files(self.folder, paths, reason, busy.step)
             except OSError as error:
-                errors.append(f"{path.name}: {error}")
-        busy.close()
+                busy.close()
+                self.notice(f"제외 폴더를 만들지 못했어요: {error}", kind="error")
+                return
         if history:
-            self.last_moves = history
+            self.moved(history)
         self.load_folder()
-        self.status.set(f"제외 폴더로 {len(history)}개 이동 · 실패 {len(errors)}개")
+        self.status.set(f"‘{EXCLUDED_FOLDER}/{reason}’ 폴더로 {len(history)}개 이동 · 실패 {len(errors)}개")
+        if history:
+            show_toast(self.root, f"{len(history)}개를 ‘{EXCLUDED_FOLDER}/{reason}’로 옮겼어요", action=("되돌리기", self.undo_now))
         if errors:
-            messagebox.showerror("이동 실패", "\n".join(errors[:8]), parent=self.root)
+            self.notice("옮기지 못한 파일:\n" + "\n".join(errors[:8]), kind="error", title="이동 실패")
+
+    def moved(self, history):
+        """Remember the last moves for ‘정리 되돌리기’ and keep the marks on the moved files."""
+        self.last_moves = history
+        try:
+            follow_flags(history)
+        except OSError as error:
+            record_error("flags", error)
+
+    def remember_options(self):
+        save_settings({"step1": {"include_subfolders": self.include_subfolders.get(), "by_month": self.by_month.get()}})
+
+    def selected_paths(self):
+        return [self.rows[key][0] for key in self.table.selection() if key in self.rows]
+
+    def double_click(self, event):
+        """Double-click: edit; on an empty 발행일/업체명/총액/번호 cell the original opens right on that field."""
+        if self.table.identify_region(event.x, event.y) != "cell":
+            return None
+        row = self.table.identify_row(event.y)
+        if not row:
+            return None
+        self.table.selection_set(row)
+        column = self.table.identify_column(event.x)
+        shown = list(self.table["displaycolumns"])
+        shown = list(self.table["columns"]) if not shown or shown == ["#all"] else shown
+        index = int(column[1:]) - 1 if column.startswith("#") else -1
+        name = shown[index] if 0 <= index < len(shown) else ""
+        field = {"day": "발행일", "seller": "업체명", "total": "총액", "number": "인보이스 번호"}.get(name)
+        empty = field and str(self.table.set(row, name)).startswith("✕")
+        self.edit_form = None
+        self.edit()
+        if empty and getattr(self, "edit_form", None) and self.rows[row][0].suffix.lower() != ".xml":
+            self.edit_form.pick(field)
+        return "break"
+
+    def row_menu(self, event):
+        """Right-click on rows: what can be done with the selected files (the header has its own menu)."""
+        if self.table.identify_region(event.x, event.y) in ("heading", "separator"):
+            return None
+        row = self.table.identify_row(event.y)
+        if not row:
+            return None
+        if row not in self.table.selection():
+            self.table.selection_set(row)
+        paths = self.selected_paths()
+        count = len(paths)
+        menu = tk.Menu(self.table, tearoff=False)
+        menu.add_command(label=f"선택 {count}개", state="disabled")
+        menu.add_separator()
+        menu.add_command(label="열기" + (" (처음 10개)" if count > 10 else ""), command=lambda: [open_file(path) for path in paths[:10]])
+        menu.add_command(label="원본·내용 보기", command=self.view_contents)
+        menu.add_command(label="편집" + (" (여러 개 한 번에)" if count > 1 else "") + "   F2", command=self.edit)
+        menu.add_command(label="이 파일들만 " + self.apply_button.cget("text"), command=self.apply)
+        menu.add_separator()
+        exclude = tk.Menu(menu, tearoff=False)
+        for reason in EXCLUDE_REASONS:
+            if reason != "나누기 원본":
+                exclude.add_command(label=f"{reason} · {EXCLUDE_HELP[reason]}", command=lambda r=reason: self.exclude_selected(r))
+        menu.add_cascade(label="제외 폴더로", menu=exclude)
+        if self.on_import_statements:
+            statements = [path for path in paths if path.suffix.lower() in (".pdf", ".csv", ".tsv")]
+            menu.add_command(label=f"명세서로 불러오기 ({len(statements)}개)", state="normal" if statements else "disabled",
+                             command=lambda: self.import_as_statements(statements))
+        menu.add_separator()
+        unsure = [path for path in paths if not self.invoice_like.get(path, True)]
+        menu.add_command(label="인보이스 맞음 (다음에도 기억)", state="normal" if unsure else "disabled",
+                         command=lambda: self.mark_invoice(unsure))
+        held = all(self.marks.get(path, {}).get("hold") for path in paths)
+        menu.add_command(label="보류 풀기" if held else "보류 (나중에 확인)", command=lambda: self.toggle_hold(paths, not held))
+        menu.add_separator()
+        menu.add_command(label="탐색기에서 보기", command=lambda: self.reveal(paths[0]))
+        menu.add_command(label="다시 읽기", command=lambda: self.reread(paths))
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def import_as_statements(self, paths):
+        if not paths:
+            return
+        if not ask_yes_no("명세서로 불러오기", f"선택한 파일 {len(paths)}개를 은행·카드 명세서로 불러올까요?\n"
+                                          "2단계 화면으로 가서 계좌·카드와 열 설정을 확인해요.", parent=self.root,
+                          warnings=["PDF 명세서는 Amex·DKB·Deutsche Bank 양식만 읽어요. 다른 은행은 CSV로 받아 주세요."],
+                          undo="불러온 명세서는 2단계에서 지울 수 있어요.", ok="불러오기"):
+            return
+        self.on_import_statements(paths)
+
+    def mark_invoice(self, paths, value=True):
+        try:
+            set_flag(paths, "invoice", value)
+        except OSError as error:
+            self.notice(f"표시를 저장하지 못했어요: {error}", kind="error")
+            return
+        for path in paths:
+            if value:
+                self.invoice_like[path] = True
+                self.reasons.pop(path, None)
+            self.marks.setdefault(path, {})["invoice"] = value
+        if not value:
+            self.reread(paths)
+        self.refresh()
+        if value:
+            show_toast(self.root, f"{len(paths)}개를 인보이스로 표시했어요", action=("되돌리기", lambda: self.mark_invoice(paths, None)))
+
+    def toggle_hold(self, paths, hold):
+        value = date.today().isoformat() if hold else None
+        try:
+            set_flag(paths, "hold", value)
+        except OSError as error:
+            self.notice(f"표시를 저장하지 못했어요: {error}", kind="error")
+            return
+        for path in paths:
+            entry = self.marks.setdefault(path, {})
+            if hold:
+                entry["hold"] = value
+            else:
+                entry.pop("hold", None)
+        self.refresh()
+        show_toast(self.root, f"{len(paths)}개 " + ("보류로 표시했어요 · ‘보류’ 보기에서 모아 봐요" if hold else "보류를 풀었어요"),
+                   action=("되돌리기", lambda: self.toggle_hold(paths, not hold)))
+
+    def reveal(self, path):
+        try:
+            if os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(Path(path).parent)])
+        except OSError as error:
+            self.notice(f"탐색기를 열지 못했어요: {error}", kind="warn")
+
+    def reread(self, paths):
+        """Read the chosen files again (after the file changed or a mark was removed)."""
+        wanted = set(paths)
+        keys = [key for key, row in self.rows.items() if row[0] in wanted]
+        with Busy(self.root, "다시 읽고 있어요") as busy:
+            for index, key in enumerate(keys, 1):
+                path = self.rows[key][0]
+                busy.step(index, len(keys), path.name)
+                info = {}
+                try:
+                    fields, note, number, _ = read_invoice_details(path, info)
+                except (OSError, RuntimeError, ValueError) as error:
+                    record_error("pdf_read", error)
+                    continue
+                self.rows[key] = (path, fields, note, number)
+                self.invoice_like[path] = info.get("invoice_like", True)
+                self.checks[path] = info.get("checks", {})
+                self.reasons[path] = (info.get("kind", ""), info.get("reason", ""))
+                if info.get("parts"):
+                    self.parts[path] = info["parts"]
+                else:
+                    self.parts.pop(path, None)
+        self.refresh()
+        self.status.set(f"{len(keys)}개를 다시 읽었어요.")
+
+    def show_exclusion_log(self):
+        """What was set aside in 제외 and why, with ‘되돌리기’ for files that are still there."""
+        dialog = InlineDialog(self.root)
+        dialog.title("제외 기록")
+        dialog.geometry("1000x520")
+        dialog.grab_set()
+        ttk.Label(dialog, text="제외 폴더로 옮긴 파일의 기록이에요(지운 파일은 없어요). 고른 파일을 원래 자리로 되돌릴 수 있어요.",
+                  padding=(14, 10, 14, 6)).pack(anchor="w")
+        footer = ttk.Frame(dialog, padding=(14, 8))
+        footer.pack(side="bottom", fill="x")
+        frame = ttk.Frame(dialog)
+        frame.pack(fill="both", expand=True, padx=14)
+        columns = ("at", "action", "reason", "file", "from", "now")
+        table = ttk.Treeview(frame, columns=columns, show="headings")
+        for column, label, width in zip(columns, ("날짜", "동작", "사유", "파일", "원래 위치", "지금"),
+                                        (140, 60, 110, 260, 260, 90)):
+            table.heading(column, text=label)
+            table.column(column, width=width, minwidth=40)
+        bar = ttk.Scrollbar(frame, command=table.yview)
+        table.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        table.pack(fill="both", expand=True)
+        table_tools(table, "exclusion-log", stretch="file")
+        entries = list(enumerate(load_exclusion_log()))
+        for index, entry in reversed(entries):
+            target = Path(entry.get("to", ""))
+            here = entry.get("action") == "제외" and target.is_file()
+            table.insert("", "end", iid=str(index), values=(
+                entry.get("at", ""), entry.get("action", ""), entry.get("reason", ""), target.name,
+                str(Path(entry.get("from", "")).parent), "제외 폴더에 있음" if here else ""))
+
+        def restore():
+            chosen = [entries[int(key)][1] for key in table.selection()]
+            chosen = [entry for entry in chosen if entry.get("action") == "제외" and Path(entry["to"]).is_file()]
+            if not chosen:
+                show_notice(dialog, "‘제외 폴더에 있음’인 행을 고르세요.")
+                return
+            if not ask_yes_no("제외 되돌리기", f"고른 파일 {len(chosen)}개를 원래 폴더로 되돌릴까요?", parent=dialog,
+                              undo="다시 제외 폴더로 옮길 수 있어요.", ok="되돌리기"):
+                return
+            history = []
+            for entry in chosen:
+                source, original = Path(entry["to"]), Path(entry["from"])
+                try:
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    target = free_name(original.parent, original.name)
+                    move_evidence(source, target)
+                    history.append({"at": date.today().isoformat(), "from": str(source), "to": str(target),
+                                    "reason": entry.get("reason", ""), "action": "되돌림"})
+                except OSError as error:
+                    record_error("exclusion_restore", error)
+            log_exclusions(history)
+            dialog.destroy()
+            self.load_folder()
+            show_toast(self.root, f"{len(history)}개를 원래 자리로 되돌렸어요")
+
+        ttk.Button(footer, text="선택 되돌리기", command=restore).pack(side="left")
+        ttk.Button(footer, text="제외 폴더 열기", command=lambda: self.folder and self.reveal(self.folder / EXCLUDED_FOLDER / ".")).pack(side="left", padx=8)
+        ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right")
+
+    def row_fields(self, path):
+        row = next((row for row in self.rows.values() if row[0] == path), None)
+        return row[1] if row else ("", "", "")
 
     def learn_from(self, path, fields, number, anchors=None):
         """Remember this seller's layout and re-read the other files that are still incomplete.
@@ -2594,6 +2976,7 @@ class App:
             self.learn_from(path, edited, values[3], anchors=form.anchors)
 
         form = ValueForm(body, path, (*fields, number), checks=self.checks.get(path), on_save=save)
+        self.edit_form = form
         buttons = ttk.Frame(body)
         buttons.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         if path.suffix.lower() != ".xml":
@@ -2643,7 +3026,7 @@ class App:
             history.append((path, target, checksum))
         busy.close()
         if history:
-            self.last_moves = history
+            self.moved(history)
         self.refresh()
         self.status.set(f"{len(history)}개 변경 완료 · 마크다운 {markdown}개 저장 · 확인/실패 {len(errors)}개")
         if errors:
@@ -2652,11 +3035,15 @@ class App:
             self.notice(f"파일 {len(history)}개의 이름을 바꾸고 마크다운 {markdown}개를 PDF 옆에 저장했어요.\n"
                         "다음: 왼쪽 ‘2. 명세서 불러오기’로 가세요.", title="정리 완료")
 
-    def undo(self):
+    def undo_now(self):
+        self.undo(ask=False)
+
+    def undo(self, ask=True):
         if not self.last_moves:
             self.notice("되돌릴 정리 작업이 없어요.")
             return
-        if not ask_yes_no("정리 되돌리기", f"마지막 작업에서 옮긴 PDF {len(self.last_moves)}개를 되돌릴까요?"):
+        if ask and not ask_yes_no("정리 되돌리기", f"마지막 작업에서 옮긴 파일 {len(self.last_moves)}개를 원래 자리로 되돌릴까요?",
+                                  parent=self.root, undo="되돌린 뒤에는 다시 정리하면 돼요.", ok="되돌리기"):
             return
         with Busy(self.root, "정리를 되돌리고 있어요") as busy:
             restored, failed = undo_moves(self.last_moves, busy.step)
@@ -2667,9 +3054,18 @@ class App:
                 if row[0] in paths:
                     self.rows[key] = (paths[row[0]], *row[1:])
             self.load_folder()
+        back = [{"at": date.today().isoformat(), "from": str(current), "to": str(original), "reason": "", "action": "되돌림"}
+                for current, original in restored if EXCLUDED_FOLDER in current.parts]
+        try:
+            log_exclusions(back)
+        except OSError as error:
+            record_error("exclusion_log", error)
         self.status.set(f"{len(restored)}개 복원 · 실패 {len(failed)}개")
         if failed:
-            messagebox.showwarning("복원 실패", "\n".join(f"{item[1].name}: {item[3]}" for item in failed[:8]))
+            self.notice("되돌리지 못한 파일:\n" + "\n".join(f"{item[1].name}: {item[3]}" for item in failed[:8]), kind="warn",
+                        title="복원 실패")
+        elif restored:
+            show_toast(self.root, f"{len(restored)}개를 원래 자리로 되돌렸어요")
 
     def open_close(self):
         from monthly_close import MonthlyClose
