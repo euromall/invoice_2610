@@ -610,7 +610,9 @@ def index_pdfs(folder, progress=None):
             result.append(Invoice(key, path, date.fromisoformat(day) if day else None,
                                   seller, Decimal(amount) if amount is not None else None,
                                   currency, number, credit, meta))
-        except (OSError, ValueError, RuntimeError, ParseError, ArithmeticError):
+        except Exception as error:  # v1.13.1: any odd file is listed as unreadable, the others are still read
+            if not isinstance(error, (OSError, ValueError, RuntimeError, ParseError, ArithmeticError)):
+                record_error("pdf_read", error)
             result.append(Invoice(key, path, None, "", None, "", "", False))
             issues.append(path.name)
         if cache_key and result and result[-1].path == path:

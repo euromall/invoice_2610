@@ -6,6 +6,7 @@ import json
 import platform
 from pathlib import Path
 import sys
+import traceback
 
 
 VERSION = (Path(__file__).resolve().parent / "VERSION").read_text(encoding="ascii").strip()
@@ -21,8 +22,11 @@ STAGES = {
 ERROR_TYPES = {
     "OSError", "PermissionError", "FileNotFoundError", "FileExistsError", "RuntimeError", "ValueError",
     "TypeError", "KeyError", "TclError", "FileDataError", "EmptyFileError", "BadZipFile", "Error",
-    "IndexError", "AttributeError", "NameError",
+    "IndexError", "AttributeError", "NameError", "InvalidOperation", "ArithmeticError", "ZeroDivisionError",
+    "UnicodeError", "UnicodeEncodeError", "UnicodeDecodeError", "RecursionError", "MemoryError",
 }
+OWN_MODULES = {"invoice_renamer", "monthly_close", "ui_shell", "ui_theme", "learned_formats", "pdf_view",
+               "tax_documents", "advisor_workbook", "workspace_backup", "release_info"}
 _EVENTS = deque(maxlen=50)
 
 
@@ -37,6 +41,11 @@ def record_error(stage, error):
     }
     if isinstance(code, int):
         event["errno"] = code
+    # v1.13.1: where in the program (file name, function, line only; never paths or document content)
+    frames = traceback.extract_tb(error.__traceback__) if getattr(error, "__traceback__", None) else []
+    own = [frame for frame in frames if Path(frame.filename).stem in OWN_MODULES]
+    if own:
+        event["where"] = f"{Path(own[-1].filename).stem}.{own[-1].name}:{own[-1].lineno}"
     _EVENTS.append(event)
 
 

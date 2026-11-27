@@ -620,6 +620,14 @@ class Busy:
                 self.detail.configure(text=text[:60])
         self.root.update()
 
+    @staticmethod
+    def close_all():
+        """After an unexpected error: take the progress card (and its click block) away so the window works again."""
+        active = Busy._active
+        if active is not None:
+            active.nested = False
+            active.close()
+
     def close(self):
         if self.nested:
             return

@@ -681,7 +681,32 @@ def run_v1131():
         check(panel._previous_focus is None, "v1.13.1: panel opens while a message box has the focus")
         panel.destroy()
         window.destroy()
-    print("PASS: v1.13.1 stored text (new start, renamed, step 3, re-read, incomplete OCR), panel focus")
+    # one odd file must not stop the reading: it is listed as unreadable, the error says where it happened
+    import monthly_close
+    import release_info
+    with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
+        ir._DIGEST_INDEX.update(loaded=False, data={}, dirty=False)
+        folder = Path(scratch)
+        for name in ("good.pdf", "odd.pdf"):
+            with pymupdf.open() as document:
+                document.new_page().insert_text((60, 80), f"Rechnungsnummer R-1\nGesamtbetrag 10,00 EUR\n{name}")
+                document.save(folder / name)
+        real = monthly_close.read_invoice_details
+
+        def odd(path, *args):
+            if Path(path).name == "odd.pdf":
+                {}["missing"]
+            return real(path, *args)
+
+        monthly_close.clear_index_cache()
+        release_info._EVENTS.clear()
+        with patch.object(monthly_close, "read_invoice_details", odd):
+            invoices, issues = monthly_close.index_pdfs(folder)
+        event = release_info._EVENTS[-1] if release_info._EVENTS else {}
+        check(len(invoices) == 2 and issues == ["odd.pdf"] and event.get("error_type") == "KeyError"
+              and "index_pdfs" in event.get("where", ""), f"v1.13.1: odd file does not stop reading {issues} {event}")
+        check(ir.money_text("1-2,50") in ("", "-2.50 EUR", "12.50 EUR"), "v1.13.1: odd amount text")
+    print("PASS: v1.13.1 stored text (new start, renamed, step 3, re-read, incomplete OCR), panel focus, odd file keeps reading")
 
 
 if __name__ == "__main__":

@@ -86,11 +86,15 @@ def normalized_money(match):
     currency = {"€": "EUR", "EURO": "EUR", "£": "GBP", "₩": "KRW", "원": "KRW"}.get(currency, currency)
     raw = match["first"] or match["last"]
     cents = re.search(r"[.,](\d{2})$", raw)
-    if cents:
-        whole = re.sub(r"[^\d-]", "", raw[:cents.start()])
-        amount = Decimal(f"{whole}.{cents[1]}")
-    else:
-        amount = Decimal(re.sub(r"[^\d-]", "", raw))
+    sign = "-" if raw.lstrip().startswith("-") else ""
+    try:  # v1.13.1: a minus inside the digits (‘1-2,50’) no longer stops the whole folder reading
+        if cents:
+            whole = re.sub(r"\D", "", raw[:cents.start()]) or "0"
+            amount = Decimal(f"{sign}{whole}.{cents[1]}")
+        else:
+            amount = Decimal(sign + re.sub(r"\D", "", raw))
+    except ArithmeticError as error:
+        raise ValueError(f"금액 형식 오류: {raw}") from error
     if currency == "KRW" and amount == amount.to_integral_value():
         return f"{amount:.0f} {currency}"
     return f"{amount:.2f} {currency}"
@@ -2053,8 +2057,13 @@ class App:
         show_notice(self.root, message, title=title, kind=kind)
 
     def report_callback_error(self, error_type, error, traceback):
+        if error is not None and getattr(error, "__traceback__", None) is None:
+            error.__traceback__ = traceback
         record_error("gui", error)
-        messagebox.showerror("화면 오류", "동작 중 오류가 발생했어요. ‘오류 진단 저장’에서 현재 세션의 진단을 저장할 수 있어요.", parent=self.root)
+        Busy.close_all()
+        messagebox.showerror("화면 오류", "동작 중 오류가 발생했어요. 하던 작업은 멈췄지만 기록은 저장돼 있어요.\n"
+                             "도움말 ▾ → ‘오류 진단 저장’으로 파일을 만들어 보내 주시면 원인을 찾을 수 있어요(문서 내용은 들어가지 않아요).",
+                             parent=self.root)
 
     def open_practice(self):
         try:
@@ -2396,31 +2405,37 @@ class App:
         self.status.set("PDF를 읽고 있어요…")
         self.root.update_idletasks()
         busy = Busy(self.root, "인보이스를 읽고 있어요") if len(paths) > 3 else None
-        for index, path in enumerate(paths):
-            if path in scanned:
-                self.rows[str(index)] = scanned[path]
+        try:
+            for index, path in enumerate(paths):
+                if path in scanned:
+                    self.rows[str(index)] = scanned[path]
+                    self.table.insert("", "end", iid=str(index))
+                    continue
+                if busy:
+                    busy.step(index + 1, len(paths), path.name)
+                info = {}
+                try:
+                    fields, note, number, _ = read_invoice_details(path, info)
+                except (OSError, RuntimeError, ValueError) as error:
+                    record_error("pdf_read", error)
+                    fields, note, number = ("", "", ""), "PDF 읽기 실패", ""
+                except Exception as error:  # v1.13.1: one odd file must not stop the reading of all others
+                    record_error("pdf_read", error)
+                    info = {}
+                    fields, note, number = ("", "", ""), "읽기 오류 · 직접 확인", ""
+                self.invoice_like[path] = info.get("invoice_like", True)
+                self.checks[path] = info.get("checks", {})
+                self.reasons[path] = (info.get("kind", ""), info.get("reason", ""))
+                if info.get("parts"):
+                    self.parts[path] = info["parts"]
+                else:
+                    self.parts.pop(path, None)
+                self.rows[str(index)] = (path, fields, note, number)
+                self.stamps[path] = file_stamp(path)
                 self.table.insert("", "end", iid=str(index))
-                continue
+        finally:  # v1.13.1: the progress card (and its click block) always goes away
             if busy:
-                busy.step(index + 1, len(paths), path.name)
-            info = {}
-            try:
-                fields, note, number, _ = read_invoice_details(path, info)
-            except (OSError, RuntimeError, ValueError) as error:
-                record_error("pdf_read", error)
-                fields, note, number = ("", "", ""), "PDF 읽기 실패", ""
-            self.invoice_like[path] = info.get("invoice_like", True)
-            self.checks[path] = info.get("checks", {})
-            self.reasons[path] = (info.get("kind", ""), info.get("reason", ""))
-            if info.get("parts"):
-                self.parts[path] = info["parts"]
-            else:
-                self.parts.pop(path, None)
-            self.rows[str(index)] = (path, fields, note, number)
-            self.stamps[path] = file_stamp(path)
-            self.table.insert("", "end", iid=str(index))
-        if busy:
-            busy.close()
+                busy.close()
         flush_text_cache()
         try:
             self.marks = marks_for([row[0] for row in self.rows.values()])
