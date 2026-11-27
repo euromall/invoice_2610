@@ -1,4 +1,5 @@
 """Turns shipping lines into shipments (one per 관리번호/HAWB) with prices and fees."""
+import re
 import datetime as dt
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -13,6 +14,9 @@ CARRIER_CJ = 'cj'       # CJ대한통운
 
 MODE_PROFORMA = 'proforma'   # 견적서용
 MODE_BILL = 'bill'           # 청구서용
+
+
+_HANGUL = re.compile(r'[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7A3]')
 
 
 @dataclass
@@ -147,6 +151,7 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
         groups.setdefault(ln.order_no, []).append(ln)
 
     shipments = []
+    hangul_checked = set()
     for order_no, glines in groups.items():
         # the old program sorts every line by item name (case-sensitive), so inside an order the lines are in
         # name order and the order's place in the tracking-number sequence comes from its alphabetically first item
@@ -162,6 +167,12 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
                 warnings.append(f'{ln.row}행: 상품 "{ln.item_name}"이(가) Base.xlsx newPrice에 없습니다.')
             elif item is not None and item.name.strip() != ln.item_name:
                 warnings.append(f'{ln.row}행: 상품명 철자가 달라 비슷한 이름으로 찾았습니다: "{ln.item_name}" → "{item.name}"')
+            if item is not None and item.name not in hangul_checked:
+                hangul_checked.add(item.name)
+                bad = [k for k, v in (('브랜드명(H열)', item.brand), ('상품명(I열)', item.name)) if _HANGUL.search(v or '')]
+                if bad:
+                    warnings.append(f'{ln.row}행: Base.xlsx newPrice {item.row}행 {"·".join(bad)}에 한글이 있습니다: '
+                                    f'"{item.brand}" / "{item.name}". 영문으로 고쳐 주세요.')
             if item is not None and item.name in ref.duplicate_rows:
                 rows = ', '.join(map(str, ref.duplicate_rows[item.name]))
                 warnings.append(f'{ln.row}행: 상품 "{item.name}"이(가) Base.xlsx newPrice {rows}행에 여러 번 있어 '
