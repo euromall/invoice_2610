@@ -3250,7 +3250,7 @@ class App:
             if tag == "muted" or matched:
                 cells = tuple("" if cell == "✕ 없음" else cell for cell in cells)
             self.table.item(key, values=("☑" if key in self.table.selection() else "☐", source_label, *cells, target_label,
-                                         status), tags=("muted" if matched else "warn" if hold and tag == "ok" else tag,))
+                                         status), tags=("muted" if matched else "warn" if hold and tag == "ok" else "done" if done and tag == "ok" else tag,))
             if groups.get(view, False):
                 shown.append(key)
         self.table.detach(*self.table.get_children())

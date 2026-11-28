@@ -1024,6 +1024,35 @@ def run_v114_profiles():
     print("PASS: v1.14 company profiles (default unchanged, own folders, shared learning, rename)")
 
 
+def run_v115_numbers():
+    """v1.15: numbers on a PDF statement stand in one column right of the furthest amount (debit and credit alike)."""
+    from datetime import date as day
+    from decimal import Decimal
+    with TemporaryDirectory() as scratch:
+        statement = Path(scratch) / "db.pdf"
+        with pymupdf.open() as document:
+            page = document.new_page()
+            page.insert_text((40, 60), "17.08. 17.08. SEPA Lastschrift 1+1 Telecom", fontname="helv", fontsize=9)
+            page.insert_text((380, 60), "- 9,99", fontname="helv", fontsize=9)
+            page.insert_text((40, 90), "21.08. 21.08. AUSL.ZAHL. NAVER", fontname="helv", fontsize=9)
+            page.insert_text((470, 90), "+ 1.334,00", fontname="helv", fontsize=9)
+            document.save(statement)
+        entries = [("608-074", Transaction("a", day(2026, 8, 17), "1+1", Decimal("-9.99"), "EUR")),
+                   ("608-076", Transaction("b", day(2026, 8, 21), "NAVER", Decimal("1334.00"), "EUR"))]
+        data, marked = numbered_statement(statement, entries)
+        with pymupdf.open(stream=data) as document:
+            spots = {word[4]: word[0] for word in document[0].get_text("words") if word[4].startswith("[608-")}
+        check(marked == 2 and len(spots) == 2 and abs(spots["[608-074]"] - spots["[608-076]"]) < 0.5
+              and spots["[608-074]"] > 500, f"v1.15 numbers: one column in the right margin {spots}")
+    from ui_theme import transaction_look
+    looks = [transaction_look("인보이스 미연결"), transaction_look("인보이스 미연결", "", True),
+             transaction_look("인보이스 미연결", "", False), transaction_look("금액 대조 완료"),
+             transaction_look("연결됨 · 차액 1.00 EUR"), transaction_look("인보이스 미연결", "인보이스 확보 불가")]
+    check([tag for _, tag in looks] == ["open", "sure", "likely", "done", "bad", "muted"]
+          and looks[3][0].startswith("✓") and looks[1][0].startswith("●"), f"v1.15 colours: {looks}")
+    print("PASS: v1.15 statement numbers in one margin column, list colours")
+
+
 if __name__ == "__main__":
     run()
     run_v113()
@@ -1032,3 +1061,4 @@ if __name__ == "__main__":
     run_v114_folders()
     run_v114_mail()
     run_v114_profiles()
+    run_v115_numbers()

@@ -29,7 +29,7 @@ from tax_documents import pdf_tax_fields, read_structured, tax_notes
 from advisor_workbook import advisor_workbook, cost_rows, cost_workbook, localized_csv
 from release_info import VERSION, record_error
 from ui_theme import (COLORS, FONT_BOLD, FONT_SMALL, FONT_TITLE, Busy, InlineDialog, ask_yes_no, configure_tags, resort, show_notice,
-                      show_toast, table_tools, transaction_tag)
+                      show_toast, table_tools, transaction_tag, transaction_look)
 from workspace_backup import add_attachment, attachment_path, create_backup, restore_workspace
 
 
@@ -252,6 +252,9 @@ def german_amount(value):
     return format(abs(value), ",.2f").translate(str.maketrans(",.", ".,"))
 
 
+AMOUNT_WORD = re.compile(r"[+-]?\d{1,3}(?:\.\d{3})*,\d{2}[SH-]?")
+
+
 def statement_lines(page):
     """Words of a PDF page grouped into visual lines: [(rect, [words])]."""
     lines = []
@@ -276,15 +279,20 @@ def numbered_statement(path, entries, placed=None):
     placed: optional dict that receives {number: page index} for every marked number.
 
     entries: [(number, Transaction)]. A line is marked when it starts with the transaction's
-    day.month and contains its amount. The number goes right of the amount (the end of the line),
-    or left of the line or above it when the page margin is too narrow. The original file is not changed.
+    day.month and contains its amount. v1.15: all numbers of a page stand in one column in the right margin,
+    right of the furthest amount on that page (debit and credit columns alike); when that margin is too narrow
+    they stand in one column in the left margin, else above the line. The original file is not changed.
     """
     remaining = sorted(entries, key=lambda entry: (entry[1].day, entry[0]))
     marked = 0
     red = (0.78, 0.19, 0.19)
     with pymupdf.open(path) as document:
         for page in document:
-            for rect, words in statement_lines(page):
+            lines = statement_lines(page)
+            amount_lines = [rect for rect, words in lines if any(AMOUNT_WORD.fullmatch(word) for word in words)]
+            right_edge = max((rect.x1 for rect in amount_lines), default=None)
+            left_edge = min((rect.x0 for rect in amount_lines), default=None)
+            for rect, words in lines:
                 if not words:
                     continue
                 first = words[0]
@@ -298,10 +306,12 @@ def numbered_statement(path, entries, placed=None):
                     size = 9
                     width = pymupdf.get_text_length(label, fontname="hebo", fontsize=size)
                     beside = True
-                    if page.rect.x1 - rect.x1 >= width + 6:  # right after the amount
-                        x = rect.x1 + 4
-                    elif rect.x0 - page.rect.x0 >= width + 6:
-                        x = rect.x0 - width - 3
+                    right = max(right_edge or rect.x1, rect.x1)
+                    left = min(left_edge or rect.x0, rect.x0)
+                    if page.rect.x1 - right >= width + 6:  # one column right of the furthest amount on the page
+                        x = right + 4
+                    elif left - page.rect.x0 >= width + 6:
+                        x = left - width - 3
                     else:
                         beside = False
                         x = max(page.rect.x0 + 2, rect.x0)
@@ -3461,13 +3471,11 @@ class MonthlyClose:
                        "대조 완료": tag in ("ok", "transfer")}
             chip_counts.update(name for name, hit in matches.items() if hit)
             if matches.get(view, True):
-                shown = state
-                if state == "인보이스 미연결" and key in candidates:
-                    shown = "후보 있음 · 확실" if candidates[key] else "후보 있음 · 거의 일치"
+                shown, look = transaction_look(state, follow or "", candidates.get(key))
                 kind, payee = split_merchant(item.merchant)
                 self.cards.insert("", "end", iid=key, values=(
                     record.get("number", ""), item.day, payee, f"{item.amount} {item.currency}", shown, self.note_preview(key), kind,
-                ), tags=(tag,))
+                ), tags=(look,))
         resort(self.cards)
         self.show_card_columns()
         kept = [key for key in selected if self.cards.exists(key)]
@@ -3613,7 +3621,9 @@ class MonthlyClose:
         columns = self.cards["columns"]
         for key, _, clear in pairs:  # mark the candidates in the list, also when it was filled before the PDFs were read
             if self.cards.exists(key) and self.cards.set(key, columns[4]) == "인보이스 미연결":
-                self.cards.set(key, columns[4], "후보 있음 · 확실" if clear else "후보 있음 · 거의 일치")
+                shown, look = transaction_look("인보이스 미연결", "", clear)
+                self.cards.set(key, columns[4], shown)
+                self.cards.item(key, tags=(look,))
         if not pairs:
             self.batch_bar.pack_forget()
             return

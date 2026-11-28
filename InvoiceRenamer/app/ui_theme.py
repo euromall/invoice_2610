@@ -23,6 +23,11 @@ TAGS = {
     "bad": (COLORS["red_light"], COLORS["red"]),
     "transfer": (COLORS["violet_light"], COLORS["violet"]),
     "muted": (COLORS["gray_light"], COLORS["muted"]),
+    # v1.15 transaction list: white is the normal "still to do", red only for real problems.
+    "open": (COLORS["panel"], COLORS["ink"]),
+    "sure": (COLORS["green_light"], COLORS["green"]),
+    "likely": (COLORS["amber_light"], "#7a4e0e"),
+    "done": (COLORS["panel"], COLORS["muted"]),
 }
 
 
@@ -100,6 +105,27 @@ def transaction_tag(status, follow_up=""):
     if status in ("인보이스 미연결", "연결 PDF 위치 확인"):
         return "bad"
     return "warn"
+
+
+def transaction_look(status, follow_up="", candidate=None):
+    """v1.15: (shown status, row tag) for the transaction list. candidate: None, True (clear 1:1) or False (almost).
+    White = still to do, green = clear candidate, yellow = check by eye, red = a real problem, gray ✓ = done."""
+    if follow_up == "인보이스 확보 불가":
+        return f"– {status} · 인보이스 없이 처리", "muted"
+    if follow_up == "세무사 확인 필요":
+        return f"? {status} · 세무사 확인", "warn"
+    tag = transaction_tag(status, follow_up)
+    if tag in ("ok", "transfer"):
+        return f"✓ {status}", "done"
+    if status == "인보이스 미연결":
+        if candidate is True:
+            return "● 후보 있음 · 확실", "sure"
+        if candidate is False:
+            return "◐ 후보 있음 · 거의 일치", "likely"
+        return status, "open"
+    if status.startswith("연결됨 ·") or status == "연결 PDF 위치 확인":
+        return f"! {status}", "bad"
+    return status, tag
 
 
 # Mouse-over explanations for buttons, menu items and sidebar links (label → what it does).

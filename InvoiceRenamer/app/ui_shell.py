@@ -284,7 +284,8 @@ class Shell:
         if not total or width <= 1:
             return
         x = 0
-        for key, color in (("ok", "#38c172"), ("transfer", "#9f7aea"), ("warn", "#f6ad55"), ("bad", "#fc8181")):
+        # v1.15: only finished work fills the bar (green); open transactions stay as the empty track, not red.
+        for key, color in (("ok", "#38c172"), ("transfer", "#38c172"), ("warn", "#f6ad55")):
             part = width * self.bar_counts.get(key, 0) / total
             if part:
                 self.bar.create_rectangle(x, 0, x + part, 12, fill=color, width=0)
