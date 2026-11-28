@@ -2,7 +2,10 @@ name: build-exe
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   windows:
     runs-on: windows-latest
@@ -11,9 +14,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r requirements.txt pyinstaller==6.11.1
-      - run: pyinstaller --noconfirm --onefile --windowed --name InvoiceAuto main.py
+      - run: pip install -r requirements.txt pyinstaller==6.11.1 pytest
+      - name: Tests (made-up data)
+        run: python -m pytest -q tests
+      - name: Version
+        shell: bash
+        run: echo "VERSION = '${{ github.run_number }}'" > invoiceauto/_version.py
+      - run: pyinstaller --noconfirm --onedir --windowed --splash assets/splash.png --name InvoiceAuto main.py
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p package
+          cp -r dist/InvoiceAuto package/
+          cp "InvoiceAuto 실행.bat" package/
+          cd package && 7z a -tzip ../InvoiceAuto.zip . > /dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: InvoiceAuto
-          path: dist/InvoiceAuto.exe
+          path: package/
+      - name: Release (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ github.run_number }}" InvoiceAuto.zip \
+            --title "InvoiceAuto ${{ github.run_number }}" \
+            --notes "$(git log -1 --pretty=%B | head -20)"

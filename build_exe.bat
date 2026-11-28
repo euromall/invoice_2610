@@ -1,10 +1,12 @@
 @echo off
-rem Builds dist\InvoiceAuto.exe. Needs Python 3.12 from python.org.
+rem Builds dist\InvoiceAuto\ (InvoiceAuto.exe + _internal). Needs Python 3.12 from python.org.
 cd /d "%~dp0"
 py -3 -m pip install -r requirements.txt pyinstaller==6.11.1 || goto :err
-py -3 -m PyInstaller --noconfirm --onefile --windowed --name InvoiceAuto main.py || goto :err
+py -3 -m PyInstaller --noconfirm --onedir --windowed --splash assets\splash.png --name InvoiceAuto main.py || goto :err
+copy /y "InvoiceAuto*.bat" dist\ >nul
 echo.
-echo Done: copy dist\InvoiceAuto.exe into the program folder (Base, db, ShippingInvoice).
+echo Done: copy the folder dist\InvoiceAuto into the work folder (next to Base, db, ShippingInvoice),
+echo together with the InvoiceAuto start .bat file.
 pause
 exit /b 0
 :err

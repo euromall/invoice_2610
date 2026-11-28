@@ -65,12 +65,23 @@ class Item:
     food_type: str
     manufacturer: str
     origin_country: str
+    row: int = 0             # row in newPrice
+
+
+def _food_type(v) -> str:
+    """식품종류 code; '0.00' written as text in Base.xlsx is the code 0."""
+    t = text(v).strip()
+    try:
+        return text(float(t)) if t else ''
+    except ValueError:
+        return t
 
 
 class RefData:
-    def __init__(self, companies, items):
+    def __init__(self, companies, items, duplicate_rows=None):
         self.companies = companies
         self.items = items
+        self.duplicate_rows = duplicate_rows or {}   # item name -> every newPrice row with that name
         self._folded = None
         self._by_sender = {}
         for c in companies.values():
@@ -88,7 +99,7 @@ class RefData:
             if self._folded is None:
                 self._folded = {}
                 for k, v in self.items.items():
-                    self._folded.setdefault(fold(k), v)
+                    self._folded[fold(k)] = v      # later (newer) row wins, as for exact names
             found = self._folded.get(fold(name))
         return found
 
@@ -115,18 +126,19 @@ class RefData:
                 order_number=text(r[26]),
             )
         items = {}
-        for r in wb['newPrice'].iter_rows(min_row=2, values_only=True):
+        rows_by_name = {}
+        for row_no, r in enumerate(wb['newPrice'].iter_rows(min_row=2, values_only=True), start=2):
             r = list(r) + [None] * 20
             name = text(r[8]).strip()
             if not name:
                 continue
-            if name in items:      # same name listed twice: the old program used the first row
-                continue
-            items[name] = Item(
+            rows_by_name.setdefault(name, []).append(row_no)
+            # same name listed twice: the lower (newest) row wins. The old program used the upper row.
+            items[name] = Item(row=row_no,
                 name=name, weight=num(r[3]), unit_price=num(r[4]), item_code=text(r[5]), barcode=text(r[6]),
                 brand=text(r[7]), price=num(r[10]), remark=text(r[11]), url=text(r[12]),
                 singo_unit_price=num(r[13]), singo_hs_code=text(r[14]), export_hs_code=text(r[15]),
-                food_type=text(r[16]), manufacturer=text(r[17]), origin_country=text(r[18]),
+                food_type=_food_type(r[16]), manufacturer=text(r[17]), origin_country=text(r[18]),
             )
         wb.close()
-        return cls(companies, items)
+        return cls(companies, items, {n: rs for n, rs in rows_by_name.items() if len(rs) > 1})

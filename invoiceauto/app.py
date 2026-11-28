@@ -2,6 +2,7 @@
 import configparser
 import datetime as dt
 import glob
+import re
 import os
 import shutil
 from dataclasses import dataclass
@@ -9,7 +10,8 @@ from typing import Callable, List, Optional
 
 from . import db
 from .engine import Settings, build_run, MODE_PROFORMA, MODE_BILL, CARRIER_POST, CARRIER_CJ
-from .generate import Paths, generate, run_folder, offline_english_address
+from .generate import (Paths, generate, run_folder, person_folder, offline_english_address, save_pdfs,
+                       write_person_invoices)
 from .refdata import RefData
 from .shipping import read_shipping
 
@@ -24,16 +26,29 @@ FLAGS = ['chkAutoInvoiceNo', 'chkSavePdf', 'chkApplyAccounting', 'chkMakePeroson
 
 @dataclass
 class Folder:
-    """The program folder: same layout as the old program (Base, db, ShippingInvoice, Result)."""
+    """The program folder: same layout as the old program (Base, db, ShippingInvoice, Result).
+
+    In test mode the run writes to db/euromall_test.db and Result_test/, so it can be run next to the old
+    program on the same input without touching the real account book.
+    """
     root: str
+    test: bool = False
 
     @property
     def base(self):
         return os.path.join(self.root, 'Base')
 
     @property
-    def db(self):
+    def real_db(self):
         return os.path.join(self.root, 'db', 'euromall.db')
+
+    @property
+    def test_db(self):
+        return os.path.join(self.root, 'db', 'euromall_test.db')
+
+    @property
+    def db(self):
+        return self.test_db if self.test else self.real_db
 
     @property
     def shipping(self):
@@ -41,7 +56,14 @@ class Folder:
 
     @property
     def result(self):
-        return os.path.join(self.root, 'Result')
+        return os.path.join(self.root, 'Result_test' if self.test else 'Result')
+
+    def prepare_test_db(self, fresh=False) -> bool:
+        """Copies the real database to the test one when it is missing (or always, with fresh). True if copied."""
+        if self.test and os.path.exists(self.real_db) and (fresh or not os.path.exists(self.test_db)):
+            shutil.copy2(self.real_db, self.test_db)
+            return True
+        return False
 
     @property
     def ini(self):
@@ -64,20 +86,54 @@ class Options:
     make_cargo_weight_merge: bool = True
     address_mode: str = ADDRESS_OFFLINE
     address_api_key: str = ''
+    test_mode: bool = False
+    invoice_seq: int = 1        # 차수: 01 normally, 02.. when a date is run again without overwriting
 
     def settings(self, work_date: dt.date) -> Settings:
         return Settings(work_date=work_date, mode=self.mode, carrier=self.carrier, auto_hawb=self.auto_hawb,
+                        invoice_seq=self.invoice_seq,
                         save_pdf=self.save_pdf, apply_accounting=self.apply_accounting,
                         make_person_invoice=self.make_person_invoice,
                         make_export_per_company=self.make_export_per_company,
                         make_cargo_weight_merge=self.make_cargo_weight_merge)
 
 
-def load_options(path, mode=None) -> Options:
-    """Reads the [Proforma] or [Bill] section, like the old program's 설정불러오기."""
-    cp = configparser.ConfigParser()
+def _read_ini(path) -> configparser.ConfigParser:
+    """Tolerant ini reader: the old program's ini can start with a broken section header
+    (seen in use: '[10.' + newline + '.P/ ... ,Proforma]'), so lines before the first proper
+    [Section] are skipped and a repeated section does not fail."""
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
     cp.optionxform = str
-    cp.read(path, encoding='utf-8')
+    text_ = ''
+    for enc in ('utf-8-sig', 'cp949', 'latin-1'):
+        try:
+            with open(path, encoding=enc) as f:
+                text_ = f.read()
+            break
+        except (OSError, UnicodeDecodeError):
+            continue
+    lines = text_.splitlines()
+    start = next((i for i, ln in enumerate(lines) if re.fullmatch(r'\s*\[[A-Za-z_]\w*\]\s*', ln)), len(lines))
+    try:
+        cp.read_string('\n'.join(lines[start:]))
+    except configparser.Error:
+        pass
+    return cp
+
+
+def old_ini_path(root):
+    """The old program's ini next to its exe (00_Invice Auto ....ini), used until our own ini exists."""
+    found = sorted(f for f in glob.glob(os.path.join(root, '*.ini')) if os.path.basename(f) != INI_NAME)
+    return found[0] if found else None
+
+
+def load_options(path, mode=None) -> Options:
+    """Reads the [Proforma] or [Bill] section, like the old program's 설정불러오기.
+    Without our own ini yet, the old program's ini in the same folder is read instead."""
+    first_run = not os.path.exists(path)
+    if first_run:
+        path = old_ini_path(os.path.dirname(path)) or path
+    cp = _read_ini(path)
     general = cp['General'] if cp.has_section('General') else {}
     mode = mode or general.get('mode', MODE_PROFORMA)
     sec = cp['Proforma' if mode == MODE_PROFORMA else 'Bill'] if cp.has_section(
@@ -93,13 +149,15 @@ def load_options(path, mode=None) -> Options:
     o.carrier = CARRIER_POST if str(sec.get('rdbPostOffice', '0')) == '1' else CARRIER_CJ
     o.address_mode = general.get('address_mode', ADDRESS_OFFLINE)
     o.address_api_key = general.get('address_api_key', '')
+    # starts in test mode until settings are saved once, so a first try never touches euromall.db or Result/
+    o.test_mode = str(general.get('test_mode', '1' if first_run else '0')) == '1'
     return o
 
 
 def save_options(path, o: Options):
-    cp = configparser.ConfigParser()
+    """Always writes our own ini (InvoiceAuto.ini); the old program's ini is never changed."""
+    cp = _read_ini(path) if os.path.exists(path) else configparser.ConfigParser(interpolation=None)
     cp.optionxform = str
-    cp.read(path, encoding='utf-8')
     name = 'Proforma' if o.mode == MODE_PROFORMA else 'Bill'
     if not cp.has_section(name):
         cp.add_section(name)
@@ -113,7 +171,8 @@ def save_options(path, o: Options):
     })
     if not cp.has_section('General'):
         cp.add_section('General')
-    cp['General'].update({'mode': o.mode, 'address_mode': o.address_mode, 'address_api_key': o.address_api_key})
+    cp['General'].update({'mode': o.mode, 'address_mode': o.address_mode, 'address_api_key': o.address_api_key,
+                          'test_mode': '1' if o.test_mode else '0'})
     with open(path, 'w', encoding='utf-8') as f:
         cp.write(f)
 
@@ -135,9 +194,26 @@ def english_address_function(o: Options, log: Callable[[str], None]):
     return offline_english_address
 
 
+def preview_run(folder: Folder, shipping_file: str, work_date: dt.date, o: Options):
+    """Builds the run without writing anything, for the person-invoice order list."""
+    ref = RefData.load(os.path.join(folder.base, 'Base.xlsx'))
+    return build_run(read_shipping(shipping_file), ref, o.settings(work_date))
+
+
+def person_candidates(run):
+    """Orders that can get a person invoice: all but those of delivery-only (L) companies."""
+    return [sh for sh in run.shipments if not sh.company.is_delivery_only]
+
+
 def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
-            log: Callable[[str], None] = print, person_only: bool = False):
+            log: Callable[[str], None] = print, person_only: bool = False,
+            person_orders: Optional[set] = None):
+    """person_orders: order numbers picked for person invoices; None means every candidate."""
     """작업시작: reads the shipping file, writes the result folder, then the account book and stock."""
+    if folder.test:
+        log('[테스트 모드] 결과는 Result_test, 회계·재고는 db/euromall_test.db 에 기록합니다.')
+        if folder.prepare_test_db():
+            log('  euromall.db 를 euromall_test.db 로 복사했습니다.')
     log(f'입력 파일: {os.path.basename(shipping_file)}')
     ref = RefData.load(os.path.join(folder.base, 'Base.xlsx'))
     log(f'Base.xlsx: 거래처 {len(ref.companies)}곳, 상품 {len(ref.items)}개')
@@ -151,20 +227,21 @@ def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
         log('  주의: ' + w)
 
     paths = Paths(base_dir=folder.base, result_dir=folder.result)
+    person = [sh for sh in person_candidates(run) if person_orders is None or sh.order_no in person_orders]
     if person_only:
-        from .outputs import invoices
-        out_dir = run_folder(run, paths)
-        os.makedirs(out_dir, exist_ok=True)
-        addr = english_address_function(o, log)
-        for sh in run.shipments:
-            if sh.company.is_delivery_only:
-                continue
-            wb = invoices.person_invoice(run, sh, paths.template('PersonInvoice'), addr(sh))
-            wb.save(os.path.join(out_dir, invoices.person_invoice_filename(sh) + '.xlsx'))
-        log(f'개인 인보이스 저장: {out_dir}')
+        out_dir = person_folder(run, paths)
+        outputs = write_person_invoices(run, paths, person, english_address_function(o, log))
+        if o.save_pdf:
+            try:
+                save_pdfs(outputs, 'Profoma_')
+            except Exception as e:
+                log(f'  주의: PDF 저장 실패: {e}')
+        log(f'개인 인보이스 {len(person)}건 저장: {out_dir}')
         return run, out_dir
 
-    outputs = generate(run, paths, english_address=english_address_function(o, log))
+    outputs = generate(run, paths, english_address=english_address_function(o, log), person_shipments=person)
+    if settings.make_person_invoice:
+        log(f'개인 인보이스 {len(person)}건 저장: {person_folder(run, paths)}')
     out_dir = run_folder(run, paths)
     log(f'결과 파일 {len(outputs)}개 저장: {out_dir}')
     for w in run.warnings:
@@ -179,7 +256,184 @@ def run_job(folder: Folder, shipping_file: str, work_date: dt.date, o: Options,
             log(f'  {inv.invoice_no}: {inv.total:.2f} EUR')
         log(f'  {run.export_invoice_no}: {sum(i.total for i in run.invoices):.2f} EUR')
 
-    backup_dir = os.path.join(os.path.dirname(shipping_file), 'backup')
-    os.makedirs(backup_dir, exist_ok=True)
-    shutil.copy2(shipping_file, backup_dir)
+    if not folder.test:
+        backup_dir = os.path.join(os.path.dirname(shipping_file), 'backup')
+        os.makedirs(backup_dir, exist_ok=True)
+        shutil.copy2(shipping_file, backup_dir)
     return run, out_dir
+
+
+# --- earlier runs of a date (작업일자 달력, 같은 날짜 확인) ------------------------------------------
+
+RUN_DIR = re.compile(r'(Profoma|Invoice)_(\d{6})(?:_(\d{2}))?$')
+
+
+def worked_dates(folder: Folder) -> dict:
+    """{date: {'proforma', 'bill'}} from the result folders (Profoma_YYMMDD[_NN], Invoice_YYMMDD[_NN])."""
+    out = {}
+    try:
+        names = os.listdir(folder.result)
+    except OSError:
+        return out
+    for n in names:
+        m = RUN_DIR.match(n)
+        if not m:
+            continue
+        try:
+            d = dt.datetime.strptime(m.group(2), '%y%m%d').date()
+        except ValueError:
+            continue
+        out.setdefault(d, set()).add(MODE_PROFORMA if m.group(1) == 'Profoma' else MODE_BILL)
+    return out
+
+
+@dataclass
+class PreviousRun:
+    folders: List[str]          # result folders of this date and mode, oldest first
+    last_time: dt.datetime
+    next_seq: int               # 차수 for a new run that keeps the earlier one
+    companies: int = 0          # account book rows of that date
+    paid: List[str] = None      # companies with a deposit recorded
+
+
+def previous_run(folder: Folder, work_date: dt.date, mode: str) -> Optional[PreviousRun]:
+    """The earlier run of this date and mode, or None. The result folder is what counts: the account book
+    is shared by both modes (a bill updates the quote's row), so it is only shown for information."""
+    prefix = 'Profoma' if mode == MODE_PROFORMA else 'Invoice'
+    ymd6 = f'{work_date:%y%m%d}'
+    found = []
+    try:
+        for n in os.listdir(folder.result):
+            m = RUN_DIR.match(n)
+            if m and m.group(1) == prefix and m.group(2) == ymd6:
+                found.append((int(m.group(3) or 1), os.path.join(folder.result, n)))
+    except OSError:
+        return None
+    if not found:
+        return None
+    found.sort()
+    seqs = {s for s, _ in found}
+    info = PreviousRun(folders=[p for _, p in found],
+                       last_time=dt.datetime.fromtimestamp(max(os.path.getmtime(p) for _, p in found)),
+                       next_seq=max(seqs) + 1, paid=[])
+    try:
+        rows = db.account_rows(folder.db, work_date.isoformat(), work_date.isoformat())
+        info.companies = len({r['company_uid'] for r in rows if r['company_uid'] != 'EMG'})
+        info.paid = sorted({r['company_uid'] for r in rows if float(r.get('deposit_amount') or 0) > 0})
+        for r in rows:      # an account-book number above the folders' (e.g. 차수 made by the old program)
+            no = str(r.get('invoice_no') or '')
+            if no[-8:-2] == ymd6 and no[-2:].isdigit():
+                info.next_seq = max(info.next_seq, int(no[-2:]) + 1)
+    except Exception:
+        pass
+    return info
+
+
+def archive_run(folder: Folder, path: str) -> str:
+    """Moves an earlier result folder to Result/backup/<name>_<time> before it is made again."""
+    dest_dir = os.path.join(folder.result, 'backup')
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, f'{os.path.basename(path)}_{dt.datetime.now():%Y%m%d_%H%M%S}')
+    shutil.move(path, dest)
+    return dest
+
+
+# --- in use by another computer (Dropbox shares the folder, not the running program) -------------
+
+LOCK_NAME = 'InvoiceAuto.lock'
+LOCK_STALE_MINUTES = 10      # a lock not refreshed for this long belongs to a program that is gone
+
+
+def _me():
+    import socket
+    import getpass
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = ''
+    return socket.gethostname(), user
+
+
+def read_lock(root):
+    """The lock of another computer that is still fresh, as a dict, else None."""
+    import json
+    path = os.path.join(root, LOCK_NAME)
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if data.get('computer') == _me()[0]:
+        return None
+    try:
+        beat = dt.datetime.fromisoformat(data.get('heartbeat', ''))
+    except ValueError:
+        return None
+    if dt.datetime.now() - beat > dt.timedelta(minutes=LOCK_STALE_MINUTES):
+        return None
+    data['heartbeat_time'] = beat
+    return data
+
+
+def write_lock(root):
+    """Marks the folder as in use by this computer; called at start and every few minutes."""
+    import json
+    computer, user = _me()
+    path = os.path.join(root, LOCK_NAME)
+    try:
+        with open(path + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump({'computer': computer, 'user': user, 'pid': os.getpid(),
+                       'heartbeat': dt.datetime.now().isoformat(timespec='seconds')}, f)
+        os.replace(path + '.tmp', path)
+    except OSError:
+        pass
+
+
+def release_lock(root):
+    import json
+    path = os.path.join(root, LOCK_NAME)
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        if data.get('computer') == _me()[0] and data.get('pid') == os.getpid():
+            os.remove(path)
+    except (OSError, ValueError):
+        pass
+
+
+# --- old backups -------------------------------------------------------------------------------------
+
+BACKUP_KEEP_DAYS = 90
+BACKUP_KEEP_NEWEST = 20       # always kept, however old
+
+
+def old_backups(folder: Folder, days=BACKUP_KEEP_DAYS, keep=BACKUP_KEEP_NEWEST, now=None):
+    """Backups older than `days` in db/backup, Result/backup, Result_test/backup and ShippingInvoice/backup,
+    except the newest `keep` of each folder. Returns [(path, size_bytes)]."""
+    now = now or dt.datetime.now()
+    limit = (now - dt.timedelta(days=days)).timestamp()
+    out = []
+    for d in (os.path.join(folder.root, 'db', 'backup'), os.path.join(folder.root, 'Result', 'backup'),
+              os.path.join(folder.root, 'Result_test', 'backup'), os.path.join(folder.shipping, 'backup')):
+        if not os.path.isdir(d):
+            continue
+        entries = [os.path.join(d, n) for n in os.listdir(d)]
+        entries.sort(key=os.path.getmtime, reverse=True)
+        for p in entries[keep:]:
+            if os.path.getmtime(p) < limit:
+                out.append((p, _size(p)))
+    return out
+
+
+def _size(p):
+    if os.path.isfile(p):
+        return os.path.getsize(p)
+    return sum(os.path.getsize(os.path.join(a, f)) for a, _, fs in os.walk(p) for f in fs)
+
+
+def remove_backups(paths):
+    for p in paths:
+        if os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+        elif os.path.exists(p):
+            os.remove(p)

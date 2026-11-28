@@ -1,11 +1,12 @@
 """Turns shipping lines into shipments (one per 관리번호/HAWB) with prices and fees."""
+import re
 import datetime as dt
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .names import romanize_name
 from .refdata import Company, Item, RefData
-from .shipping import Line, C_HAWB, C_UNIT_PRICE, C_HS
+from .shipping import Line, C_HAWB, C_UNIT_PRICE, C_HS, C_CUSTOMS_NO, C_MOBILE
 from .util import text, num, yymmdd
 
 CARRIER_POST = 'post'   # 우체국
@@ -13,6 +14,9 @@ CARRIER_CJ = 'cj'       # CJ대한통운
 
 MODE_PROFORMA = 'proforma'   # 견적서용
 MODE_BILL = 'bill'           # 청구서용
+
+
+_HANGUL = re.compile(r'[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7A3]')
 
 
 @dataclass
@@ -147,7 +151,11 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
         groups.setdefault(ln.order_no, []).append(ln)
 
     shipments = []
+    hangul_checked = set()
     for order_no, glines in groups.items():
+        # the old program sorts every line by item name (case-sensitive), so inside an order the lines are in
+        # name order and the order's place in the tracking-number sequence comes from its alphabetically first item
+        glines = sorted(glines, key=lambda ln: (ln.item_name, -ln.qty, ln.row))
         company = ref.company_for_sender(glines[0].sender)
         if company is None:
             warnings.append(f'{glines[0].row}행: 보내는사람 "{glines[0].sender}"이(가) Base.xlsx info에 없습니다.')
@@ -157,6 +165,21 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
             item = ref.item(ln.item_name)
             if item is None and company.invoice_type != 'L':
                 warnings.append(f'{ln.row}행: 상품 "{ln.item_name}"이(가) Base.xlsx newPrice에 없습니다.')
+            elif item is not None and item.name.strip() != ln.item_name:
+                warnings.append(f'{ln.row}행: 상품명 철자가 달라 비슷한 이름으로 찾았습니다: "{ln.item_name}" → "{item.name}"')
+            if item is not None and item.name not in hangul_checked:
+                hangul_checked.add(item.name)
+                for col, v in (('브랜드명(H열)', item.brand), ('상품명(I열)', item.name)):
+                    if not (v or '').strip():
+                        warnings.append(f'{ln.row}행: Base.xlsx newPrice {item.row}행 {col}이 비어 있습니다 '
+                                        f'(상품 "{item.name}"). 영문으로 채워 주세요.')
+                    elif _HANGUL.search(v):
+                        warnings.append(f'{ln.row}행: Base.xlsx newPrice {item.row}행 {col}에 한글이 있습니다: '
+                                        f'"{v}". 영문으로 고쳐 주세요.')
+            if item is not None and item.name in ref.duplicate_rows:
+                rows = ', '.join(map(str, ref.duplicate_rows[item.name]))
+                warnings.append(f'{ln.row}행: 상품 "{item.name}"이(가) Base.xlsx newPrice {rows}행에 여러 번 있어 '
+                                f'맨 아래 {item.row}행(최신) 값을 썼습니다.')
             if ln.weight > 0:
                 weight = ln.weight
             elif item is not None:
@@ -201,7 +224,43 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
         ships = [s for s in shipments if s.company.uid == uid]   # tracking-number order
         invoices.append(CompanyInvoice(company=ships[0].company, invoice_no=f'{uid}-{suffix}', shipments=ships))
 
+    warnings.extend(input_checks(shipments))
     return Run(settings=settings, shipments=shipments, invoices=invoices, warnings=warnings)
+
+
+_CUSTOMS_PERSONAL = re.compile(r'^P\d{12}$')
+_MOBILE = re.compile(r'^01[016789]\d{7,8}$')
+
+
+def input_checks(shipments) -> List[str]:
+    """Things customs or the carrier reject, found before the files go out."""
+    out = []
+    for s in shipments:
+        first = s.first
+        who = f'{first.row}행 (주문 {s.order_no})'
+        customs = text(first.get(C_CUSTOMS_NO)).strip().upper()
+        digits = re.sub(r'\D', '', customs)
+        if not customs:
+            out.append(f'{who}: 개인통관고유부호가 비어 있습니다.')
+        elif not _CUSTOMS_PERSONAL.match(customs) and len(digits) != 10:
+            out.append(f'{who}: 개인통관고유부호 "{customs}" 형식이 맞지 않습니다 (P + 숫자 12자리, 사업자는 숫자 10자리).')
+        mobile = re.sub(r'\D', '', text(first.get(C_MOBILE)))
+        if mobile.startswith('82'):
+            mobile = '0' + mobile[2:]
+        elif mobile.startswith('1'):
+            mobile = '0' + mobile             # number cell: Excel dropped the leading 0
+        if not _MOBILE.match(mobile):
+            out.append(f'{who}: 휴대폰 번호 "{text(first.get(C_MOBILE))}" 형식이 맞지 않습니다.')
+        if s.weight <= 0:
+            out.append(f'{who}: 무게가 0입니다.')
+        for l in s.lines:
+            if l.item is None:
+                continue                      # already reported as not in Base.xlsx
+            if not l.declared_price:
+                out.append(f'{l.line.row}행: 상품 "{l.item.name}" 신고단가가 0입니다 (Base.xlsx newPrice {l.item.row}행).')
+            if not (l.item.singo_hs_code or text(l.line.get(C_HS)).strip()):
+                out.append(f'{l.line.row}행: 상품 "{l.item.name}" HS코드가 없습니다 (Base.xlsx newPrice {l.item.row}행).')
+    return out
 
 
 def _apply_fees(s: Shipment):
