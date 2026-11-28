@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import db, compare, update
+from . import db, compare, update, basedup
 from .app import (Folder, Options, load_options, save_options, run_job, preview_run, person_candidates,
                   worked_dates, previous_run, archive_run, RUN_DIR, read_lock, write_lock, release_lock, old_backups, remove_backups,
                   BACKUP_KEEP_DAYS, BACKUP_KEEP_NEWEST, ADDRESS_API, ADDRESS_OFFLINE)
@@ -630,6 +630,17 @@ class MainWindow(QMainWindow):
         cl.addLayout(row)
         v.addWidget(c)
 
+        c, cl = card('Base 중복 정리')
+        cl.addWidget(label('Base.xlsx 상품 목록(newPrice)에서 같은 상품명이 여러 줄인 것을 찾아 한 줄만 남깁니다. '
+                           '원본은 그대로 두고 Base 폴더에 Base_정리본_날짜.xlsx로 저장합니다.', 'Muted', wrap=True))
+        row = QHBoxLayout()
+        b = QPushButton('중복 찾기')
+        b.clicked.connect(self.clean_base_duplicates)
+        row.addWidget(b)
+        row.addStretch(1)
+        cl.addLayout(row)
+        v.addWidget(c)
+
         c, cl = card('프로그램 업데이트')
         cl.addWidget(label(f'지금 버전: {update.current_version()}', 'Muted'))
         row = QHBoxLayout()
@@ -920,6 +931,26 @@ class MainWindow(QMainWindow):
         remove_backups([p for p, _ in found])
         self.log(f'오래된 백업 {len(found)}개 ({size:,.1f} MB)를 지웠습니다.')
         QMessageBox.information(self, TITLE, f'백업 {len(found)}개를 지웠습니다.')
+
+    def clean_base_duplicates(self):
+        path = os.path.join(self.folder.base, 'Base.xlsx')
+        if not os.path.exists(path):
+            QMessageBox.warning(self, TITLE, f'Base.xlsx를 찾지 못했습니다.\n{path}')
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            groups = basedup.find_groups(path)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, TITLE, f'Base.xlsx를 읽지 못했습니다.\n{e}')
+            return
+        QApplication.restoreOverrideCursor()
+        if not groups:
+            QMessageBox.information(self, TITLE, 'Base.xlsx에 중복된 상품명이 없습니다.')
+            return
+        dlg = BaseDupDialog(self, path, groups)
+        if dlg.exec() == QDialog.Accepted and dlg.saved:
+            self.log(f'Base 중복 정리: {dlg.removed}줄을 뺀 정리본을 저장했습니다. {dlg.saved}')
 
     def check_update(self):
         target = update.install_dir()
@@ -1596,6 +1627,97 @@ class AccountWindow(RecordWindow):
                 cell = ws.cell(r, col, v)
                 cell._style = copy(styles[col - 1])
         return wb
+
+
+class BaseDupDialog(QDialog):
+    """Duplicate item names in Base.xlsx: identical copies go automatically, for the rest the user picks a row."""
+
+    def __init__(self, parent, path, groups):
+        super().__init__(parent)
+        self.path, self.groups, self.saved, self.removed = path, groups, None, 0
+        self.setWindowTitle('Base 중복 정리')
+        self.resize(1000, 620)
+        same = [g for g in groups if g.identical]
+        self.differ = [g for g in groups if not g.identical]
+        extra = sum(len(g.rows) - 1 for g in groups)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(22, 20, 22, 18)
+        v.addWidget(label(f'중복 상품명 {len(groups)}개 · 지울 줄 {extra}줄', 'CardTitle'))
+        v.addWidget(label(f'값이 모두 같은 {len(same)}개는 맨 아래 줄 하나만 남깁니다. 값이 다른 {len(self.differ)}개는 '
+                          '아래에서 남길 줄을 고르세요. 처음에는 프로그램이 지금 쓰는 맨 아래(최신) 줄이 골라져 있어서, '
+                          '그대로 저장하면 인보이스 결과는 달라지지 않습니다.', 'Muted', wrap=True))
+        self.choice = {}
+        if self.differ:
+            cols = ['남길 줄', '상품명', '행'] + [n for _, n in basedup.SHOW]
+            n_rows = sum(len(g.rows) for g in self.differ)
+            t = QTableWidget(n_rows, len(cols))
+            t.setHorizontalHeaderLabels(cols)
+            t.verticalHeader().setVisible(False)
+            t.setEditTriggers(QTableWidget.NoEditTriggers)
+            t.setShowGrid(False)
+            i = 0
+            for gi, g in enumerate(self.differ):
+                grp = QButtonGroup(self)
+                self.choice[g.name] = grp
+                shade = QColor('#F4F1EA') if gi % 2 else None
+                for r in g.rows:
+                    rb = QRadioButton()
+                    rb.setChecked(r == g.newest)
+                    grp.addButton(rb, r)
+                    cell = QWidget()
+                    h = QHBoxLayout(cell)
+                    h.setContentsMargins(10, 0, 0, 0)
+                    h.addWidget(rb)
+                    t.setCellWidget(i, 0, cell)
+                    vals = [g.name if r == g.rows[0] else '', str(r)]
+                    vals += [basedup._norm(g.values[r].get(c)) for c, _ in basedup.SHOW]
+                    differs = {c for c, _ in basedup.SHOW
+                               if len({basedup._norm(g.values[x].get(c)) for x in g.rows}) > 1}
+                    for c, val in enumerate(vals, start=1):
+                        it = QTableWidgetItem(val)
+                        if c >= 3 and basedup.SHOW[c - 3][0] in differs:
+                            it.setForeground(QColor('#8A1F1F'))
+                            f = it.font()
+                            f.setBold(True)
+                            it.setFont(f)
+                        if shade is not None:
+                            it.setBackground(shade)
+                        t.setItem(i, c, it)
+                    i += 1
+            t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+            v.addWidget(t, 1)
+        else:
+            v.addStretch(1)
+        row = QHBoxLayout()
+        row.addWidget(label('원본 Base.xlsx는 바꾸지 않습니다. 정리본을 확인한 뒤 직접 바꿔 넣으세요.', 'Muted'))
+        row.addStretch(1)
+        b = QPushButton('정리본 저장')
+        b.setObjectName('Primary')
+        b.clicked.connect(self.save)
+        c = QPushButton('닫기')
+        c.clicked.connect(self.reject)
+        row.addWidget(b)
+        row.addWidget(c)
+        v.addLayout(row)
+
+    def save(self):
+        keep = {name: grp.checkedId() for name, grp in self.choice.items()}
+        drop = basedup.rows_to_drop(self.groups, keep)
+        dst = basedup.clean_name(self.path)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.removed = basedup.write_clean(self.path, dst, drop)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, TITLE, f'정리본을 저장하지 못했습니다.\n{e}')
+            return
+        QApplication.restoreOverrideCursor()
+        self.saved = dst
+        QMessageBox.information(self, TITLE, f'{self.removed}줄을 뺀 정리본을 저장했습니다.\n\n{dst}\n\n'
+                                '엑셀에서 열어 확인한 뒤, 괜찮으면 Base.xlsx를 다른 이름으로 옮겨 두고 '
+                                '정리본 이름을 Base.xlsx로 바꾸세요.')
+        self.accept()
 
 
 class CompanySummaryDialog(QDialog):
