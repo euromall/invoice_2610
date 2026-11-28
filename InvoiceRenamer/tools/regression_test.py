@@ -1065,6 +1065,46 @@ def run_v115_mail():
     print("PASS: v1.15 mail account joins the browser search list")
 
 
+def button_labels():
+    """Fixed labels of buttons and menu entries in the app's source: {label: "file:line"}."""
+    import ast
+    labels = {}
+    folder = Path(__file__).resolve().parent.parent / "app"
+    for name in ("invoice_renamer.py", "monthly_close.py", "ui_shell.py", "ui_theme.py", "pdf_view.py"):
+        tree = ast.parse((folder / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                function = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                wanted = {"Button": "text", "Checkbutton": "text", "Menubutton": "text", "add_command": "label",
+                          "add_checkbutton": "label"}.get(function)
+                for keyword in node.keywords:
+                    if keyword.arg == wanted and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                        labels.setdefault(keyword.value.value, f"{name}:{node.lineno}")
+                if function == "buttons" and len(node.args) >= 2 and isinstance(node.args[1], (ast.List, ast.Tuple)):
+                    for item in node.args[1].elts:
+                        if isinstance(item, ast.Tuple) and isinstance(item.elts[0], ast.Constant):
+                            labels.setdefault(item.elts[0].value, f"{name}:{node.lineno}")
+            target = node.target if isinstance(node, ast.For) else None
+            commands = isinstance(target, ast.Tuple) and len(target.elts) >= 2 and getattr(target.elts[1], "id", "") in (
+                "command", "action", "callback", "handler")
+            if commands and isinstance(node.iter, (ast.Tuple, ast.List)):
+                for item in node.iter.elts:
+                    if (isinstance(item, ast.Tuple) and len(item.elts) >= 2 and isinstance(item.elts[0], ast.Constant)
+                            and isinstance(item.elts[0].value, str)
+                            and isinstance(item.elts[1], (ast.Lambda, ast.Attribute))):
+                        labels.setdefault(item.elts[0].value, f"{name}:{node.lineno}")
+    return labels
+
+
+def run_v115_help():
+    """v1.15: every fixed button and menu label has a mouse-over explanation."""
+    from ui_theme import HELP, help_key
+    labels = button_labels()
+    missing = sorted(f"{label} ({where})" for label, where in labels.items() if not HELP.get(help_key(label)))
+    check(len(labels) > 150 and not missing, f"v1.15 help: buttons without explanation: {missing}")
+    print(f"PASS: v1.15 mouse-over help for all {len(labels)} button and menu labels")
+
+
 if __name__ == "__main__":
     run()
     run_v113()
@@ -1075,3 +1115,4 @@ if __name__ == "__main__":
     run_v114_profiles()
     run_v115_numbers()
     run_v115_mail()
+    run_v115_help()
