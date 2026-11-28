@@ -2014,71 +2014,64 @@ class MonthlyClose:
         window.geometry("1040x560")
         window.transient(self.root)
         window.grab_set()
-        ttk.Label(window, text="계좌·카드 별칭과 마감월을 확인하세요. 저장된 설정이 하나인 파일은 미리 계산해요.", padding=8).pack(anchor="w")
-        bar = ttk.Frame(window, padding=8)
-        bar.pack(fill="x")
-        table = self.table(window, ("명세서", "계좌·카드", "거래", "검산 / 필요한 확인"), (365, 140, 85, 415))
+        # v1.15: one check box per statement and one button. Ready statements are checked by themselves; a statement
+        # that still needs its account and columns opens its settings on double-click (or on its check box).
+        ttk.Label(window, text="준비된 명세서는 자동으로 체크돼요. ‘설정 필요’ 행은 더블클릭해서 계좌와 열을 정하세요. "
+                               "번호는 환경설정의 계좌 순서대로 매겨져요.", padding=8, wraplength=980).pack(anchor="w")
+        footer = ttk.Frame(window, padding=8)
+        footer.pack(side="bottom", fill="x")
+        summary = tk.StringVar()
+        ttk.Label(footer, textvariable=summary, style="Muted.TLabel").pack(side="left")
+        table = self.table(window, ("☑", "명세서", "계좌·카드", "거래", "상태"), (40, 365, 140, 70, 400))
+        table.column("☑", anchor="center", stretch=False)
         prepared = {}
         by_path = {}
+        checked = set()
+        finished = set()
 
         def inspect(key, path):
             try:
                 content = self.read_import(path)
                 source_key, header, rows, layout = content
                 if source_key in self.statement_sources:
+                    finished.add(key)
                     return ("", "", "이미 가져옴")
                 profiles = self.state.get("import_profiles", {}).get(layout, {})
                 known = self.state.get("source_accounts", {}).get(source_key, "")
                 profile = profiles.get(known) if known else (next(iter(profiles.values())) if len(profiles) == 1 else None)
                 if not profile:
-                    return ("", "", "계좌·열 설정 필요")
+                    return ("", "", "설정 필요 · 더블클릭해서 계좌·열을 정하세요")
                 spec = {**profile, "path": str(path), "layout": layout, "period": ""}
                 transactions, errors, check, discrepancy = self.preview_import(path, rows, spec)
                 if errors or discrepancy or not transactions:
-                    return (profile["account"], len(transactions), f"설정·오류 확인 · {check}")
+                    return (profile["account"], len(transactions), f"설정 확인 필요 · {check} · 더블클릭")
                 prepared[key] = (source_key, spec, transactions, errors)
-                return (profile["account"], len(transactions), check or "확인 가능")
+                return (profile["account"], len(transactions), check or "준비됨")
             except (OSError, ValueError, csv.Error, RuntimeError) as error:
-                return ("", "", str(error))
+                finished.add(key)
+                return ("", "", f"읽지 못함 · {error}")
 
-        with Busy(window, "명세서를 확인하고 있어요") as busy:
-            for i, name in enumerate(names):
-                key, path = str(i), Path(name)
-                busy.step(i + 1, len(names), path.name)
-                by_path[key] = path
-                table.insert("", "end", iid=key, values=(path.name, *inspect(key, path)))
+        def show(key, account, count, state):
+            table.item(key, values=("☑" if key in checked else "☐" if key not in finished else "", by_path[key].name,
+                                    account, count, state))
 
-        def edit_selected(_event=None):
-            selection = table.selection()
-            if len(selection) != 1:
-                self.notice("설정을 확인할 명세서 한 개를 선택하세요.")
-                return
-            key = selection[0]
-            path = by_path[key]
+        def update_summary():
+            keys = table.get_children()
+            ready = [key for key in keys if key in prepared]
+            needing = [key for key in keys if key not in prepared and key not in finished]
+            chosen = [key for key in keys if key in checked and key in prepared]
+            summary.set(f"준비됨 {len(ready)}개 · 설정 필요 {len(needing)}개 · 체크 {len(chosen)}개")
+            run.configure(text=f"가져오기 ({len(chosen)}개)" if chosen or not needing else
+                          f"다음 설정하기 ({len(needing)}개 남음)")
 
-            def configure(source_key, spec, transactions, errors, check, discrepancy):
-                prepared[key] = (source_key, spec, transactions, errors)
-                suffix = f" · 마감월 {spec['period']}" if spec["period"] else ""
-                if errors:
-                    suffix += f" · 확인 {len(errors)}건"
-                table.item(key, values=(path.name, spec["account"], len(transactions), (check or "설정 확인됨") + suffix))
-            self.open_csv(path, on_review=configure, owner=window,
-                          initial_spec=prepared[key][1] if key in prepared else None)
-
-        def move(step):
-            selection = table.selection()
-            if not selection:
-                self.notice("옮길 명세서를 선택하세요.")
-                return
-            rows = list(table.get_children())
-            picked = [rows.index(key) for key in selection]
-            for index in (sorted(picked) if step < 0 else sorted(picked, reverse=True)):
-                target = index + step
-                if 0 <= target < len(rows) and rows[target] not in selection:
-                    rows[index], rows[target] = rows[target], rows[index]
-            for position, key in enumerate(rows):
-                table.move(key, "", position)
-            table.see(selection[0])
+        def reinspect():
+            """Saved settings may now fit the other statements of the same bank."""
+            for other in table.get_children():
+                if other not in prepared and other not in finished:
+                    values = inspect(other, by_path[other])
+                    if other in prepared:
+                        checked.add(other)
+                    show(other, *values)
 
         def sort_by_account():
             accounts = [table.set(key, "계좌·카드") for key in table.get_children()]
@@ -2088,17 +2081,57 @@ class MonthlyClose:
             for position, key in enumerate(rows):
                 table.move(key, "", position)
 
+        def configure_row(key):
+            path = by_path[key]
+
+            def configure(source_key, spec, transactions, errors, check, discrepancy):
+                prepared[key] = (source_key, spec, transactions, errors)
+                checked.add(key)
+                suffix = f" · 마감월 {spec['period']}" if spec["period"] else ""
+                if errors:
+                    suffix += f" · 확인 {len(errors)}건"
+                show(key, spec["account"], len(transactions), (check or "설정 확인됨") + suffix)
+                reinspect()
+                sort_by_account()
+                update_summary()
+            self.open_csv(path, on_review=configure, owner=window,
+                          initial_spec=prepared[key][1] if key in prepared else None)
+
+        def on_click(event):
+            key = table.identify_row(event.y)
+            if not key or table.identify_column(event.x) != "#1" or key in finished:
+                return None
+            if key in prepared:
+                checked.symmetric_difference_update({key})
+                show(key, *table.item(key, "values")[2:])
+                update_summary()
+            else:
+                configure_row(key)
+            return "break"
+
+        def on_double(event):
+            key = table.identify_row(event.y)
+            if key and key not in finished:
+                configure_row(key)
+            return "break"
+
         def apply():
-            selection = set(table.selection())
-            chosen = [key for key in table.get_children() if key in selection and key in prepared]  # screen order = number order
+            keys = table.get_children()
+            chosen = [key for key in keys if key in checked and key in prepared]  # screen order = number order
             if not chosen:
-                messagebox.showinfo("명세서 가져오기", "검토가 끝난 행을 선택하세요.", parent=window)
+                needing = [key for key in keys if key not in prepared and key not in finished]
+                if needing:
+                    table.selection_set(needing[0])
+                    table.see(needing[0])
+                    configure_row(needing[0])
+                else:
+                    show_notice(window, "가져올 명세서가 없어요. 모두 이미 가져왔거나 읽지 못한 파일이에요.")
                 return
-            pending = [key for key in selection if key not in prepared]
-            prompt = f"준비된 명세서 {len(chosen)}개를 가져올까요?"
+            pending = [key for key in keys if key not in prepared and key not in finished]
+            prompt = f"체크한 명세서 {len(chosen)}개를 위에서부터 순서대로 가져올까요?"
             if pending:
-                prompt += f"\n설정이 필요한 {len(pending)}개는 가져오지 않아요."
-            if not ask_yes_no("명세서 가져오기", prompt, parent=window):
+                prompt += f"\n설정이 필요한 {len(pending)}개는 이번에 가져오지 않아요."
+            if not ask_yes_no("명세서 가져오기", prompt, parent=window, ok="가져오기"):
                 return
             done = []
             for key in chosen:
@@ -2108,35 +2141,47 @@ class MonthlyClose:
                 except OSError:
                     unchanged = False
                 if not unchanged:
-                    table.item(key, values=(by_path[key].name, spec["account"], "", "파일이 변경됨 · 설정 다시 확인"))
                     prepared.pop(key, None)
+                    checked.discard(key)
+                    show(key, spec["account"], "", "파일이 바뀜 · 더블클릭해서 다시 확인")
                     continue
                 if source_key in self.statement_sources:
-                    table.item(key, values=(by_path[key].name, spec["account"], "", "이미 가져옴"))
                     prepared.pop(key, None)
+                    finished.add(key)
+                    checked.discard(key)
+                    show(key, spec["account"], "", "이미 가져옴")
                     continue
                 spec = self.resolve_overlaps(source_key, spec, transactions, window)
                 if spec is None:
                     break
                 if self.add_statement(source_key, spec, transactions, list(errors)):
-                    table.item(key, values=(by_path[key].name, spec["account"], len(transactions), "가져오기 완료"))
                     prepared.pop(key, None)
+                    finished.add(key)
+                    checked.discard(key)
+                    show(key, spec["account"], len(transactions), "✓ 가져오기 완료")
                     done.append((len(transactions), len(errors)))
+            reinspect()
+            update_summary()
             if done:
                 self.announce_import(len(done), sum(count for count, _ in done), sum(problem for _, problem in done))
 
-        self.buttons(bar, [("선택 파일 설정", edit_selected), ("선택 가져오기", apply),
-                           ("준비된 파일 모두 선택", lambda: table.selection_set(tuple(prepared)))])
-        order_bar = ttk.Frame(window, padding=(8, 0, 8, 6))
-        order_bar.pack(fill="x", after=bar)
-        self.buttons(order_bar, [("▲ 위로", lambda: move(-1)), ("▼ 아래로", lambda: move(1)),
-                           ("계좌 순서로 정렬", sort_by_account),
-                           ("계좌 순서 정하기", lambda: self.edit_account_order(
-                               [table.set(key, "계좌·카드") for key in table.get_children()], sort_by_account, window))])
-        ttk.Label(window, text="번호는 위에 있는 명세서부터 매겨져요. ▲▼로 순서를 바꾸거나 ‘계좌 순서로 정렬’을 누르세요.",
-                  foreground=COLORS["muted"], padding=(8, 0, 8, 6)).pack(anchor="w", after=order_bar)
+        run = ttk.Button(footer, text="가져오기", style="Primary.TButton", command=apply)
+        run.pack(side="right")
+        ttk.Button(footer, text="닫기", command=window.destroy).pack(side="right", padx=(0, 6))
+        table.bind("<Button-1>", on_click, add="+")
+        table.bind("<Double-1>", on_double)
+        with Busy(window, "명세서를 확인하고 있어요") as busy:
+            for i, name in enumerate(names):
+                key, path = str(i), Path(name)
+                busy.step(i + 1, len(names), path.name)
+                by_path[key] = path
+                values = inspect(key, path)
+                if key in prepared:
+                    checked.add(key)
+                table.insert("", "end", iid=key, values=("", path.name, *values))
+                show(key, *values)
         sort_by_account()
-        table.bind("<Double-1>", edit_selected)
+        update_summary()
 
     def edit_account_order(self, extra=(), on_save=None, owner=None):
         """Panel: the order of bank accounts and cards used to number transactions (saved in settings.json)."""
