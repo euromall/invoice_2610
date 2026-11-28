@@ -1664,6 +1664,7 @@ class MonthlyClose:
     def __init__(self, parent, folder, practice_folder=None, container=None, on_change=None):
         self.embedded = container is not None
         self.on_change = on_change
+        self.open_mail_account = None  # v1.15: set by the shell (환경설정 → 메일 계정·앱 비밀번호)
         if self.embedded:
             self.root = parent.winfo_toplevel()
         else:
@@ -5373,7 +5374,7 @@ class MonthlyClose:
             account = mail_link.account_settings(load_settings())
             address = fields["email"].get().strip()
             if not mail_link.configured(account) or not account.get("smtp_host"):
-                show_notice(window, "먼저 환경설정 → 메일 → ‘메일 계정 설정’에서 메일 주소·서버·앱 비밀번호를 넣으세요.")
+                show_notice(window, "먼저 환경설정 → 메일 → ‘메일 계정·앱 비밀번호’에서 메일 주소·서버·앱 비밀번호를 넣으세요.")
                 return
             if not re.fullmatch(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+", address):
                 show_notice(window, "세무사 메일 주소를 하나 적어 주세요.")
@@ -5396,7 +5397,7 @@ class MonthlyClose:
             try:
                 secret = mail_link.load_password(account["user"])
                 if not secret:
-                    raise RuntimeError("저장된 앱 비밀번호가 없어요. 메일 계정 설정에서 넣으세요.")
+                    raise RuntimeError("저장된 앱 비밀번호가 없어요. 환경설정 → 메일 → ‘메일 계정·앱 비밀번호’에서 넣으세요.")
                 with Busy(self.root, "메일을 보내고 있어요"):
                     mail_link.smtp_send(account, secret, address, subject_var.get(), content.get("1.0", "end-1c"), attachments)
             except (RuntimeError, OSError, smtplib_error()) as error:
@@ -6499,7 +6500,7 @@ class MonthlyClose:
         ttk.Label(days, text="일 후까지").pack(side="left")
         attachment = tk.BooleanVar(value=bool(settings.get("mail_attachment", False)))
         ttk.Checkbutton(body, text="첨부 있는 메일만 (Gmail)", variable=attachment).grid(row=5, column=1, sticky="w", pady=3)
-        ttk.Label(body, text="한메일은 한 단어만 찾아요. ‘둘 다’를 고르면 금액으로 찾아요.\n메일 목록은 ‘환경설정’의 ‘메일 등록’에서 바꿔요.",
+        ttk.Label(body, text="한메일은 한 단어만 찾아요. ‘둘 다’를 고르면 금액으로 찾아요.\n메일함 목록은 아래 ‘메일 검색 목록…’에서 바꿔요.",
                   foreground=COLORS["muted"]).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         def search():
@@ -6529,7 +6530,7 @@ class MonthlyClose:
         footer.pack(fill="x", side="bottom")
         ttk.Button(footer, text="브라우저에서 찾기", style="Primary.TButton", command=search).pack(side="right")
         ttk.Button(footer, text="닫기", command=dialog.destroy).pack(side="right", padx=6)
-        ttk.Button(footer, text="메일 등록…", command=lambda: (dialog.destroy(), self.manage_mailboxes())).pack(side="left")
+        ttk.Button(footer, text="메일 검색 목록…", command=lambda: (dialog.destroy(), self.manage_mailboxes())).pack(side="left")
         dialog.bind("<Return>", lambda event: search())
 
     def manage_mailboxes(self):
@@ -6537,13 +6538,18 @@ class MonthlyClose:
         from invoice_renamer import load_settings, save_settings
         boxes = [dict(box) for box in mailboxes(load_settings())]
         dialog = InlineDialog(self.root)
-        dialog.title("메일 등록")
-        dialog.center(760, 440)
+        dialog.title("브라우저 메일 검색 목록")
+        dialog.center(940, 480)
         dialog.grab_set()
-        ttk.Label(dialog, text="메일 검색에서 고를 메일함이에요. Gmail 계정이 여러 개면 브라우저에 로그인한 순서 번호(첫 계정 0)를 적으세요.",
-                  wraplength=580, padding=(14, 10, 14, 6)).pack(anchor="w")
+        ttk.Label(dialog, text="3단계 ‘메일 검색’이 브라우저에서 열 메일함이에요(비밀번호 필요 없음). Gmail 계정이 여러 개면 "
+                               "브라우저에 로그인한 순서 번호(첫 계정 0)를 적으세요.\n앱 비밀번호(메일 첨부 가져오기·메일 보내기)는 "
+                               "여기가 아니라 왼쪽 아래 ‘메일 계정·앱 비밀번호…’에서 넣어요.",
+                  wraplength=890, padding=(14, 10, 14, 6)).pack(anchor="w")
         footer = ttk.Frame(dialog, padding=(14, 10))
         footer.pack(fill="x", side="bottom")  # footer and form first: the table takes only the space left over
+        if self.open_mail_account:
+            ttk.Button(footer, text="메일 계정·앱 비밀번호…",
+                       command=lambda: (dialog.destroy(), self.open_mail_account())).pack(side="left")
         form = ttk.Frame(dialog, padding=(14, 6))
         form.pack(fill="x", side="bottom")
         table = self.table(dialog, ("이름", "종류", "Gmail 계정 번호"), (240, 120, 140))

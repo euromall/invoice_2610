@@ -143,6 +143,7 @@ class Shell:
             self.app.on_work_folder = self.work_folder_changed
             self.app.on_manage_reasons = self.close.manage_reasons
             self.app.on_manage_mail = self.close.manage_mailboxes
+            self.close.open_mail_account = self.app.mail_account_dialog
             self.app.on_account_order = self.close.edit_account_order
             self.app.on_import_statements = lambda paths: (self.show(2), self.close.open_batch([str(path) for path in paths]))
             self.close.on_loaded = self.remember_folder

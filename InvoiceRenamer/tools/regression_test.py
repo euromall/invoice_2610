@@ -1053,6 +1053,18 @@ def run_v115_numbers():
     print("PASS: v1.15 statement numbers in one margin column, list colours")
 
 
+def run_v115_mail():
+    """v1.15: a saved Gmail/한메일 account also appears once in the browser mail search list."""
+    import invoice_renamer as ir
+    with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
+        check(ir.add_search_mailbox("한메일 (Daum)", "firma@hanmail.net"), "v1.15 mail: Daum account added to search list")
+        boxes = ir.load_settings()["mailboxes"]
+        check([box["kind"] for box in boxes] == ["gmail", "daum"], f"v1.15 mail: default Gmail kept {boxes}")
+        check(not ir.add_search_mailbox("한메일 (Daum)", "firma@hanmail.net"), "v1.15 mail: not added twice")
+        check(not ir.add_search_mailbox("GMX", "a@gmx.de"), "v1.15 mail: GMX has no browser search")
+    print("PASS: v1.15 mail account joins the browser search list")
+
+
 if __name__ == "__main__":
     run()
     run_v113()
@@ -1062,3 +1074,4 @@ if __name__ == "__main__":
     run_v114_mail()
     run_v114_profiles()
     run_v115_numbers()
+    run_v115_mail()

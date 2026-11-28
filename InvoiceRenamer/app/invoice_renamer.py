@@ -2118,6 +2118,24 @@ def check_installation(folder=None):
     return results
 
 
+
+def add_search_mailbox(preset, user):
+    """v1.15: a Gmail or 한메일 account saved with its app password also appears in the browser mail search list
+    (once). Returns True when it was added."""
+    kind = {"Gmail": "gmail", "한메일 (Daum)": "daum"}.get(preset)
+    if not kind or not user:
+        return False
+    settings = load_settings()
+    boxes = [box for box in settings.get("mailboxes") or [] if isinstance(box, dict)]
+    if any(box.get("kind") == kind and box.get("label", "").casefold() in (user.casefold(), preset.casefold(), "gmail", "한메일")
+           for box in boxes) or (not boxes and kind == "gmail"):
+        return False
+    boxes = boxes or [{"kind": "gmail", "label": "Gmail", "index": 0}]
+    boxes.append({"kind": kind, "label": user, "index": 0})
+    save_settings({"mailboxes": boxes})
+    return True
+
+
 class App:
     """Step 1: collect evidence, check what was read, rename and file it."""
 
@@ -2590,7 +2608,8 @@ class App:
             account.update(values)
             password.delete(0, "end")
             show_stored()
-            self.status.set("메일 계정을 저장했어요.")
+            added = add_search_mailbox(values.get("preset", ""), values.get("user", ""))
+            self.status.set("메일 계정을 저장했어요." + (" 브라우저 메일 검색 목록에도 넣었어요." if added else ""))
             return True
 
         def test():
@@ -2631,8 +2650,8 @@ class App:
             return
         account = mail_link.account_settings(load_settings())
         if not mail_link.configured(account):
-            self.notice("먼저 환경설정 → 메일 → ‘메일 계정 설정’에서 메일 주소와 앱 비밀번호를 넣으세요.", title="메일 첨부 가져오기",
-                        action=("메일 계정 설정", self.mail_account_dialog))
+            self.notice("먼저 환경설정 → 메일 → ‘메일 계정·앱 비밀번호’에서 메일 주소와 앱 비밀번호를 넣으세요.", title="메일 첨부 가져오기",
+                        action=("메일 계정·앱 비밀번호", self.mail_account_dialog))
             return
         try:
             secret = mail_link.load_password(account["user"])
@@ -2640,7 +2659,7 @@ class App:
             self.notice(str(error), kind="error")
             return
         if not secret:
-            self.notice("저장된 앱 비밀번호가 없어요. 환경설정 → 메일 → ‘메일 계정 설정’에서 넣으세요.", action=("메일 계정 설정", self.mail_account_dialog))
+            self.notice("저장된 앱 비밀번호가 없어요. 환경설정 → 메일 → ‘메일 계정·앱 비밀번호’에서 넣으세요.", action=("메일 계정·앱 비밀번호", self.mail_account_dialog))
             return
         seen_path = user_data_folder() / "mail-imports.json"
         days = load_settings().get("mail_days", 30)
@@ -2847,14 +2866,16 @@ class App:
         self.program_folder_rows(folders, 5, dialog)
         # 메일 ---------------------------------------------------------
         mail = page("메일")
-        if self.on_manage_mail:
-            ttk.Label(mail, text="메일 검색에 쓸 메일함", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
-            note(mail, "3단계 ‘메일 검색’이 이 목록의 메일함을 브라우저에서 열어요. Gmail 계정이 여러 개면 로그인 순서 번호를 적어요.", 1)
-            launcher(mail, 2, "메일 등록 (Gmail·한메일)", self.on_manage_mail)
-        ttk.Label(mail, text="메일 연결 (IMAP·SMTP)", font=FONT_BOLD).grid(row=3, column=0, sticky="w", pady=(22, 0))
+        # v1.15: the account with the app password comes first; the browser search list is a separate, simpler thing.
+        ttk.Label(mail, text="① 메일 계정 · 앱 비밀번호", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
         note(mail, "받은 메일의 인보이스 첨부를 가져오고(1단계 더보기 → 메일 첨부 가져오기), 세무사 알림 메일을 바로 보내요. "
-                   "앱 비밀번호는 Windows 자격 증명 관리자에 저장돼요(설정 파일에는 저장하지 않아요).", 4)
-        launcher(mail, 5, "메일 계정 설정", self.mail_account_dialog)
+                   "앱 비밀번호는 여기에서만 넣어요. Windows 자격 증명 관리자에 저장돼요(설정 파일에는 저장하지 않아요).", 1)
+        launcher(mail, 2, "메일 계정·앱 비밀번호…", self.mail_account_dialog)
+        if self.on_manage_mail:
+            ttk.Label(mail, text="② 브라우저 메일 검색 목록", font=FONT_BOLD).grid(row=3, column=0, sticky="w", pady=(22, 0))
+            note(mail, "3단계 ‘메일 검색’이 이 목록의 메일함을 브라우저 검색 화면으로 열어요(비밀번호 필요 없음). "
+                       "Gmail 계정이 여러 개면 브라우저에 로그인한 순서 번호를 적어요.", 4)
+            launcher(mail, 5, "메일 검색 목록…", self.on_manage_mail)
         # 명세서·계좌 ---------------------------------------------------
         if self.on_account_order:
             accounts = page("명세서·계좌")
