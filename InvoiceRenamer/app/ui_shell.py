@@ -164,6 +164,8 @@ class Shell:
         self.folder_check_job = None
         if not practice_folder:
             self.backup_on_new_version()
+            self.lock_job = None
+            root.after(900, self.start_shared_records)
             root.after(1500, self.remember_folder)
             root.bind("<FocusIn>", self.schedule_folder_check, add="+")
             root.bind("<F5>", lambda event: self.check_folder(force=True), add="+")
@@ -620,7 +622,57 @@ class Shell:
         """Closing the window: small automatic backup of the records first (if switched on)."""
         if self.close is not None:
             self.close.backup_now("종료")
+        import shared_data
+        if shared_data.active():
+            shared_data.release_lock()
         self.root.destroy()
+
+    # v1.15 records shared through a synced work folder ---------------------------
+    def start_shared_records(self):
+        import shared_data
+        from ui_theme import ask_yes_no, show_notice
+        status = shared_data.STATUS
+        if status["state"] == "missing":
+            show_notice(self.root, status["note"], kind="warn", title="공유 작업 기록")
+            return
+        if status["state"] != "shared":
+            folder = self.app.folder
+            if folder is not None and shared_data.has_records(folder) and ask_yes_no(
+                    "공유 작업 기록", f"이 작업 폴더에 다른 컴퓨터가 공유한 작업 기록(‘{shared_data.FOLDER_NAME}’)이 있어요.\n"
+                    "이 기록으로 열까요? 이 컴퓨터의 기존 기록은 지우지 않고 그대로 둬요.", parent=self.root,
+                    warnings=["다른 컴퓨터에서 프로그램을 닫고, Dropbox 동기화가 끝난(초록 체크) 뒤에 여세요."],
+                    ok="공유 기록으로 열기", cancel="이 컴퓨터 기록 쓰기"):
+                try:
+                    shared_data.join(folder)
+                except (OSError, ValueError) as error:
+                    show_notice(self.root, str(error), kind="error")
+                    return
+                restart_later(self.root)
+            return
+        other = shared_data.other_user()
+        if other and not ask_yes_no(
+                "다른 컴퓨터에서 사용 중", f"‘{other.get('computer', '다른 컴퓨터')}’에서 {other.get('since', '')}부터 "
+                "이 작업 기록을 쓰고 있어요.", parent=self.root,
+                warnings=["두 컴퓨터에서 함께 고치면 Dropbox가 기록을 두 벌로 나눠요(충돌 사본).",
+                          "다른 컴퓨터에서 프로그램을 닫고 동기화가 끝난 뒤 여는 게 안전해요."],
+                ok="그래도 열기", cancel="닫기"):
+            self.root.destroy()
+            return
+        self.keep_lock()
+        found = shared_data.conflicts()
+        if found:
+            show_notice(self.root, "Dropbox가 만든 충돌 사본이 있어요. 두 컴퓨터에서 같은 기록을 고친 흔적이에요:\n"
+                        + "\n".join(found[:6]) + "\n\n지금 기록이 맞는지 확인한 뒤, 필요 없으면 충돌 사본을 지우세요.",
+                        kind="warn", title="공유 작업 기록")
+        self.app.status.set(f"공유 작업 기록 사용 중 · {status['root']}")
+
+    def keep_lock(self):
+        import shared_data
+        try:
+            shared_data.hold_lock()
+        except OSError:
+            pass
+        self.lock_job = self.root.after(3 * 60 * 1000, self.keep_lock)
 
     def open_past_month(self):
         if self.close:

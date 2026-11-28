@@ -32,7 +32,9 @@ CURRENCIES = {"€": "EUR", "EUR": "EUR", "$": "USD", "USD": "USD", "£": "GBP",
 
 def storage_path():
     # v1.14: shared by every company profile (INVOICE_RENAMER_BASE is the real LOCALAPPDATA while another company is active)
-    base = os.environ.get("INVOICE_RENAMER_BASE") or os.environ.get("LOCALAPPDATA", Path.home())
+    # v1.15: in the shared records folder while the records are used on several computers
+    base = (os.environ.get("INVOICE_RENAMER_LEARNED") or os.environ.get("INVOICE_RENAMER_BASE")
+            or os.environ.get("LOCALAPPDATA", Path.home()))
     return Path(base) / "InvoiceRenamer" / "learned-formats.json"
 
 

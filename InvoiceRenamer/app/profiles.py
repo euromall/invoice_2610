@@ -62,6 +62,9 @@ def activate_at_start():
     root = profile_root(data["active"])
     root.mkdir(parents=True, exist_ok=True)
     os.environ["LOCALAPPDATA"] = str(root)
+    import shared_data  # v1.15: this company's records may live in the synced work folder
+    shared_data.deactivate_for_practice()
+    shared_data.activate(root)
     return active_name(data)
 
 

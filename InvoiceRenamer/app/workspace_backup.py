@@ -64,7 +64,7 @@ def create_backup(target, state, evidence_folder, attachments, edits):
     if evidence_folder and evidence_folder.is_dir():
         root = evidence_folder.resolve()
         choice = folder_settings()
-        statement_names = {STATEMENT_FOLDER, choice["statements"]["name"]}
+        statement_names = {STATEMENT_FOLDER, choice["statements"]["name"], "_월마감 기록"}  # v1.15: shared records are in the JSON part
         for path in evidence_folder.rglob("*"):
             if path.suffix.lower() in EVIDENCE_EXTENSIONS | {".md", ".xml"} and path.is_file() and not path.is_symlink():
                 if path.resolve().is_relative_to(root) and path.relative_to(evidence_folder).parts[0] not in statement_names:

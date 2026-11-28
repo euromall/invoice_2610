@@ -1105,6 +1105,74 @@ def run_v115_help():
     print(f"PASS: v1.15 mouse-over help for all {len(labels)} button and menu labels")
 
 
+def run_v115_shared():
+    """v1.15: work records in the synced work folder, used on two computers with different Dropbox paths."""
+    import os
+    import shutil
+    import time
+    import profiles
+    import shared_data
+    import learned_formats
+    import invoice_renamer as ir
+    with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": str(Path(scratch) / "A_local")}):
+        for name in (profiles.BASE_ENV, shared_data.LOCAL_ENV, shared_data.LEARNED_ENV):
+            os.environ.pop(name, None)
+        base = Path(scratch)
+        work_a = base / "A" / "Dropbox" / "월마감" / "작업폴더"
+        matched_a = base / "A" / "Dropbox" / "월마감" / "매칭완료"
+        work_a.mkdir(parents=True)
+        matched_a.mkdir(parents=True)
+        profiles.activate_at_start()
+        ir.save_settings({"work_folder": str(work_a), "program_folders": {
+            "matched": {"name": "매칭완료", "location": str(matched_a.parent)}, "statements": {"name": "명세서", "location": ""},
+            "excluded": {"name": "제외", "location": ""}}})
+        record = {"links": {"t1": [str(matched_a / "매칭완료_2611" / "a.pdf")]}, "sources": {"s": str(work_a / "명세서" / "nov.csv")}}
+        (ir.user_data_folder() / "monthly-close.json").write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        learned_formats.storage_path().write_text("{}", encoding="utf-8")
+        check(not shared_data.has_records(work_a), "v1.15 shared: nothing shared yet")
+        count = shared_data.start_sharing(work_a, ir.learned_data_folder())
+        check(count >= 2 and shared_data.has_records(work_a), f"v1.15 shared: records copied ({count})")
+        profiles.activate_at_start()
+        check(shared_data.active() and Path(os.environ["LOCALAPPDATA"]) == work_a / shared_data.FOLDER_NAME
+              and ir.work_folder() == work_a and learned_formats.storage_path().parent == work_a / shared_data.FOLDER_NAME / "InvoiceRenamer"
+              and ir.text_cache_folder().is_relative_to(base / "A_local"), "v1.15 shared: records, learned layouts shared; text cache local")
+        check(shared_data.FOLDER_NAME in ir.kept_apart_names(), "v1.15 shared: records folder is not read as invoices")
+        shared_data.hold_lock()
+        # computer B: the same Dropbox folder, synced to another path
+        work_b = base / "B" / "Users" / "kim" / "Dropbox" / "월마감" / "작업폴더"
+        shutil.copytree(base / "A" / "Dropbox", base / "B" / "Users" / "kim" / "Dropbox")
+        for name in (profiles.BASE_ENV, shared_data.LOCAL_ENV, shared_data.LEARNED_ENV):
+            os.environ.pop(name, None)
+        os.environ["LOCALAPPDATA"] = str(base / "B_local")
+        profiles.activate_at_start()
+        check(not shared_data.active() and shared_data.has_records(work_b), "v1.15 shared: B finds shared records")
+        shared_data.join(work_b)
+        with patch.object(shared_data, "this_computer", lambda: "B-PC"):
+            profiles.activate_at_start()
+            data = json.loads((ir.user_data_folder() / "monthly-close.json").read_text(encoding="utf-8"))
+            check(ir.work_folder() == work_b and data["links"]["t1"][0] == str(work_b.parent / "매칭완료" / "매칭완료_2611" / "a.pdf")
+                  and data["sources"]["s"] == str(work_b / "명세서" / "nov.csv")
+                  and ir.load_settings()["program_folders"]["matched"]["location"] == str(work_b.parent),
+                  f"v1.15 shared: paths of computer A changed to B {data}")
+            other = shared_data.other_user()
+            check(other is not None and other["computer"] != "B-PC", f"v1.15 shared: B sees A in use {other}")
+            check(shared_data.other_user(now=time.time() + shared_data.LOCK_FRESH + 5) is None, "v1.15 shared: old lock ignored")
+            conflict = ir.user_data_folder() / "monthly-close (B-PC's conflicted copy 2026-11-28).json"
+            conflict.write_text("{}", encoding="utf-8")
+            check(shared_data.conflicts() == [conflict.name], "v1.15 shared: conflicted copies found")
+            conflict.unlink()
+            shared_data.stop_sharing()
+        for name in (profiles.BASE_ENV, shared_data.LOCAL_ENV, shared_data.LEARNED_ENV):
+            os.environ.pop(name, None)
+        os.environ["LOCALAPPDATA"] = str(base / "B_local")
+        profiles.activate_at_start()
+        check(not shared_data.active() and (ir.user_data_folder() / "monthly-close.json").is_file()
+              and shared_data.has_records(work_b), "v1.15 shared: B back to its own copy, shared folder kept")
+        for name in (profiles.BASE_ENV, shared_data.LOCAL_ENV, shared_data.LEARNED_ENV):
+            os.environ.pop(name, None)
+    print("PASS: v1.15 shared work records (two computers, other Dropbox path, in-use mark, conflicted copies, stop)")
+
+
 if __name__ == "__main__":
     run()
     run_v113()
@@ -1116,3 +1184,4 @@ if __name__ == "__main__":
     run_v115_numbers()
     run_v115_mail()
     run_v115_help()
+    run_v115_shared()

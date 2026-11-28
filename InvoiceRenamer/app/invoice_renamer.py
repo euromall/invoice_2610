@@ -110,9 +110,14 @@ def shared_data_folder():
     return Path(os.environ.get("INVOICE_RENAMER_BASE") or os.environ.get("LOCALAPPDATA", Path.home())) / "InvoiceRenamer"
 
 
+def learned_data_folder():
+    """v1.15: learned layouts and seller patterns; in the shared records folder while it is used."""
+    return Path(os.environ.get("INVOICE_RENAMER_LEARNED") or shared_data_folder().parent) / "InvoiceRenamer"
+
+
 def header_sellers():
     patterns = list(HEADER_SELLERS)
-    path = shared_data_folder() / "seller-patterns.json"
+    path = learned_data_folder() / "seller-patterns.json"
     try:
         extra = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     except (OSError, ValueError):
@@ -1852,7 +1857,8 @@ def is_matched_folder(name, settings=None):
 def kept_apart_names(settings=None):
     """Folder names whose files are not invoices to work on (statements, excluded, old 중복), old and new names."""
     settings = settings or folder_settings()
-    return {STATEMENT_FOLDER, EXCLUDED_FOLDER, DUPLICATE_FOLDER, settings["statements"]["name"], settings["excluded"]["name"]}
+    return {STATEMENT_FOLDER, EXCLUDED_FOLDER, DUPLICATE_FOLDER, settings["statements"]["name"], settings["excluded"]["name"],
+            "_월마감 기록"}  # v1.15: shared work records (shared_data.FOLDER_NAME)
 
 
 def relocation_plan(kind, work, old, new):
@@ -2775,7 +2781,7 @@ class App:
         """Settings in tabs: 일반, 폴더, 메일, 명세서·계좌, 인보이스 양식, 사유, 자동 규칙 (v1.13)."""
         dialog = InlineDialog(self.root)
         dialog.title("환경설정")
-        dialog.geometry("840x600")
+        dialog.geometry("860x680")
         dialog.grab_set()
         tabs = ttk.Notebook(dialog)
         tabs.pack(fill="both", expand=True, padx=12, pady=(10, 0))
@@ -2833,6 +2839,7 @@ class App:
                         command=lambda: save_settings({"auto_backup": auto.get()})).grid(row=6, column=0, sticky="w")
         if not self.practice_folder:
             self.company_rows(general, 7, dialog)
+            self.shared_rows(general, 12, dialog)
         # 폴더 ---------------------------------------------------------
         folders = page("폴더")
         ttk.Label(folders, text="작업 폴더", font=FONT_BOLD).grid(row=0, column=0, sticky="w")
@@ -2913,6 +2920,76 @@ class App:
         titles = [tabs.tab(index, "text") for index in tabs.tabs()]
         if tab in titles:
             tabs.select(titles.index(tab))
+
+    def shared_rows(self, parent, row, dialog):
+        """v1.15 환경설정 → 일반: keep the work records in the synced work folder for use on several computers."""
+        import shared_data
+        ttk.Label(parent, text="여러 컴퓨터에서 쓰기 (Dropbox·OneDrive)", font=FONT_BOLD).grid(row=row, column=0, sticky="w",
+                                                                                     pady=(22, 4))
+        work = self.folder or work_folder()
+        line = ttk.Frame(parent)
+        line.grid(row=row + 2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        if shared_data.active():
+            text = (f"지금: 작업 기록을 작업 폴더의 ‘{shared_data.FOLDER_NAME}’에서 함께 써요. 같은 작업 폴더를 여는 다른 "
+                    "컴퓨터도 같은 기록을 봐요. 한 번에 한 컴퓨터에서만 여세요.")
+        elif shared_data.has_records(work):
+            text = (f"이 작업 폴더에 다른 컴퓨터가 공유한 작업 기록(‘{shared_data.FOLDER_NAME}’)이 있어요. "
+                    "이 컴퓨터는 아직 자기 기록을 써요.")
+        else:
+            text = ("지금: 작업 기록(매칭·메모·검수·설정·배운 양식)은 이 컴퓨터에만 있어요. 작업 폴더가 Dropbox 안이면 "
+                    "기록도 작업 폴더로 옮겨 여러 컴퓨터에서 같은 기록을 쓸 수 있어요. 앱 비밀번호는 컴퓨터마다 넣어요.")
+        ttk.Label(parent, text=text, style="Muted.TLabel", wraplength=700).grid(row=row + 1, column=0, columnspan=3, sticky="w")
+
+        def restart():
+            if self.on_restart:
+                self.on_restart()
+
+        def share():
+            if not ask_yes_no("여러 컴퓨터에서 쓰기", f"이 컴퓨터의 작업 기록을 작업 폴더의 ‘{shared_data.FOLDER_NAME}’로 복사하고, "
+                              "다음부터 그 기록을 써요. 프로그램을 닫았다가 다시 열어요.", parent=dialog,
+                              warnings=["다른 컴퓨터에서는 같은 작업 폴더를 고른 뒤 ‘이 폴더의 공유 기록 쓰기’를 누르세요.",
+                                        "두 컴퓨터에서 동시에 열지 마세요. 열면 경고가 나와요."],
+                              undo="이 컴퓨터의 원래 기록은 지우지 않아요. ‘이 컴퓨터만 쓰기’로 돌아올 수 있어요.",
+                              ok="옮기고 다시 열기"):
+                return
+            try:
+                count = shared_data.start_sharing(work, learned_data_folder())
+            except (OSError, ValueError) as error:
+                show_notice(dialog, str(error), kind="error")
+                return
+            self.status.set(f"작업 기록 파일 {count}개를 작업 폴더로 복사했어요.")
+            restart()
+
+        def use_shared():
+            if not ask_yes_no("공유 기록 쓰기", "이 작업 폴더의 공유 작업 기록으로 바꿔요. 프로그램을 닫았다가 다시 열어요.",
+                              parent=dialog, warnings=["다른 컴퓨터에서 프로그램을 닫고, 동기화가 끝난 뒤에 여세요."],
+                              undo="이 컴퓨터의 원래 기록은 그대로 남아요.", ok="바꾸고 다시 열기"):
+                return
+            try:
+                shared_data.join(work)
+            except (OSError, ValueError) as error:
+                show_notice(dialog, str(error), kind="error")
+                return
+            restart()
+
+        def stop():
+            if not ask_yes_no("이 컴퓨터만 쓰기", "공유 기록의 지금 내용을 이 컴퓨터로 복사하고, 다음부터 이 컴퓨터의 기록만 써요. "
+                              "작업 폴더의 공유 기록은 다른 컴퓨터를 위해 그대로 둬요.", parent=dialog,
+                              undo="이 컴퓨터의 예전 기록은 백업 폴더에 남겨요.", ok="바꾸고 다시 열기"):
+                return
+            try:
+                shared_data.stop_sharing()
+            except OSError as error:
+                show_notice(dialog, str(error), kind="error")
+                return
+            restart()
+
+        if shared_data.active():
+            ttk.Button(line, text="이 컴퓨터만 쓰기…", command=stop).pack(side="left")
+        elif shared_data.has_records(work):
+            ttk.Button(line, text="이 폴더의 공유 기록 쓰기…", command=use_shared).pack(side="left")
+        else:
+            ttk.Button(line, text="작업 기록을 작업 폴더로 옮기기…", command=share).pack(side="left")
 
     def company_rows(self, parent, row, dialog):
         """v1.14 회사 프로필: several businesses, each with its own work folder, statements, records and settings."""
@@ -4230,6 +4307,8 @@ def run_practice():
         shutil.copytree(examples, session)
         former = os.environ.get("LOCALAPPDATA")
         os.environ.pop("INVOICE_RENAMER_BASE", None)  # practice never touches the real data, not even shared data
+        os.environ.pop("INVOICE_RENAMER_LOCAL", None)
+        os.environ.pop("INVOICE_RENAMER_LEARNED", None)
         os.environ["LOCALAPPDATA"] = str(workspace / "data")
         try:
             from ui_shell import run_shell
