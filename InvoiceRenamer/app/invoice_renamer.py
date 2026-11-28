@@ -2198,7 +2198,7 @@ class App:
             ("휴대폰 사진 가져오기", self.import_photos),
             ("메일 첨부 가져오기", self.import_mail),
             ("배운 인보이스 양식", self.manage_learned),
-            ("제외 기록 보기", self.show_exclusion_log),
+            ("제외 내역…", self.show_exclusion_log),
             ("새로고침 (바뀐 파일만, F5)", lambda: self.load_folder()),
             ("전체 다시 읽기 (모든 파일)", self.reread_all),
             ("마크다운 다시 만들기", self.save_markdown),
@@ -2779,7 +2779,16 @@ class App:
         dialog.grab_set()
         tabs = ttk.Notebook(dialog)
         tabs.pack(fill="both", expand=True, padx=12, pady=(10, 0))
-        ttk.Button(dialog, text="닫기", command=dialog.destroy).pack(side="bottom", anchor="e", padx=12, pady=10)
+        dialog.close_checks = []  # v1.15: each returns False to keep the dialog open (unsaved changes)
+
+        def close_settings():
+            if all(check() for check in dialog.close_checks):
+                dialog.destroy()
+                return True
+            return False
+
+        dialog.protocol("WM_DELETE_WINDOW", close_settings)
+        ttk.Button(dialog, text="닫기", command=close_settings).pack(side="bottom", anchor="e", padx=12, pady=10)
 
         def page(title):
             frame = ttk.Frame(tabs, padding=18)
@@ -2791,8 +2800,8 @@ class App:
                                                                                    pady=(4, 0))
 
         def launcher(parent, row, text, command):
-            ttk.Button(parent, text=text, command=lambda: (dialog.destroy(), command())).grid(row=row, column=0, sticky="w",
-                                                                                              pady=(12, 0))
+            ttk.Button(parent, text=text, command=lambda: close_settings() and command()).grid(row=row, column=0, sticky="w",
+                                                                                               pady=(12, 0))
 
         # 일반 ---------------------------------------------------------
         general = page("일반")
@@ -2838,8 +2847,8 @@ class App:
                       f"제외 폴더 안에는 사유별 폴더({', '.join(EXCLUDE_REASONS)})가 생겨요.", 3)
         extra = ttk.Frame(folders)
         extra.grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Button(extra, text="제외 기록 보기", command=lambda: (dialog.destroy(), self.show_exclusion_log())).pack(side="left")
-        ttk.Button(extra, text="휴대폰 사진 폴더 정하기", command=lambda: (dialog.destroy(), self.import_photos(ask_folder=True))).pack(
+        ttk.Button(extra, text="제외 내역…", command=lambda: close_settings() and self.show_exclusion_log()).pack(side="left")
+        ttk.Button(extra, text="사진 폴더 선택…", command=lambda: close_settings() and self.import_photos(ask_folder=True)).pack(
             side="left", padx=8)
         sales = tk.StringVar(value=load_settings().get("sales_folder") or "")
         sales_text = tk.StringVar()
@@ -2861,8 +2870,8 @@ class App:
         sales_row = ttk.Frame(folders)
         sales_row.grid(row=8, column=0, columnspan=3, sticky="w", pady=(16, 0))
         ttk.Label(sales_row, textvariable=sales_text, wraplength=560).pack(side="left")
-        ttk.Button(sales_row, text="정하기", style="Small.TButton", command=pick_sales).pack(side="left", padx=6)
-        ttk.Button(sales_row, text="해제", style="Small.TButton", command=lambda: pick_sales(True)).pack(side="left")
+        ttk.Button(sales_row, text="폴더 선택…", style="Small.TButton", command=pick_sales).pack(side="left", padx=6)
+        ttk.Button(sales_row, text="사용 안 함", style="Small.TButton", command=lambda: pick_sales(True)).pack(side="left")
         self.program_folder_rows(folders, 5, dialog)
         # 메일 ---------------------------------------------------------
         mail = page("메일")
@@ -2984,8 +2993,10 @@ class App:
         fields = {}
         for line, (kind, (default, meaning)) in enumerate(PROGRAM_FOLDERS.items()):
             ttk.Label(table, text=meaning, style="Muted.TLabel").grid(row=line * 2, column=0, columnspan=4, sticky="w", pady=(6, 0))
-            name = ttk.Entry(table, width=16)
-            name.insert(0, current[kind]["name"])
+            typed = tk.StringVar(value=current[kind]["name"])
+            name = ttk.Entry(table, width=16, textvariable=typed)
+            name.typed = typed  # keep the variable alive with its entry
+            typed.trace_add("write", lambda *_args: mark_changed())
             name.grid(row=line * 2 + 1, column=0, sticky="w")
             place = tk.StringVar(value=current[kind]["location"])
             shown = tk.StringVar()
@@ -3002,12 +3013,47 @@ class App:
 
             show()
             ttk.Label(table, textvariable=shown, wraplength=470).grid(row=line * 2 + 1, column=1, sticky="w", padx=8)
-            ttk.Button(table, text="위치 바꾸기", style="Small.TButton", command=pick).grid(row=line * 2 + 1, column=2, padx=2)
-            ttk.Button(table, text="기본으로", style="Small.TButton",
+            ttk.Button(table, text="위치 선택…", style="Small.TButton", command=pick).grid(row=line * 2 + 1, column=2, padx=2)
+            ttk.Button(table, text="처음 값으로", style="Small.TButton",
                        command=lambda place=place, show=show, name=name, default=default: (
                            place.set(""), name.delete(0, "end"), name.insert(0, default), show())).grid(row=line * 2 + 1, column=3)
             fields[kind] = (name, place)
+            place.trace_add("write", lambda *_args: mark_changed())
         table.columnconfigure(1, weight=1)
+        saved_state = {"value": folder_settings()}
+        bar = ttk.Frame(parent)
+        bar.grid(row=row + 2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        changed_text = tk.StringVar()
+
+        def pending():
+            """{kind: (old, new)} of the rows changed on screen but not saved yet."""
+            old = saved_state["value"]
+            result = {}
+            for kind, (name, place) in fields.items():
+                now = {"name": name.get().strip(), "location": place.get()}
+                if now != old[kind]:
+                    result[kind] = (old[kind], now)
+            return result
+
+        def mark_changed():
+            changed_text.set("● 저장 안 됨" if pending() else "")
+
+        def describe(old, new):
+            parts = []
+            if old["name"] != new["name"]:
+                parts.append(f"이름 ‘{old['name']}’ → ‘{new['name']}’")
+            if old["location"] != new["location"]:
+                parts.append(f"위치 {old['location'] or '작업 폴더 안'} → {new['location'] or '작업 폴더 안'}")
+            return " · ".join(parts)
+
+        def unsaved_ok():
+            if not pending():
+                return True
+            return bool(ask_yes_no("저장하지 않은 변경", "폴더 이름·위치를 바꾼 것을 아직 저장하지 않았어요. 저장하지 않고 닫을까요?",
+                                   parent=dialog, ok="저장 안 하고 닫기", cancel="돌아가기"))
+
+        if hasattr(dialog, "close_checks"):
+            dialog.close_checks.append(unsaved_ok)
 
         def save():
             old = folder_settings()
@@ -3031,15 +3077,28 @@ class App:
             except OSError as error:
                 show_notice(dialog, f"기존 폴더를 읽지 못했어요: {error}", kind="error")
                 return
-            move = bool(pairs) and ask_yes_no(
-                "폴더 이름·위치", f"지금 있는 폴더의 파일 {len(pairs)}개를 새 이름·위치로 옮길까요?\n"
-                "옮기지 않으면 예전 폴더는 그대로 남아요. 다른 위치에 남은 매칭완료 파일은 3단계에서 읽지 않아요.",
-                parent=dialog, ok="옮기기", cancel="설정만 바꾸기")
+            meanings = {kind: meaning.split(" · ")[0] for kind, (_, meaning) in PROGRAM_FOLDERS.items()}
+            lines = [f"• {meanings.get(kind, kind)}: {describe(old[kind], new[kind])}" for kind in new if new[kind] != old[kind]]
+            message = "이렇게 바꿔요:\n" + "\n".join(lines)
+            if pairs:
+                answer = ask_yes_no("폴더 이름·위치 저장", message, parent=dialog, ok="저장", cancel="취소",
+                                    choices=[(f"지금 있는 파일 {len(pairs)}개도 새 이름·위치로 옮기기 (권장)", "move"),
+                                             ("설정만 바꾸기 (예전 폴더와 파일은 그대로, 3단계에서 읽지 않을 수 있어요)", "keep")],
+                                    undo="파일은 지우지 않고 옮기기만 해요. 다시 바꾸면 되돌릴 수 있어요.")
+                if not answer:
+                    return
+                move = answer == "move"
+            else:
+                if not ask_yes_no("폴더 이름·위치 저장", message + "\n옮길 파일은 없어요.", parent=dialog, ok="저장"):
+                    return
+                move = False
             try:
                 save_settings({"program_folders": new})
             except OSError as error:
                 show_notice(dialog, f"설정을 저장하지 못했어요: {error}", kind="error")
                 return
+            saved_state["value"] = new
+            mark_changed()
             moved, errors = [], []
             if move:
                 places = [work] + [entry["location"] for setting in (old, new) for entry in setting.values() if entry["location"]]
@@ -3059,7 +3118,8 @@ class App:
             if self.on_work_folder and self.folder is not None:
                 self.on_work_folder(self.folder)
 
-        ttk.Button(parent, text="폴더 이름·위치 저장", command=save).grid(row=row + 2, column=0, sticky="w", pady=(10, 0))
+        ttk.Button(bar, text="변경 내용 저장", style="Primary.TButton", command=save).pack(side="left")
+        ttk.Label(bar, textvariable=changed_text, foreground=COLORS["amber"]).pack(side="left", padx=10)
 
     def update_import_labels(self):
         """‘파일 가져오기 (복사)’ or ‘(이동)’: the button says what happens to the originals."""

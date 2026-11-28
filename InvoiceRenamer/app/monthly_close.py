@@ -5901,7 +5901,7 @@ class MonthlyClose:
             choices = [(f"{name} · {EXCLUDE_HELP[name]}", name) for name in EXCLUDE_REASONS if name != "나누기 원본"]
         names = "\n".join(f"• {doc.path.name[:60]}" for doc in docs[:5]) + (f"\n… 외 {len(docs) - 5}개" if len(docs) > 5 else "")
         answer = ask_yes_no("제외 폴더로", f"인보이스 {len(docs)}개를 ‘{EXCLUDED_FOLDER}/{reason or '사유'}’ 폴더로 옮길까요?\n{names}",
-                            parent=parent, warnings=warnings, undo="1단계 ‘정리 되돌리기’나 ‘제외 기록 보기’에서 되돌릴 수 있어요.",
+                            parent=parent, warnings=warnings, undo="1단계 ‘정리 되돌리기’나 ‘제외 내역’에서 되돌릴 수 있어요.",
                             ok="옮기기", choices=choices)
         if not answer:
             return False

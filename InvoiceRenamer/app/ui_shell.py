@@ -466,7 +466,7 @@ class Shell:
         dialog.title("작업 이력")
         dialog.geometry("1040x560")
         ttk.Label(dialog, text="거래 기록 변경과 제외 폴더 이동을 시간 순서로 보여 줘요. 되돌리기는 각 화면의 ‘해제’, "
-                               "1단계 ‘정리 되돌리기’, ‘제외 기록 보기’, ‘백업·복원’에서 해요.",
+                               "1단계 ‘정리 되돌리기’, ‘제외 내역’, ‘백업·복원’에서 해요.",
                   padding=(14, 10, 14, 6), wraplength=1000).pack(anchor="w")
         frame = ttk.Frame(dialog)
         frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
