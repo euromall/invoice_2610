@@ -1,0 +1,63 @@
+name: invoice-renamer-exe
+on:
+  push:
+    paths:
+      - 'InvoiceRenamer/**'
+      - '.github/workflows/invoice-renamer-exe.yml'
+  workflow_dispatch:
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: InvoiceRenamer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pyinstaller==6.11.1
+      - name: Smoke and regression tests
+        run: |
+          python tools/smoke_test.py
+          python tools/regression_test.py
+      - name: Bundle German and English OCR data
+        run: python app/setup_ocr.py
+      - name: Build InvoiceRenamer (folder and single EXE)
+        shell: pwsh
+        run: |
+          $app = Resolve-Path app
+          $common = @(
+            "--noconfirm", "--windowed", "--name", "InvoiceRenamer", "--paths", "$app",
+            "--hidden-import", "monthly_close", "--hidden-import", "tax_documents", "--hidden-import", "advisor_workbook",
+            "--hidden-import", "workspace_backup", "--hidden-import", "release_info", "--hidden-import", "ui_shell",
+            "--hidden-import", "ui_theme", "--hidden-import", "learned_formats", "--hidden-import", "mail_link", "--hidden-import", "profiles", "--hidden-import", "shared_data",
+            "--hidden-import", "keyring.backends.Windows", "--copy-metadata", "keyring",
+            "--splash", "tools\splash.png",
+            "--add-data", "$app\VERSION;.", "--add-data", "$app\사용법.txt;.", "--add-data", "$app\사용법.html;.",
+            "--add-data", "$app\Beispiele;Beispiele", "--add-data", "$app\tessdata;tessdata"
+          )
+          # v1.13: folder build (EXE + _internal) is the main download; the single EXE stays for comparison
+          pyinstaller @common --onedir --distpath dist "$app\invoice_renamer.py"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pyinstaller @common --onefile --distpath dist\single --workpath build\single "$app\invoice_renamer.py"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$app\사용법.html", "$app\사용법.txt" dist\InvoiceRenamer\
+          foreach ($need in @("InvoiceRenamer.exe", "사용법.html", "_internal\VERSION", "_internal\사용법.html",
+                              "_internal\tessdata\deu.traineddata", "_internal\Beispiele\Karte.csv")) {
+            if (-not (Test-Path "dist\InvoiceRenamer\$need")) { throw "missing in folder build: $need" }
+          }
+          Get-ChildItem dist\InvoiceRenamer | Format-Table Name, Length
+      - name: Build installer CMD and Windows ZIP
+        run: python tools/build_release.py --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: InvoiceRenamer-folder
+          path: InvoiceRenamer/dist/InvoiceRenamer/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: InvoiceRenamer-single-exe
+          path: |
+            InvoiceRenamer/dist/single/InvoiceRenamer.exe
+            InvoiceRenamer/dist/InvoiceRenamer-Setup.cmd
+            InvoiceRenamer/dist/invoice-renamer-monthly-close-windows.zip

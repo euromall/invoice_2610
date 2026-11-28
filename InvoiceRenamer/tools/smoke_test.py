@@ -1,0 +1,133 @@
+"""Exercise core flows using synthetic samples and disposable user data."""
+
+import csv
+from decimal import Decimal
+import io
+from pathlib import Path
+import sys
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+from zipfile import ZipFile
+
+from openpyxl import load_workbook
+
+
+APP = Path(__file__).resolve().parents[1] / "app"
+sys.path.insert(0, str(APP))
+
+from invoice_renamer import digest, export_markdown, source_locations
+from monthly_close import MonthlyClose, assign_numbers, candidates, index_pdfs, parse_transactions, read_csv
+from workspace_backup import add_attachment, create_backup, restore_workspace
+
+
+def check(condition, description):
+    if not condition:
+        raise AssertionError(description)
+
+
+def run():
+    with TemporaryDirectory() as scratch, patch.dict("os.environ", {"LOCALAPPDATA": scratch}):
+        root = Path(scratch)
+        source = APP / "Beispiele" / "Karte.csv"
+        folder = APP / "Beispiele" / "Belege"
+        _, rows = read_csv(source)
+        transactions, errors = parse_transactions(rows, (0, 1, 2, 3), "EUR", "DD/MM/YYYY", "Demo")
+        check(not errors and len(transactions) == 1, "Sample CSV import")
+        transaction = transactions[0]
+        check(transaction.amount == Decimal("58.39"), "German decimal comma")
+        documents, issues = index_pdfs(folder)
+        check(not issues and len(documents) == 1, "Sample PDF import")
+        document = documents[0]
+        check(candidates(transaction, documents, {}) == [document], "Matching by amount and reference")
+        check(source_locations(document.path, "58.39 EUR", "총액"), "Source amount location")
+
+        copied = root / document.path.name
+        copied.write_bytes(document.path.read_bytes())
+        markdown, incomplete = export_markdown(copied, ("2026-11-25", "Muster GmbH", "58.39 EUR"), document.number)
+        check("58,39" in markdown.read_text(encoding="utf-8") and not incomplete, "Markdown export")
+
+        supporting = root / "confirmation.txt"
+        supporting.write_text("Synthetic supporting material", encoding="utf-8")
+        app = MonthlyClose.__new__(MonthlyClose)
+        app.state_path = root / "state.json"
+        app.state = {"records": {}, "aliases": {}}
+        app.transactions = {transaction.key: transaction}
+        app.accounts = {transaction.key: "Demo"}
+        app.by_key = {document.key: document}
+        app.statement_sources = {digest(source): source}
+        app.errors, app.read_issues = [], []
+        assign_numbers(app.state["records"], transactions)
+        record = app.record(transaction.key)
+        record.update(links=[document.key], note="INTERNAL_ONLY", advisor_note="Bitte prüfen.",
+                      attachments=[add_attachment(app.attachment_folder(), supporting)])
+        check(app.status_for(transaction.key) == "금액 대조 완료", "Reconciliation status")
+
+        app.state["inquiries"] = [{"month": record["period"], "number": "611-001", "question": "Bitte Beleg prüfen",
+                                   "status": "답변 필요", "asked_at": "2026-11-26"},
+                                  {"month": "2001-01", "number": "", "question": "OTHER_MONTH", "status": "답변 필요"}]
+        app.state["cash"] = [{"id": "K2611-001", "month": record["period"], "day": "2026-11-20", "amount": "12.50", "currency": "EUR",
+                              "vendor": "Bäckerei", "purpose": "Bewirtung", "doc": document.key},
+                             {"id": "K2611-002", "month": record["period"], "day": "2026-11-21", "amount": "3", "currency": "EUR",
+                              "vendor": "Kiosk", "purpose": "", "doc": ""}]
+        package = root / "Monatsabschluss.zip"
+        app.write_package(package)
+        with ZipFile(package) as result:
+            check(result.testzip() is None, "Advisor ZIP integrity")
+            overview = result.read("01_Abgleich.csv").decode("utf-8-sig")
+            row = next(csv.DictReader(io.StringIO(overview), delimiter=";"))
+            check(row["Belegnummer"] == "611-001" and row["Betrag"] == "58,39", "Stable ID and localized CSV")
+            check("INTERNAL_ONLY" not in overview and "Bitte prüfen." in overview, "Memo separation")
+            check(any(path.startswith("Anlagen/") for path in result.namelist()), "Supporting attachment")
+            book = load_workbook(io.BytesIO(result.read("Abgleich.xlsx")))
+            check(book["Abgleich"]["F2"].data_type == "n" and book["Abgleich"]["I2"].hyperlink, "Excel amounts and file links")
+            inquiries = list(csv.DictReader(io.StringIO(result.read("12_Rueckfragen.csv").decode("utf-8-sig")), delimiter=";"))
+            check(len(inquiries) == 1 and inquiries[0]["Status"] == "Offen" and inquiries[0]["Rückfrage"] == "Bitte Beleg prüfen",
+                  f"v1.14 Rückfragen of the package month only {inquiries}")
+            cash = list(csv.DictReader(io.StringIO(result.read("13_Kasse.csv").decode("utf-8-sig")), delimiter=";"))
+            check([row["Kassennummer"] for row in cash] == ["K2611-001", "K2611-002"] and cash[0]["Betrag"] == "12,50"
+                  and cash[0]["Beleg im ZIP"].startswith("Kasse/") and cash[0]["Beleg im ZIP"] in result.namelist()
+                  and cash[1]["Beleg im ZIP"] == "ohne Beleg" and "Kasse" in book.sheetnames, f"v1.14 Kasse in the ZIP {cash}")
+            import pymupdf
+            with pymupdf.open(stream=result.read("00_Begleitschreiben.pdf")) as letter:
+                text = letter[0].get_text()
+            check("Kassenbelege: 2" in text and "Buchungen: 1" in text and "Offene Posten: 0" in text and "Bitte Beleg prüfen" in text and "OTHER_MONTH" not in text,
+                  f"v1.14 Begleitschreiben summary {text[:300]}")
+
+        import pymupdf
+        statement = root / "Auszug.pdf"
+        with pymupdf.open() as pdf:
+            pdf.new_page().insert_text((40, 80), "25.11. 25.11.   MUSTER GMBH RE-TEST-001   - 58,39", fontname="cour", fontsize=9)
+            pdf.save(statement)
+        app.statement_sources[digest(statement)] = statement
+        app.state["transaction_sources"] = {transaction.key: {digest(statement): statement.name}}
+        numbered_package = root / "Monatsabschluss-pdf.zip"
+        app.write_package(numbered_package)
+        with ZipFile(numbered_package) as result:
+            names = result.namelist()
+            check(any(name.endswith("_Auszug.pdf") for name in names), "Original PDF statement in ZIP")
+            check(any(name.endswith("_Auszug_nummeriert.pdf") for name in names), "Numbered PDF statement in ZIP")
+            load_workbook(io.BytesIO(result.read("Abgleich.xlsx")))
+        trimmed = root / "Monatsabschluss-auswahl.zip"
+        app.write_package(trimmed, omit={"nummeriert", "04_Importfehler.csv", "Hinweise.txt", "Belege", "01_Abgleich.csv", "00_Begleitschreiben.pdf"})
+        with ZipFile(trimmed) as result:
+            names = result.namelist()
+            check(not any(name.endswith("_nummeriert.pdf") for name in names) and "04_Importfehler.csv" not in names
+                  and "Hinweise.txt" not in names and "00_Begleitschreiben.pdf" not in names, "Parts left out of the ZIP")
+            check("01_Abgleich.csv" in names and any(name.startswith("Belege/") for name in names), "Required parts kept")
+        del app.statement_sources[digest(statement)]
+        del app.state["transaction_sources"]
+
+        app.state["session"] = {
+            "folder": str(folder), "sources": {digest(source): {"path": str(source)}},
+        }
+        backup = root / "workspace.zip"
+        count, missing = create_backup(backup, app.state, folder, app.attachment_folder(), {})
+        check(count == 3 and not missing, "Portable backup")
+        state, _, destination, missing = restore_workspace(backup, root)
+        check(not missing and state["records"][transaction.key]["note"] == "INTERNAL_ONLY", "Private state restored")
+        check(Path(state["statement_paths"][digest(source)]).is_relative_to(destination), "Restored paths relinked")
+    print("PASS: sample CSV/PDF, matching, source location, Markdown, German ZIP/Excel, attachment and workspace restore")
+
+
+if __name__ == "__main__":
+    run()
