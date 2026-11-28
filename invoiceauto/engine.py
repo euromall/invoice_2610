@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 
 from .names import romanize_name
 from .refdata import Company, Item, RefData
-from .shipping import Line, C_HAWB, C_UNIT_PRICE, C_HS
+from .shipping import Line, C_HAWB, C_UNIT_PRICE, C_HS, C_CUSTOMS_NO, C_MOBILE
 from .util import text, num, yymmdd
 
 CARRIER_POST = 'post'   # 우체국
@@ -224,7 +224,43 @@ def build_run(lines: List[Line], ref: RefData, settings: Settings) -> Run:
         ships = [s for s in shipments if s.company.uid == uid]   # tracking-number order
         invoices.append(CompanyInvoice(company=ships[0].company, invoice_no=f'{uid}-{suffix}', shipments=ships))
 
+    warnings.extend(input_checks(shipments))
     return Run(settings=settings, shipments=shipments, invoices=invoices, warnings=warnings)
+
+
+_CUSTOMS_PERSONAL = re.compile(r'^P\d{12}$')
+_MOBILE = re.compile(r'^01[016789]\d{7,8}$')
+
+
+def input_checks(shipments) -> List[str]:
+    """Things customs or the carrier reject, found before the files go out."""
+    out = []
+    for s in shipments:
+        first = s.first
+        who = f'{first.row}행 (주문 {s.order_no})'
+        customs = text(first.get(C_CUSTOMS_NO)).strip().upper()
+        digits = re.sub(r'\D', '', customs)
+        if not customs:
+            out.append(f'{who}: 개인통관고유부호가 비어 있습니다.')
+        elif not _CUSTOMS_PERSONAL.match(customs) and len(digits) != 10:
+            out.append(f'{who}: 개인통관고유부호 "{customs}" 형식이 맞지 않습니다 (P + 숫자 12자리, 사업자는 숫자 10자리).')
+        mobile = re.sub(r'\D', '', text(first.get(C_MOBILE)))
+        if mobile.startswith('82'):
+            mobile = '0' + mobile[2:]
+        elif mobile.startswith('1'):
+            mobile = '0' + mobile             # number cell: Excel dropped the leading 0
+        if not _MOBILE.match(mobile):
+            out.append(f'{who}: 휴대폰 번호 "{text(first.get(C_MOBILE))}" 형식이 맞지 않습니다.')
+        if s.weight <= 0:
+            out.append(f'{who}: 무게가 0입니다.')
+        for l in s.lines:
+            if l.item is None:
+                continue                      # already reported as not in Base.xlsx
+            if not l.declared_price:
+                out.append(f'{l.line.row}행: 상품 "{l.item.name}" 신고단가가 0입니다 (Base.xlsx newPrice {l.item.row}행).')
+            if not (l.item.singo_hs_code or text(l.line.get(C_HS)).strip()):
+                out.append(f'{l.line.row}행: 상품 "{l.item.name}" HS코드가 없습니다 (Base.xlsx newPrice {l.item.row}행).')
+    return out
 
 
 def _apply_fees(s: Shipment):

@@ -16,9 +16,10 @@ from PySide6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import db, compare
+from . import db, compare, update
 from .app import (Folder, Options, load_options, save_options, run_job, preview_run, person_candidates,
-                  worked_dates, previous_run, archive_run, RUN_DIR, ADDRESS_API, ADDRESS_OFFLINE)
+                  worked_dates, previous_run, archive_run, RUN_DIR, read_lock, write_lock, release_lock, old_backups, remove_backups,
+                  BACKUP_KEEP_DAYS, BACKUP_KEEP_NEWEST, ADDRESS_API, ADDRESS_OFFLINE)
 from .engine import MODE_PROFORMA, MODE_BILL, CARRIER_POST, CARRIER_CJ
 
 TITLE = 'InvoiceAuto · Euromall GmbH'
@@ -618,6 +619,27 @@ class MainWindow(QMainWindow):
         cl.addLayout(row)
         v.addWidget(c)
 
+        c, cl = card('백업 정리')
+        cl.addWidget(label(f'db, Result, ShippingInvoice의 backup 폴더에서 {BACKUP_KEEP_DAYS}일이 지난 백업을 지웁니다. '
+                           f'폴더마다 최근 {BACKUP_KEEP_NEWEST}개는 오래돼도 남깁니다.', 'Muted', wrap=True))
+        row = QHBoxLayout()
+        b = QPushButton('오래된 백업 찾기')
+        b.clicked.connect(self.clean_backups)
+        row.addWidget(b)
+        row.addStretch(1)
+        cl.addLayout(row)
+        v.addWidget(c)
+
+        c, cl = card('프로그램 업데이트')
+        cl.addWidget(label(f'지금 버전: {update.current_version()}', 'Muted'))
+        row = QHBoxLayout()
+        b = QPushButton('새 버전 확인')
+        b.clicked.connect(self.check_update)
+        row.addWidget(b)
+        row.addStretch(1)
+        cl.addLayout(row)
+        v.addWidget(c)
+
         row = QHBoxLayout()
         b1 = QPushButton('설정 저장')
         b1.clicked.connect(self.save_settings)
@@ -883,6 +905,57 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.page_work)
         self.nav_buttons['work'].setChecked(True)
         self.start_preview()
+
+    # maintenance
+    def clean_backups(self):
+        found = old_backups(self.folder)
+        if not found:
+            QMessageBox.information(self, TITLE, f'{BACKUP_KEEP_DAYS}일이 지난 백업이 없습니다.')
+            return
+        size = sum(n for _, n in found) / 1024 / 1024
+        if QMessageBox.question(self, TITLE, f'{BACKUP_KEEP_DAYS}일이 지난 백업 {len(found)}개 ({size:,.1f} MB)를 '
+                                f'지울까요?\n\n지운 파일은 Dropbox의 "삭제된 파일"에서 30일 동안 되살릴 수 있습니다.') \
+                != QMessageBox.Yes:
+            return
+        remove_backups([p for p, _ in found])
+        self.log(f'오래된 백업 {len(found)}개 ({size:,.1f} MB)를 지웠습니다.')
+        QMessageBox.information(self, TITLE, f'백업 {len(found)}개를 지웠습니다.')
+
+    def check_update(self):
+        target = update.install_dir()
+        if target is None:
+            QMessageBox.information(self, TITLE, '폴더형으로 설치된 프로그램(InvoiceAuto 폴더)에서만 업데이트할 수 있습니다.')
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            rel = update.latest_release()
+        except Exception as e:
+            rel, err = None, e
+        else:
+            err = None
+        finally:
+            QApplication.restoreOverrideCursor()
+        if err or rel is None:
+            QMessageBox.warning(self, TITLE, f'새 버전을 확인하지 못했습니다.\n{err or "올라온 버전이 없습니다."}')
+            return
+        version, url, notes = rel
+        if not update.is_newer(version, update.current_version()):
+            QMessageBox.information(self, TITLE, f'지금 버전({update.current_version()})이 최신입니다.')
+            return
+        if QMessageBox.question(self, TITLE, f'새 버전 {version} 이 있습니다 (지금 {update.current_version()}).\n\n'
+                                f'{notes[:600]}\n\n받아서 바꿀까요? 프로그램이 잠깐 닫혔다가 다시 열립니다. '
+                                '지금 버전은 InvoiceAuto_prev 폴더에 남습니다.') != QMessageBox.Yes:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            staged = update.download_and_stage(url)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, TITLE, f'새 버전을 받지 못했습니다.\n{e}')
+            return
+        QApplication.restoreOverrideCursor()
+        update.start_swap(staged, target)
+        QApplication.quit()
 
     # test tools
     def fresh_test_db(self):
@@ -1457,6 +1530,15 @@ class AccountWindow(RecordWindow):
         self.chk_unpaid.toggled.connect(lambda _: self.query())
         row.addSpacing(10)
         row.addWidget(self.chk_unpaid)
+        b = QPushButton('업체별 요약')
+        b.setToolTip('지금 기간의 업체별 견적·청구·입금과 받을 돈')
+        b.clicked.connect(self.show_summary)
+        row.addWidget(b)
+
+    def show_summary(self):
+        a, b = pydate(self.date_from.date()), pydate(self.date_to.date())
+        rows = db.account_rows(self.folder.db, a.isoformat(), b.isoformat(), self.company.currentData())
+        CompanySummaryDialog(self, a, b, db.company_summary(rows)).exec()
 
     def fetch(self, a, b, company):
         rows = db.account_rows(self.folder.db, a, b, company)
@@ -1514,6 +1596,68 @@ class AccountWindow(RecordWindow):
                 cell = ws.cell(r, col, v)
                 cell._style = copy(styles[col - 1])
         return wb
+
+
+class CompanySummaryDialog(QDialog):
+    COLS = [('company_uid', '업체'), ('count', '건수'), ('proforma', '견적'), ('release', '청구'), ('deposit', '입금'),
+            ('open', '받을 돈'), ('unpaid_count', '미결제 건수'), ('oldest_unpaid', '첫 미결제일')]
+
+    def __init__(self, parent, date_from, date_to, data):
+        super().__init__(parent)
+        self.data, self.date_from, self.date_to = data, date_from, date_to
+        self.setWindowTitle('업체별 요약')
+        self.resize(860, 520)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(22, 20, 22, 18)
+        v.addWidget(label(f'업체별 요약  ·  {date_from:%Y-%m-%d} ~ {date_to:%Y-%m-%d}', 'CardTitle'))
+        total_open = sum(d['open'] for d in data)
+        v.addWidget(label(f'받을 돈 합계 € {total_open:,.2f}  (미결제 청구 − 입금, EMG 제외, 받을 돈이 큰 순)', 'Muted'))
+        t = QTableWidget(len(data) + 1, len(self.COLS))
+        t.setHorizontalHeaderLabels([c[1] for c in self.COLS])
+        t.verticalHeader().setVisible(False)
+        t.setEditTriggers(QTableWidget.NoEditTriggers)
+        t.setShowGrid(False)
+        t.setAlternatingRowColors(True)
+        totals = {k: sum(d[k] for d in data) for k in ('count', 'proforma', 'release', 'deposit', 'open', 'unpaid_count')}
+        for r, d in enumerate(data + [dict(totals, company_uid='합계', oldest_unpaid='')]):
+            for c, (k, _) in enumerate(self.COLS):
+                val = d.get(k)
+                txt = f'{val:,.2f}' if isinstance(val, float) else ('' if val is None else str(val))
+                it = QTableWidgetItem(txt)
+                if isinstance(val, (int, float)):
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if k == 'open' and isinstance(val, float) and val > 0:
+                    it.setForeground(QColor('#8A1F1F'))
+                if r == len(data):
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
+                t.setItem(r, c, it)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(t, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b = QPushButton('엑셀로 내보내기')
+        b.clicked.connect(self.export)
+        row.addWidget(b)
+        b = QPushButton('닫기')
+        b.clicked.connect(self.accept)
+        row.addWidget(b)
+        v.addLayout(row)
+
+    def export(self):
+        name = f'업체별요약_{self.date_from:%Y%m%d}-{self.date_to:%Y%m%d}.xlsx'
+        path, _ = QFileDialog.getSaveFileName(self, '엑셀로 내보내기', name, 'Excel (*.xlsx)')
+        if not path:
+            return
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = '업체별 요약'
+        ws.append([c[1] for c in self.COLS])
+        for d in self.data:
+            ws.append([d.get(k) for k, _ in self.COLS])
+        wb.save(path)
+        open_path(path)
 
 
 class StockWindow(RecordWindow):
@@ -1643,6 +1787,24 @@ def main():
     server.listen(name)
 
     setup_app(app)
+    other = read_lock(root)
+    if other:
+        close_splash()
+        m = QMessageBox(QMessageBox.Warning, TITLE,
+                        f"다른 컴퓨터({other.get('computer')})에서 InvoiceAuto를 쓰고 있습니다.\n"
+                        f"마지막 확인: {other['heartbeat_time']:%Y-%m-%d %H:%M}\n\n"
+                        "두 컴퓨터에서 동시에 작업하면 Dropbox가 회계 장부(db)를 두 개로 갈라 놓을 수 있습니다.\n"
+                        "그 컴퓨터에서 프로그램을 닫은 뒤 여는 것이 안전합니다.")
+        b_open = m.addButton('그래도 열기', QMessageBox.DestructiveRole)
+        m.addButton('닫기', QMessageBox.RejectRole)
+        m.exec()
+        if m.clickedButton() is not b_open:
+            return
+    write_lock(root)
+    beat = QTimer()
+    beat.timeout.connect(lambda: write_lock(root))
+    beat.start(2 * 60 * 1000)
+    app.aboutToQuit.connect(lambda: release_lock(root))
     w = MainWindow(Folder(root))
 
     def on_connection():

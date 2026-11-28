@@ -336,3 +336,104 @@ def archive_run(folder: Folder, path: str) -> str:
     dest = os.path.join(dest_dir, f'{os.path.basename(path)}_{dt.datetime.now():%Y%m%d_%H%M%S}')
     shutil.move(path, dest)
     return dest
+
+
+# --- in use by another computer (Dropbox shares the folder, not the running program) -------------
+
+LOCK_NAME = 'InvoiceAuto.lock'
+LOCK_STALE_MINUTES = 10      # a lock not refreshed for this long belongs to a program that is gone
+
+
+def _me():
+    import socket
+    import getpass
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = ''
+    return socket.gethostname(), user
+
+
+def read_lock(root):
+    """The lock of another computer that is still fresh, as a dict, else None."""
+    import json
+    path = os.path.join(root, LOCK_NAME)
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if data.get('computer') == _me()[0]:
+        return None
+    try:
+        beat = dt.datetime.fromisoformat(data.get('heartbeat', ''))
+    except ValueError:
+        return None
+    if dt.datetime.now() - beat > dt.timedelta(minutes=LOCK_STALE_MINUTES):
+        return None
+    data['heartbeat_time'] = beat
+    return data
+
+
+def write_lock(root):
+    """Marks the folder as in use by this computer; called at start and every few minutes."""
+    import json
+    computer, user = _me()
+    path = os.path.join(root, LOCK_NAME)
+    try:
+        with open(path + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump({'computer': computer, 'user': user, 'pid': os.getpid(),
+                       'heartbeat': dt.datetime.now().isoformat(timespec='seconds')}, f)
+        os.replace(path + '.tmp', path)
+    except OSError:
+        pass
+
+
+def release_lock(root):
+    import json
+    path = os.path.join(root, LOCK_NAME)
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        if data.get('computer') == _me()[0] and data.get('pid') == os.getpid():
+            os.remove(path)
+    except (OSError, ValueError):
+        pass
+
+
+# --- old backups -------------------------------------------------------------------------------------
+
+BACKUP_KEEP_DAYS = 90
+BACKUP_KEEP_NEWEST = 20       # always kept, however old
+
+
+def old_backups(folder: Folder, days=BACKUP_KEEP_DAYS, keep=BACKUP_KEEP_NEWEST, now=None):
+    """Backups older than `days` in db/backup, Result/backup, Result_test/backup and ShippingInvoice/backup,
+    except the newest `keep` of each folder. Returns [(path, size_bytes)]."""
+    now = now or dt.datetime.now()
+    limit = (now - dt.timedelta(days=days)).timestamp()
+    out = []
+    for d in (os.path.join(folder.root, 'db', 'backup'), os.path.join(folder.root, 'Result', 'backup'),
+              os.path.join(folder.root, 'Result_test', 'backup'), os.path.join(folder.shipping, 'backup')):
+        if not os.path.isdir(d):
+            continue
+        entries = [os.path.join(d, n) for n in os.listdir(d)]
+        entries.sort(key=os.path.getmtime, reverse=True)
+        for p in entries[keep:]:
+            if os.path.getmtime(p) < limit:
+                out.append((p, _size(p)))
+    return out
+
+
+def _size(p):
+    if os.path.isfile(p):
+        return os.path.getsize(p)
+    return sum(os.path.getsize(os.path.join(a, f)) for a, _, fs in os.walk(p) for f in fs)
+
+
+def remove_backups(paths):
+    for p in paths:
+        if os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+        elif os.path.exists(p):
+            os.remove(p)

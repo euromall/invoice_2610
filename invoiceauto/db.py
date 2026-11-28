@@ -151,3 +151,29 @@ def save_stock_row(path, row: dict):
 def delete_stock_row(path, seq):
     with closing(connect(path)) as con, con:
         con.execute('DELETE FROM tb_stock WHERE seq = ?', (seq,))
+
+
+def company_summary(rows):
+    """Per company: 견적, 청구, 입금 and 받을 돈 (unpaid 청구 − 입금), from account_rows. EMG (the export total) is left out."""
+    out = {}
+    for r in rows:
+        uid = r.get('company_uid') or ''
+        if uid == 'EMG':
+            continue
+        s = out.setdefault(uid, {'company_uid': uid, 'count': 0, 'proforma': 0.0, 'release': 0.0, 'deposit': 0.0,
+                                 'open': 0.0, 'unpaid_count': 0, 'oldest_unpaid': None})
+        rel, dep = float(r.get('release_amount') or 0), float(r.get('deposit_amount') or 0)
+        s['count'] += 1
+        s['proforma'] += float(r.get('profomal_amount') or 0)
+        s['release'] += rel
+        s['deposit'] += dep
+        if str(r.get('status_cd')) == STATUS_UNPAID and rel:
+            s['open'] += rel - dep
+            s['unpaid_count'] += 1
+            ymd = r.get('ymd')
+            if ymd and (s['oldest_unpaid'] is None or ymd < s['oldest_unpaid']):
+                s['oldest_unpaid'] = ymd
+    for s in out.values():
+        for k in ('proforma', 'release', 'deposit', 'open'):
+            s[k] = round(s[k], 2)
+    return sorted(out.values(), key=lambda s: (-s['open'], s['company_uid'].upper()))
